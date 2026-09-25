@@ -2,8 +2,7 @@
 
 The chebyshev basis used to encode formal charges is bounded only inside the range,
 so a formal charge of +7 (found in MatPES) reached T_8(1.75) ~ 5e3, giving charge 
-transfers of ~1e3 e at random initialisation. charge transfers of ~1e3 e at random
-initialisation.
+transfers of ~1e3 e at random initialisation.
 """
 
 import numpy as np
