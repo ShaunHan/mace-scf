@@ -146,7 +146,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--oxidation_state_range",
         type=str,
-        default="(-6.0, 6.0)",
+        default="(-4.0, 4.0)",
     )
     parser.add_argument(
         "--polarizable_charges",
