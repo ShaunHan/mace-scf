@@ -49,7 +49,7 @@ class OxidationStateEmbeddingBlock(torch.nn.Module):
     def __init__(
         self, 
         node_feats_irreps: o3.Irreps, 
-        oxidation_state_range: Tuple[float, float] = (-4.,4.),
+        oxidation_state_range: Tuple[float, float],
         num_basis_oxidation=8
     ):
         super().__init__()
