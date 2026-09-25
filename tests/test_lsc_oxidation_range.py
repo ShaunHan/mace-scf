@@ -87,3 +87,33 @@ def test_transfer_blocks_require_the_range():
                 max_l=1,
                 num_elements=2,
             )
+
+
+def _collections(train_charges=(), valid_charges=()):
+    from types import SimpleNamespace
+
+    def configs(charge_lists):
+        return [SimpleNamespace(properties={"charges": np.asarray(q)}) for q in charge_lists]
+
+    return SimpleNamespace(train=configs(train_charges), valid=configs(valid_charges), tests=[])
+
+
+def test_loading_warns_about_charges_outside_the_range(caplog):
+    from mace_scf.utils.load_data import check_formal_charges_in_oxidation_state_range
+
+    collections = _collections(train_charges=[[1.0, -2.0], [7.0, -1.0]], valid_charges=[[4.0, -4.0]])
+    with caplog.at_level("WARNING"):
+        check_formal_charges_in_oxidation_state_range(collections, (-4.0, 4.0))
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1  # valid lies on the boundary, which is in range
+    assert "1/4 atoms" in warnings[0] and "split=train" in warnings[0]
+    assert "observed range=(-2, 7)" in warnings[0]
+
+
+def test_loading_is_silent_when_charges_are_in_range(caplog):
+    from mace_scf.utils.load_data import check_formal_charges_in_oxidation_state_range
+
+    collections = _collections(train_charges=[[7.0, -8.0]])
+    with caplog.at_level("WARNING"):
+        check_formal_charges_in_oxidation_state_range(collections, RANGE)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
