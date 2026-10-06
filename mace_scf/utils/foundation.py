@@ -66,7 +66,7 @@ def calibration_loader(loader, maximum=64):
 
 def condition_energy(model, loader, device):
     """Calibrate the deployed total-energy reference without changing forces."""
-    from mace_scf.electrostatics.potential import evaluate_variational
+    from mace_scf.electrostatics.potential import evaluate_electronic
     features, residuals, weights, mu_errors, mu_weights, charges = [], [], [], [], [], []
     states = [p.requires_grad for p in model.parameters()]
     try:
@@ -74,7 +74,7 @@ def condition_energy(model, loader, device):
         for batch in calibration_loader(loader):
             batch = batch.to(device)
             with torch.no_grad():
-                output = evaluate_variational(model, batch.to_dict(), steps=50, compute_force=False)
+                output = evaluate_electronic(model, batch.to_dict(), steps=50, compute_force=False)
             counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)
             n = counts.sum(-1)
             features.append(counts/n[:, None])
@@ -91,7 +91,7 @@ def condition_energy(model, loader, device):
             with torch.no_grad():
                 model.fermi_level_offset.add_(shift.to(model.fermi_level_offset))
             b = b+shift*torch.cat(charges).double()
-            logging.info("Training-only electronic gauge initialization: offset correction %.6g eV", float(shift))
+            logging.info("Training-only EF reference initialization: offset correction %.6g eV", float(shift))
         use = (w>0)&torch.isfinite(b)
         if bool(use.any()):
             a, b, w = a[use], b[use], w[use].sqrt()
@@ -105,3 +105,111 @@ def condition_energy(model, loader, device):
     finally:
         for p, flag in zip(model.parameters(), states):
             p.requires_grad_(flag)
+
+
+def condition_readouts(model, loader, device, fit_forces=True):
+    """Restore v366's fixed readout units and local-force initialization.
+
+    Fit a single nonnegative local energy scale on training forces when a
+    foundation is transferred. Fold that scale into its output weights before
+    optimizer creation. RMS input units are rotation invariant and fixed; an
+    exact inverse change of energy-readout weights preserves its initial E/F.
+    Density readouts are zero at this point, so their initial function is also
+    preserved. No backbone tensor-product weights or validation labels change.
+    """
+    if not hasattr(model, 'readout_feature_units'):
+        return
+    irreps = [o3.Irreps(str(p.linear.irreps_out)) for p in model.products]
+    sums = [model.readout_feature_units.new_zeros(len(rep)) for rep in irreps]
+    count = model.readout_feature_units.new_zeros(())
+    pp, py, yy, force_count = [count.clone() for _ in range(4)]
+    atom_weights = None
+    hooks = []
+    flags = [p.requires_grad for p in model.parameters()]
+    was_training = model.training
+    def collect(index):
+        def hook(module, inputs, output):
+            value = output.detach()
+            if not bool(torch.isfinite(value).all()):
+                raise FloatingPointError('Nonfinite readout features before conditioning')
+            for j,sl in enumerate(irreps[index].slices()):
+                sums[index][j] += (value[:,sl].square().mean(-1)*atom_weights).sum()
+        return hook
+    try:
+        model.eval(); model.requires_grad_(False)
+        for index, module in enumerate(model.products):
+            hooks.append(module.register_forward_hook(collect(index)))
+        for batch in calibration_loader(loader):
+            data=batch.to(device).to_dict()
+            sizes=(data['ptr'][1:]-data['ptr'][:-1]).to(data['positions'])
+            atom_weights=(data['weight'].reshape(-1)/sizes)[data['batch']]
+            force_weight=data['weight']*data['forces_weight']
+            compute_force=fit_forces and hasattr(model,'foundation_element_map') and bool((force_weight>0).any())
+            with torch.set_grad_enabled(compute_force):
+                local=model.local_part(data,compute_force=compute_force)
+                if compute_force:
+                    force=-torch.autograd.grad(local.energies.sum(),data['positions'])[0]
+                    weights=force_weight[data['batch']][:,None].expand_as(force)
+                    use=weights>0
+                    p,y,w=force.detach()[use],data['forces'][use],weights[use]
+                    if not bool(torch.isfinite(p).all() & torch.isfinite(y).all()):
+                        raise FloatingPointError('Nonfinite observed local forces before conditioning')
+                    pp+=(w*p.square()).sum();py+=(w*p*y).sum();yy+=(w*y.square()).sum();force_count+=w.sum()
+            count+=data['weight'].sum()
+        with torch.no_grad():
+            if force_count>0 and pp>0:
+                scale=(py/pp).clamp_min(0.)
+                seen=set()
+                for readout in model.readouts:
+                    output=getattr(readout,'linear_2',getattr(readout,'linear',None))
+                    if output is None:
+                        raise TypeError('Cannot identify the final energy readout for conditioning')
+                    for parameter in output.parameters():
+                        if id(parameter) not in seen:
+                            parameter.mul_(scale);seen.add(id(parameter))
+                logging.info('Training-only foundation force scale: %.6g; local F RMSE %.6g -> %.6g eV/A; folded into readout weights',
+                    float(scale),float(((pp-2*py+yy)/force_count).clamp_min(0).sqrt()),
+                    float(((scale.square()*pp-2*scale*py+yy)/force_count).clamp_min(0).sqrt()))
+            # A shared energy head must use one unit set across all layers.
+            if len(model.readouts)==1:
+                shared=sum(sums)/len(sums);sums=[shared for _ in sums]
+            units=[(1.+value/count.clamp_min(1.e-30)).sqrt() for value in sums]
+            seen=set()
+            for index,(rep,unit) in enumerate(zip(irreps,units)):
+                readout=model.readouts[0 if len(model.readouts)==1 else index]
+                first=getattr(readout,'linear_1',getattr(readout,'linear',None))
+                if first is None or not hasattr(first,'weight_views'):
+                    raise TypeError('Energy readout needs an equivariant linear input map for exact unit folding')
+                if id(first) not in seen:
+                    last=getattr(readout,'linear_2',first)
+                    zero_output=all(not bool(parameter.any()) for parameter in last.parameters())
+                    # A rejected pretrained energy head is already identically
+                    # zero. Retain bounded hidden coordinates, as in v366;
+                    # recreating its old large hidden activations would defeat
+                    # conditioning on the first nonzero output-weight update.
+                    if not zero_output:
+                        by_irrep={ir: value for (_,ir),value in zip(rep,unit)}
+                        for _,instruction,weight in first.weight_views(yield_instruction=True):
+                            if instruction.i_in>=0:
+                                weight.mul_(by_irrep[first.irreps_in[instruction.i_in].ir])
+                    seen.add(id(first))
+                expanded=torch.cat([value.expand(mul*ir.dim) for (mul,ir),value in zip(rep,unit)])
+                model.readout_feature_units[index].copy_(expanded)
+            logging.info('Fixed training-geometry readout units by layer/irrep: %s; initial energy function preserved by inverse weight transformation',
+                         [unit.tolist() for unit in units])
+    finally:
+        for hook in hooks:hook.remove()
+        for p,flag in zip(model.parameters(),flags):p.requires_grad_(flag)
+        model.train(was_training)
+
+
+def set_foundation_stage(model, frozen):
+    """Train new heads before unfreezing the transferred feature extractor."""
+    if not isinstance(frozen,bool):
+        raise TypeError('freeze_foundation_backbone must be bool')
+    if not hasattr(model,'foundation_element_map'):
+        if frozen:raise ValueError('freeze_foundation_backbone requires foundation_model')
+        return
+    for name in ('node_embedding','interactions','products'):
+        getattr(model,name).requires_grad_(not frozen)
+    logging.info('Foundation feature extractor frozen=%s; energy/electronic readouts remain trainable',frozen)

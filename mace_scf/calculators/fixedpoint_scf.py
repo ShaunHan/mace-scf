@@ -185,12 +185,14 @@ class MACEFixedPointSCF(Calculator):
         ).to(self.device)
         self.model.kspace_cutoff *= adjust_kspace_cutoff
         response = getattr(self.model, "field_dependent_charges_map", None)
-        if getattr(response, "variational", False):
+        if getattr(response, "spectral", False):
             from dataclasses import replace
             if scf_options is None or "num_scf_steps" not in scf_options:
                 self.scf_options = replace(self.scf_options, num_scf_steps=int(response.deployment_steps))
+            if getattr(response, 'coupled', False) and (scf_options is None or 'mixing_parameter' not in scf_options):
+                self.scf_options = replace(self.scf_options, mixing_parameter=float(response.deployment_mixing))
             if use_compile:
-                raise ValueError("VariationalResponse currently uses the differentiable eager solver; use_compile=False")
+                raise ValueError("Spectral responses currently use the differentiable eager solver; use_compile=False")
 
 
         if isinstance(self.model, FixedPoint) and not isinstance(
@@ -208,7 +210,7 @@ class MACEFixedPointSCF(Calculator):
             pbc_handling=pbc_handling,
             jellium_slab_bounds=jellium_slab_bounds,
         )
-        if compensating_jellium and not getattr(response, "variational", False):
+        if compensating_jellium and not getattr(response, "spectral", False):
             self._apply_compensating_jellium(
                 self.model,
                 slab_bounds=jellium_slab_bounds,
@@ -411,7 +413,7 @@ class MACEFixedPointSCF(Calculator):
 
     def _run_model(self, batch, restart_state):
         batch_dict = batch.to_dict()
-        if getattr(self.model.field_dependent_charges_map, "variational", False):
+        if getattr(self.model.field_dependent_charges_map, "spectral", False):
             if self.compensating_jellium:
                 batch_dict["counter_charge"] = -batch_dict["total_charge"]
                 batch_dict["counter_slab_bounds"] = batch_dict["positions"].new_tensor(self.jellium_slab_bounds).reshape(1,2)
@@ -482,7 +484,7 @@ class MACEFixedPointSCF(Calculator):
         }
 
     def _handle_scf_status(self, diagnostics):
-        if getattr(self.model.field_dependent_charges_map, "variational", False):
+        if getattr(self.model.field_dependent_charges_map, "spectral", False):
             residual = diagnostics["final_abs_difference"]
             if not np.isfinite(residual):
                 raise FloatingPointError("Nonfinite electronic solve residual")

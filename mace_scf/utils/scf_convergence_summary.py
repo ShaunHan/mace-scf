@@ -636,8 +636,9 @@ def create_scf_convergence_summary(
     if not is_fixed_point_model(module):
         return "SCF convergence summary skipped: model is not FixedPoint/FixedPointCore."
 
-    if getattr(module.field_dependent_charges_map, 'variational', False):
-        from mace_scf.electrostatics.potential import evaluate_variational
+    if getattr(module.field_dependent_charges_map, 'spectral', False):
+        from mace_scf.electrostatics.potential import evaluate_electronic
+        from mace_scf.electrostatics.coupled_solver import SCFConvergenceError, SCFNumericalError
         import json
         module.eval()
         module.requires_grad_(False)
@@ -650,9 +651,9 @@ def create_scf_convergence_summary(
                 outputs, row = {}, {}
                 for steps in (50, 100):
                     try:
-                        output = evaluate_variational(module, data, steps=steps, compute_force=True, mode=mode)
+                        output = evaluate_electronic(module, data, steps=steps, compute_force=True, mode=mode)
                     except RuntimeError as exc:
-                        if 'Electronic linear solve did not converge' not in str(exc):
+                        if not isinstance(exc,(SCFConvergenceError,SCFNumericalError)) and 'Electronic linear solve did not converge' not in str(exc):
                             raise
                         row[f'failure_{steps}'] = str(exc)
                     else:

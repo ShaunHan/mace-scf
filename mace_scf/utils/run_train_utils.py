@@ -224,15 +224,36 @@ def build_model(
     if foundation is not None:
         install_foundation(model, foundation)
         del foundation
-    if getattr(getattr(model, "field_dependent_charges_map", None), "variational", False):
+    response = getattr(model, "field_dependent_charges_map", None)
+    if getattr(response, "spectral", False):
         from mace_scf.electrostatics.potential import initialize_response
-        first_mode = args.train_schedule[0]["fixed_point_training_options"].mode
-        model.field_dependent_charges_map.deployment_mode = (
-            "unroll_scf" if first_mode == "shortcut_scf" else first_mode)
-        model.lr_source_maps = torch.nn.ModuleList([torch.nn.Identity() for _ in model.interactions])
+        options = args.train_schedule[0]["fixed_point_training_options"]
+        response.deployment_mode = "unroll_scf" if options.mode == "shortcut_scf" else options.mode
+        if getattr(response, "coupled", False):
+            from mace_scf.electrostatics.coupled import initialize_coupled
+            response.deployment_mixing.fill_(options.scf.mixing_parameter)
+            # A fresh electronic response starts at the foundation local E/F.
+            # Its moment readouts remain trainable, in the correct species basis.
+            with torch.no_grad():
+                for block in model.lr_source_maps:
+                    output = getattr(block,'linear_2',getattr(block,'linear',None))
+                    if output is None:
+                        raise TypeError('Cannot identify the terminal density readout')
+                    for parameter in output.parameters():
+                        parameter.zero_()
+            initialize = initialize_coupled
+        else:
+            model.lr_source_maps = torch.nn.ModuleList([torch.nn.Identity() for _ in model.interactions])
+            initialize = initialize_response
         model.local_electron_energy = torch.nn.Identity()
         model = model.to(args.device)
-        initialize_response(model, train_loader, args.device)
+        if getattr(response, 'coupled', False):
+            from mace_scf.utils.foundation import condition_readouts
+            condition_readouts(model, train_loader, args.device,
+                fit_forces=args.train_schedule[0]['loss'].get('forces',{}).get('weight',0)>0)
+            initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
+        else:
+            initialize(model, train_loader, args.device)
         condition_energy(model, train_loader, args.device)
     return model
 

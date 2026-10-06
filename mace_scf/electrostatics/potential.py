@@ -35,6 +35,7 @@ class VariationalResponse(nn.Module):
     """
 
     variational = True
+    spectral = True
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements,
                  potential_widths=(), **kwargs):
@@ -196,7 +197,8 @@ class SpectralGeometry:
         # Use the adjoint of the ACTUAL retained boundary field. Replacing
         # this with unwrapped z would change its uniform gauge and finite-grid
         # response, breaking the energy/EF/potential conjugacy for charged cells.
-        self.normal_moment = self.adjoint(self.ramp(torch.ones_like(self.volume)))
+        if not getattr(self.response, 'coupled', False):
+            self.normal_moment = self.adjoint(self.ramp(torch.ones_like(self.volume)))
         self.applied = self.ramp((self.external*self.normal).sum(-1))
         parallel = self.external-(self.external*self.normal).sum(-1)[:, None]*self.normal
         if bool((parallel.abs().max(-1).values > 1.e-10).any()):
@@ -570,9 +572,14 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
               "potential_coefficients": geom.unpack(state[..., response.coarse_dim:]),
               "esps": None, "esps_dft": None,
               "charges_history": geom.unpack(state[..., :response.coarse_dim])[..., None]}
+    return attach_observations(data, geom, output)
+
+
+def attach_observations(data, geom, output):
+    """Attach measured labels after prediction, using the same retained grid."""
     # Labels are attached only AFTER computing the physical state/observables.
     for key in ("fourier_density", "fourier_potential", "fourier_proto_potential"):
-        target_fft = _target_fft(data, key, key+"_shape", geom.shape, positions.dtype)
+        target_fft = _target_fft(data, key, key+"_shape", geom.shape, geom.wave.dtype)
         if target_fft is not None:
             output[key+"_dft"] = target_fft
             output[key+"_dft_mask"] = target_mode_mask(data[key+"_shape"], geom.modes)
@@ -580,7 +587,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     proto = output.get("fourier_proto_potential_dft")
     if phi is not None:
         output["potential_mode_weight"] = potential_mode_weights(geom.wave, geom.cell, geom.pbc,
-            data.get("potential_weight", positions.new_ones((len(mu), 3))).reshape(-1, 3), geom.mask)
+            data.get("potential_weight", geom.wave.new_ones((len(output["energy"]), 3))).reshape(-1, 3), geom.mask)
     if phi is not None and proto is not None:
         output["fourier_total_potential_dft"] = phi+proto
         output["fourier_total_potential_dft_mask"] = output["fourier_potential_dft_mask"] & output["fourier_proto_potential_dft_mask"]
@@ -592,6 +599,9 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
 @torch.no_grad()
 def initialize_response(model, loader, device):
     """Fit only training-set feature scales and frozen proto form factors."""
+    from mace.tools import torch_geometric
+    loader = torch_geometric.dataloader.DataLoader(loader.dataset,
+        batch_size=getattr(loader,'batch_size',1) or 1,shuffle=False,drop_last=False)
     response = model.field_dependent_charges_map
     response.spectral_cutoff.copy_(model.kspace_cutoff)
     norms = torch.zeros_like(response.feature_norms)
@@ -638,7 +648,7 @@ def initialize_response(model, loader, device):
         response.proto_fitted.fill_(True)
         error = (square-2*solution@rhs+solution@(gram@solution)).clamp_min(0)
         logging.info("Frozen training-only proto fit: spectral component RMS %.6g eV, observations %d", float((error/observations).sqrt()), observations)
-    logging.info("Electronic functional: %d coarse + %d moment-free coefficients per atom; deployment uses %d steps", response.coarse_dim, response.state_irreps.dim-response.coarse_dim, int(response.deployment_steps))
+    logging.info("Electronic response %s: %d coarse + %d regular coefficients per atom; deployment uses %d steps", type(response).__name__, response.coarse_dim, response.state_irreps.dim-response.coarse_dim, int(response.deployment_steps))
 def potential_mode_weights(
     k_vectors: torch.Tensor,
     cell: torch.Tensor,
@@ -851,3 +861,13 @@ def _target_fft(
             )
         output = torch.stack(output_items)
     return torch.stack([output.real, output.imag], dim=-1).to(dtype=dtype)
+
+
+def evaluate_electronic(model, data, **kwargs):
+    """Dispatch the saved response family without reinterpreting its weights."""
+    if getattr(model.field_dependent_charges_map, 'coupled', False):
+        from .coupled import evaluate_coupled
+        return evaluate_coupled(model, data, **kwargs)
+    kwargs.pop('mixing', None)
+    kwargs.pop('tolerance', None)
+    return evaluate_variational(model, data, **kwargs)

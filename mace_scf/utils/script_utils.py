@@ -57,7 +57,9 @@ def create_error_table(
     table = PrettyTable()
 
     if table_type == "ElectrostaticRMSE":
-        table.field_names = ["split", "E meV/atom", "F meV/A", "dipole meA/atom", "EF meV", "ESP obs mV", "ESP total mV", "vac mV", "WF meV", "rho me/A^3"]
+        vacuum_enabled = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
+        esp_title = 'rmse_esp(tot/vac) mV' if vacuum_enabled else 'rmse_esp mV'
+        table.field_names = ["split", "rmse_E meV/atom", "rmse_F meV/A", "rmse_dip meA/atom", "rmse_rho me/A^3", "rmse_EF meV", esp_title, "rmse_wf(abs/rel) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
@@ -161,13 +163,13 @@ def create_error_table(
             "rmse_esp",
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
-            "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction", "rmse_fourier_density",
+            "rmse_fermi_level", "rmse_esp_vac", "rmse_wf_abs", "rmse_wf_rel", "rmse_rho",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
                 metrics[metric_name] = "not found"
                 continue
-            if not ("rel" in metric_name):
+            if not ("rel" in metric_name) or metric_name == 'rmse_wf_rel':
                 metrics[metric_name] = f"{1000 * metrics[metric_name]:.2f}"
             else:
                 metrics[metric_name] = f"{metrics[metric_name]:.2f}"
@@ -175,7 +177,9 @@ def create_error_table(
         # add new tables here...
         if table_type == "ElectrostaticRMSE":
             table.add_row([name]+[metrics[key] for key in
-                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction", "rmse_fourier_density")])
+                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_rho", "rmse_fermi_level")]
+                +[metrics['rmse_esp']+'/'+metrics['rmse_esp_vac'] if vacuum_enabled else metrics['rmse_esp'],
+                  metrics['rmse_wf_abs']+'/'+metrics['rmse_wf_rel']])
         elif table_type == "DensityCoefficientsRMSE":
             table.add_row(
                 [
@@ -251,4 +255,8 @@ def create_error_table(
             )
         # add new tables here...
 
+    if table_type == 'ElectrostaticRMSE' and table.rows:
+        for index,name in reversed(list(enumerate(table.field_names))):
+            if index and all(row[index] in ('not found','not found/not found') for row in table.rows):
+                table.del_column(name)
     return table

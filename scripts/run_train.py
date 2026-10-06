@@ -357,6 +357,8 @@ def main() -> None:
         start_epoch = max(start_epoch, train_stage["start"])
 
         stage_name = train_stage["name"]
+        from mace_scf.utils.foundation import set_foundation_stage
+        set_foundation_stage(model, train_stage.get('freeze_foundation_backbone',False))
         loss_fn = mace_scf.electrostatics.loss.WeightedLoss(train_stage["loss"])
         logging.info(loss_fn)
         eval_wrapper = mace_scf.utils.make_model_wrapper(

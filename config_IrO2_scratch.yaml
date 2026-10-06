@@ -36,7 +36,7 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixedpoint_update_config:
-  type: VariationalResponse
+  type: CoupledResponse
   potential_widths:
   - 1.5
   - 3.0
@@ -60,7 +60,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch_v367
+checkpoints_dir: checkpoints_IrO2_scratch_v367_hotfix2
 compute_forces: true
 train_schedule:
   0:
@@ -72,16 +72,19 @@ train_schedule:
       energy_per_atom: 100
       forces: 500
       dipole: 10
-      fourier_density: 10
-      fourier_potential: 100
+      fourier_density:
+        weight: 10
+        reference: farfield
+      fourier_potential:
+        weight: 100
+        vacuum_weight: 1
       fermi_level: 100
-      vacuum_potential: 100
-      workfunction: 250
     fixed_point_training_options:
       mode: unroll_scf
       scf:
         num_scf_steps: 12
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
@@ -94,16 +97,19 @@ train_schedule:
       energy_per_atom: 100
       forces: 500
       dipole: 10
-      fourier_density: 10
-      fourier_potential: 100
+      fourier_density:
+        weight: 10
+        reference: farfield
+      fourier_potential:
+        weight: 100
+        vacuum_weight: 1
       fermi_level: 100
-      vacuum_potential: 100
-      workfunction: 250
     fixed_point_training_options:
       mode: unroll_scf
       scf:
         num_scf_steps: 25
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
@@ -116,16 +122,19 @@ train_schedule:
       energy_per_atom: 100
       forces: 500
       dipole: 10
-      fourier_density: 10
-      fourier_potential: 100
+      fourier_density:
+        weight: 10
+        reference: farfield
+      fourier_potential:
+        weight: 100
+        vacuum_weight: 1
       fermi_level: 100
-      vacuum_potential: 100
-      workfunction: 250
     fixed_point_training_options:
       mode: unroll_scf
       scf:
         num_scf_steps: 50
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true

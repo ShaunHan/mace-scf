@@ -309,8 +309,13 @@ class FixedPointCore(torch.nn.Module):
             num_elements=num_elements,
             field_norm_factor=field_norm_factor,
             atom_density_scaling=atom_density_scaling,
+            **({"density_width": atomic_multipoles_smearing_width, "field_widths": field_feature_widths,
+                "include_local_energy": add_local_electron_energy}
+               if getattr(lr_source_cls, "coupled", False) else {}),
             **fixedpoint_update_config,
         )
+        if getattr(lr_source_cls, 'coupled', False):
+            self.register_buffer('readout_feature_units', torch.ones(num_interactions, hidden_irreps.dim))
 
         # Local electron energy readout
         self.add_local_electron_energy = add_local_electron_energy
@@ -429,7 +434,7 @@ class FixedPointCore(torch.nn.Module):
         )
 
         k_vectors = k_vectors_norms_squared = k_vectors_batch = k0_mask = None
-        if not getattr(self.field_dependent_charges_map, "variational", False):
+        if not getattr(self.field_dependent_charges_map, "spectral", False):
             # K-space grid
             k_vectors, k_vectors_norms_squared, k_vectors_batch, k0_mask = (
                 compute_k_vectors_flat(
@@ -448,8 +453,8 @@ class FixedPointCore(torch.nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        for layer_index, (interaction, product, readout, lr_source_map) in enumerate(zip(
-            self.interactions, self.products, self.readouts, self.lr_source_maps
+        for layer_index, (interaction, product, lr_source_map) in enumerate(zip(
+            self.interactions, self.products, self.lr_source_maps
         )):
             node_feats, sc = interaction(
                 node_attrs=backbone_attrs,
@@ -466,7 +471,10 @@ class FixedPointCore(torch.nn.Module):
                 node_attrs=backbone_attrs,
             )
             features.append(node_feats.clone())
-            node_energies = readout(node_feats).squeeze(-1)
+            readout = self.readouts[0 if len(self.readouts)==1 else layer_index]
+            readout_feats = (node_feats/self.readout_feature_units[layer_index]
+                             if hasattr(self,'readout_feature_units') else node_feats)
+            node_energies = readout(readout_feats).squeeze(-1)
             energy = scatter_sum(
                 src=node_energies,
                 index=data["batch"],
@@ -477,8 +485,8 @@ class FixedPointCore(torch.nn.Module):
 
             if not getattr(self.field_dependent_charges_map, "variational", False):
                 charge_sources = lr_source_map(
-                    node_attrs=backbone_attrs,
-                    node_feats=node_feats,
+                    node_attrs=data["node_attrs"] if getattr(self.field_dependent_charges_map, "coupled", False) else backbone_attrs,
+                    node_feats=readout_feats if getattr(self.field_dependent_charges_map, "coupled", False) else node_feats,
                 )
                 charge_density += charge_sources.squeeze(-2)
 
@@ -490,7 +498,7 @@ class FixedPointCore(torch.nn.Module):
 
         # The variational functional assembles its own shared Fourier operator.
         electrostatics_cache = None
-        if not getattr(self.field_dependent_charges_map, "variational", False):
+        if not getattr(self.field_dependent_charges_map, "spectral", False):
             # Precompute geometry for electrostatics
             electrostatics_cache = self.electric_potential_descriptor.precompute_geometry(
                 k_vectors=k_vectors,

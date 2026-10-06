@@ -30,7 +30,7 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixedpoint_update_config:
-  type: VariationalResponse
+  type: CoupledResponse
   potential_widths: []
 batch_size: 8
 valid_batch_size: 4
@@ -52,7 +52,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_scratch_v367
+checkpoints_dir: checkpoints_RhMnCOH_scratch_v367_hotfix2
 compute_forces: true
 train_schedule:
   0:
@@ -70,6 +70,7 @@ train_schedule:
       scf:
         num_scf_steps: 12
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
@@ -88,6 +89,7 @@ train_schedule:
       scf:
         num_scf_steps: 25
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
@@ -106,6 +108,7 @@ train_schedule:
       scf:
         num_scf_steps: 50
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true

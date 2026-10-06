@@ -19,7 +19,7 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.loss import vacuum_observation_weight
+from mace_scf.electrostatics.loss import vacuum_observation_weight, vacuum_reference_weights
 
 
 class CheckpointHandler(NativeCheckpointHandler):
@@ -133,7 +133,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
             residual = metrics.get('scf_residual_max', 0.)
             tolerance = getattr(getattr(model_eval_wrapper, 'scf_options', None), 'scf_tolerance', float('inf'))
-            finite_budget = (getattr(getattr(model, 'field_dependent_charges_map', None), 'variational', False)
+            finite_budget = (getattr(getattr(model, 'field_dependent_charges_map', None), 'spectral', False)
                              and model_eval_wrapper.mode in ('unroll_scf', 'shortcut_scf'))
             deployable = np.isfinite(residual) and (finite_budget or residual <= tolerance)
             if finite_budget and residual > tolerance:
@@ -249,7 +249,8 @@ def _evaluate(
 
     voltage_errors = {"workfunction": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
     scf_residuals = []
-    objective_sums = {key:[0.,0.] for key in loss_fn.loss_fns}
+    objective_sums = {}
+    wf_moments = []
 
     start_time = time.time()
     for batch in data_loader:
@@ -281,6 +282,14 @@ def _evaluate(
         for key, function in loss_fn.loss_fns.items():
             if loss_fn.loss_weights[key] == 0:
                 continue
+            if hasattr(function, 'statistics'):
+                # Spatial and vacuum labels may live on different graphs.
+                # Accumulate each numerator/denominator before normalization.
+                for part, (numerator, denominator) in function.statistics(batch, output).items():
+                    pair = objective_sums.setdefault((key,part), [0.,0.])
+                    pair[0] += float(numerator)
+                    pair[1] += float(denominator)
+                continue
             if key in ("fourier_density", "fourier_potential", "fermi_level", "workfunction"):
                 denominator = float((batch.weight*getattr(batch,key+"_weight")).sum())
             elif key == "vacuum_potential":
@@ -289,8 +298,9 @@ def _evaluate(
                 denominator = float(batch.forces.numel())
             else:
                 denominator = float(batch.num_graphs)
-            objective_sums[key][0] += float(function(batch,output))*denominator
-            objective_sums[key][1] += denominator
+            pair = objective_sums.setdefault((key,''), [0.,0.])
+            pair[0] += float(function(batch,output))*denominator
+            pair[1] += denominator
         num_configs += batch.num_graphs
 
         from mace_scf.electrostatics.loss import spectral_errors
@@ -302,16 +312,25 @@ def _evaluate(
                           if key == "fourier_total_potential" else getattr(batch,key+"_weight")*batch.weight)
                 if key+"_dft" not in output:
                     continue
-                error = spectral_errors(batch,output,key)
+                density_reference = getattr(loss_fn.loss_fns.get('fourier_density'), 'reference', 'density')
+                observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield' else key)
+                error = spectral_errors(batch,output,observed_key)
             elif key == "workfunction":
                 weight = batch.workfunction_weight*batch.weight
-                error = (output[key]-batch.workfunction).square()
+                weight = weight*(batch.pbc.reshape(-1,3).sum(-1)==2)
+                difference = output[key]-batch.workfunction
+                use = weight>0
+                if bool((use & ~torch.isfinite(difference)).any()):
+                    raise FloatingPointError('Nonfinite observed workfunction error')
+                wf_moments.append(torch.stack(((difference[use]*weight[use]).sum(),
+                                               (difference[use].square()*weight[use]).sum(), weight[use].sum())))
+                error = difference.square()
             else:
-                if "vacuum_potential_dft" not in output:
-                    continue
-                weight = vacuum_observation_weight(batch)
-                error = (output[key]-output["vacuum_potential_dft"]).square()
+                target, weight = vacuum_reference_weights(batch, output[key])
+                error = (output[key]-target).square()
             use = weight>0
+            if bool((use & ~torch.isfinite(error)).any()):
+                raise FloatingPointError('Nonfinite observed '+key+' error')
             voltage_errors[key].append(torch.stack(((error[use]*weight[use]).sum(),weight[use].sum())))
         if output.get("scf_residual") is not None:
             scf_residuals.append(output["scf_residual"].max())
@@ -402,7 +421,7 @@ def _evaluate(
     polars_computed = len(delta_polarizability_list) > 0
 
     avg_loss = sum(loss_fn.loss_weights[key]*values[0]/values[1]
-                   for key,values in objective_sums.items() if values[1]>0)
+                   for (key,_),values in objective_sums.items() if values[1]>0)
 
     aux = {
         "loss": avg_loss,
@@ -498,7 +517,18 @@ def _evaluate(
         if values:
             sums = torch.stack(values).sum(0)
             if sums[1]>0:
-                aux["rmse_"+key] = float((sums[0]/sums[1]).sqrt())
+                name = {'fourier_density':'rho', 'fourier_potential':'esp',
+                        'fourier_total_potential':'esp_with_proto',
+                        'vacuum_potential':'esp_vac', 'workfunction':'wf_abs'}[key]
+                aux["rmse_"+name] = float((sums[0]/sums[1]).sqrt())
+    if wf_moments:
+        first, second, weight = torch.stack(wf_moments).sum(0)
+        if weight>0:
+            # One weighted offset over the WHOLE validation split, never a
+            # per-batch correction or a shift installed in the deployed model.
+            aux['wf_bias'] = float(first/weight)
+            aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+    aux['esp_vacuum_enabled'] = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
     return avg_loss, aux
@@ -511,11 +541,18 @@ def valid_err_log(
     log_errors,
     epoch,
 ):
-    if "rmse_workfunction" in eval_metrics or "rmse_fourier_density" in eval_metrics:
-        logging.info("Deployment validation epoch %d: %s", epoch,
-            ", ".join(f"{key}={1000*eval_metrics[key]:.4f}" for key in
-                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_fourier_density", "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction")
-                if key in eval_metrics))
+    if "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
+        pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
+                  (('rmse_e_per_atom','rmse_E','meV/atom'), ('rmse_f','rmse_F','meV/A'),
+                   ('rmse_mu_per_atom','rmse_dip','meA/atom'), ('rmse_rho','rmse_rho','me/A^3'),
+                   ('rmse_fermi_level','rmse_EF','meV')) if key in eval_metrics]
+        fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
+        if 'rmse_esp' in eval_metrics:
+            pieces.append(('rmse_esp(tot/vac)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_vac')
+                           if eval_metrics['esp_vacuum_enabled'] else 'rmse_esp='+fmt('rmse_esp'))+' mV')
+        if 'rmse_wf_abs' in eval_metrics:
+            pieces.append('rmse_wf(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+        logging.info("Deployment validation epoch %d | loss=%.6g | %s", epoch, valid_loss, ' | '.join(pieces))
         logging.info('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch

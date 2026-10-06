@@ -130,25 +130,28 @@ class FixedPointWrapper:
             else nullcontext()
         )
         with param_context:
-            if getattr(model.field_dependent_charges_map, "variational", False):
-                from mace_scf.electrostatics.potential import evaluate_variational
+            if getattr(model.field_dependent_charges_map, "spectral", False):
+                from mace_scf.electrostatics.potential import evaluate_electronic
                 if self.mode not in ("unroll_scf", "shortcut_scf", "implicit"):
-                    raise ValueError("VariationalResponse supports unroll_scf, shortcut_scf and implicit")
+                    raise ValueError("Spectral response supports unroll_scf, shortcut_scf and implicit")
                 # The exported model records its forward solver. Checkpointed
                 # training deploys the identical ordinary finite trajectory.
                 response = model.field_dependent_charges_map
                 response.deployment_mode = "unroll_scf" if self.mode == "shortcut_scf" else self.mode
-                if not getattr(self, '_logged_variational_policy', False):
-                    logging.info('VariationalResponse mode=%s: %d training steps; %d validation/deployment steps. '
-                                 'Finite modes use bounded Chebyshev coefficients, not the native mixing_parameter.',
-                                 self.mode, self.scf_options.num_scf_steps, int(response.deployment_steps))
-                    self._logged_variational_policy = True
+                if getattr(response, 'coupled', False):
+                    response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
+                if not getattr(self, '_logged_spectral_policy', False):
+                    logging.info('%s mode=%s: %d training steps; %d validation/deployment steps',
+                                 type(response).__name__, self.mode, self.scf_options.num_scf_steps,
+                                 int(response.deployment_steps))
+                    self._logged_spectral_policy = True
                 steps = (self.scf_options.num_scf_steps if training else
                          int(model.field_dependent_charges_map.deployment_steps))
-                return evaluate_variational(model, batch_dict, steps=steps,
+                return evaluate_electronic(model, batch_dict, steps=steps,
                     training=training, compute_force=self.output_args.get("forces", False),
                     constant_charge=self.scf_options.constant_charge,
                     compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
+                    tolerance=self.scf_options.scf_tolerance,
                     mode=self.mode if training else response.deployment_mode)
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)

@@ -30,7 +30,7 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixedpoint_update_config:
-  type: VariationalResponse
+  type: CoupledResponse
   potential_widths: []
 batch_size: 1
 valid_batch_size: 1
@@ -52,13 +52,33 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_finetune_v367
+checkpoints_dir: checkpoints_RhMnCOH_finetune_v367_hotfix2
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
   0:
-    name: stage1
+    name: heads
     start: 0
+    end: 9
+    lr: 0.001
+    loss:
+      energy_per_atom: 100
+      forces: 500
+      dipole: 10
+      fourier_density: 10
+    fixed_point_training_options:
+      mode: unroll_scf
+      scf:
+        num_scf_steps: 12
+        constant_charge: true
+        mixing_parameter: 0.5
+        initial_density: local_guess
+        initial_fermi_level: zero
+        use_autograd_forces: true
+    freeze_foundation_backbone: true
+  1:
+    name: stage1
+    start: 10
     end: 49
     lr: 0.001
     loss:
@@ -71,10 +91,11 @@ train_schedule:
       scf:
         num_scf_steps: 12
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  1:
+  2:
     name: stage2
     start: 50
     end: 499
@@ -89,10 +110,11 @@ train_schedule:
       scf:
         num_scf_steps: 25
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  2:
+  3:
     name: stage3
     start: 500
     end: 550
@@ -107,6 +129,7 @@ train_schedule:
       scf:
         num_scf_steps: 50
         constant_charge: true
+        mixing_parameter: 0.5
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
