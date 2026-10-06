@@ -72,6 +72,52 @@ def test_validation_restores_frozen_parameters_after_failure():
     assert not model.bias.requires_grad
 
 
+def test_validation_averages_once_and_restores_after_failure():
+    from contextlib import contextmanager
+    model = torch.nn.Linear(2, 1)
+    raw = model.weight.detach().clone()
+    class Average:
+        entries = 0
+        @contextmanager
+        def average_parameters(self):
+            self.entries += 1
+            with torch.no_grad():
+                model.weight.add_(1.)
+            try:
+                yield
+            finally:
+                with torch.no_grad():
+                    model.weight.copy_(raw)
+    average = Average()
+    class Batch:
+        def to(self, device):
+            return self
+        def to_dict(self):
+            return {}
+    class Loss:
+        loss_fns = {}
+    def wrapper(*args, **kwargs):
+        assert kwargs['ema'] is None
+        torch.testing.assert_close(model.weight, raw+1.)
+        raise RuntimeError('intentional validation failure')
+    with pytest.raises(RuntimeError, match='intentional'):
+        evaluate(model, wrapper, Loss(), average, [Batch(), Batch()], 'cpu')
+    assert average.entries == 1
+    torch.testing.assert_close(model.weight, raw, rtol=0., atol=0.)
+
+
+def test_checkpoint_refuses_reinterpreted_backend_moments(tmp_path):
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.003)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    state = CheckpointState(model, optimizer, scheduler)
+    handler = CheckpointHandler(directory=str(tmp_path), tag='backend', keep=False)
+    handler.save_progress(state, 0)
+    model.backbone_layout = 'ir_mul'
+    with pytest.raises(ValueError, match='different tensor-product layouts'):
+        handler.load_latest(state, device='cpu')
+
+
 @pytest.mark.parametrize('mode', ['implicit', 'unroll_scf', 'shortcut_scf'])
 def test_validation_and_calculator_use_deployment_step_count(tmp_path, mode):
     from ase import Atoms

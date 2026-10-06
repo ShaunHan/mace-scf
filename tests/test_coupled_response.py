@@ -1,0 +1,384 @@
+"""v366 response transfer, physical observers and hotfix2 loss contracts."""
+from copy import deepcopy
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+import torch
+from ase import Atoms
+from e3nn import o3
+from mace.tools import torch_geometric
+
+from mace_scf.electrostatics.coupled import CoupledResponse, CoupledGeometry, evaluate_coupled
+from mace_scf.electrostatics.coupled import (
+    factor_linear_system, solve_factored_system, implicit_root, RootOptions, SCFConvergenceError,
+)
+from mace_scf.electrostatics.loss import WeightedLoss, WeightedFourierPotential, spectral_errors
+from tests.test_spectral_response import small_model, small_data
+
+
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+def test_cueq_backend_preserves_fields_forces_gradients_and_export(tmp_path, device):
+    if device == 'cuda' and not torch.cuda.is_available():
+        pytest.skip('CUDA hardware is unavailable')
+    pytest.importorskip('cuequivariance_torch')
+    if device == 'cuda':
+        pytest.importorskip('cuequivariance_ops_torch')
+    from mace_scf.utils.foundation import accelerate_backbone
+    from mace_scf.utils.run_train_utils import get_param_options
+    model=coupled_model().to(device)
+    data={k:v.to(device) if torch.is_tensor(v) else v for k,v in small_data().items()}
+    before=evaluate_coupled(model,deepcopy(data),steps=12,training=True)
+    loss=before['forces'].square().sum()+before['fermi_level'].square().sum()
+    grad=torch.autograd.grad(loss,model.field_dependent_charges_map.common_level.weight)[0]
+    random_state=torch.random.get_rng_state()
+    accelerate_backbone(model,device)
+    assert torch.equal(random_state,torch.random.get_rng_state())
+    assert model.backbone_layout == 'ir_mul'
+    after=evaluate_coupled(model,deepcopy(data),steps=12,training=True)
+    for key in ('energy','forces','fermi_level','fourier_potential','density_coefficients'):
+        torch.testing.assert_close(after[key],before[key],atol=1.e-8,rtol=1.e-8)
+    backbone_parameters=tuple(model.interactions.parameters())+tuple(model.products.parameters())
+    force_gradients=torch.autograd.grad(after['forces'].square().sum(),backbone_parameters,
+                                       retain_graph=True,allow_unused=True)
+    assert any(g is not None and bool(g.abs().max()>0) for g in force_gradients)
+    assert all(g is None or bool(torch.isfinite(g).all()) for g in force_gradients)
+    grad2=torch.autograd.grad(after['forces'].square().sum()+after['fermi_level'].square().sum(),
+                             model.field_dependent_charges_map.common_level.weight)[0]
+    torch.testing.assert_close(grad,grad2,atol=1.e-8,rtol=1.e-8)
+    args=SimpleNamespace(model='FixedPoint',weight_decay=.001,local_charges_weight_decay=0.,
+                         field_block_weight_decay=.01,lr=.001,amsgrad=False,beta=.9,beta_two=.999)
+    groups=get_param_options(model,args)['params']
+    owned=[id(p) for group in groups for p in group['params']]
+    assert len(owned)==len(set(owned))
+    assert set(owned)=={id(p) for p in model.parameters() if p.requires_grad}
+    path=tmp_path/'cueq.model';torch.save(model,path)
+    loaded=torch.load(path,map_location=device,weights_only=False)
+    result=evaluate_coupled(loaded,deepcopy(data),steps=12)
+    torch.testing.assert_close(result['forces'],after['forces'],atol=1.e-9,rtol=1.e-9)
+
+
+def test_common_level_cannot_feed_charge_roundoff():
+    model=coupled_model();data=small_data()
+    before=evaluate_coupled(model,deepcopy(data),steps=12)
+    with torch.no_grad():model.field_dependent_charges_map.common_level.weight.add_(1.e8)
+    after=evaluate_coupled(model,deepcopy(data),steps=12)
+    torch.testing.assert_close(before['density_coefficients'],after['density_coefficients'],atol=0.,rtol=0.)
+    torch.testing.assert_close(before['forces'],after['forces'],atol=0.,rtol=0.)
+    assert not torch.equal(before['fermi_level'],after['fermi_level'])
+
+
+def test_field_only_probes_respect_no_grad_after_force_evaluation():
+    model=coupled_model();data=small_data()
+    reference=evaluate_coupled(model,data,steps=12)
+    assert data['positions'].requires_grad
+    with torch.no_grad():
+        probe=evaluate_coupled(model,data,steps=12,compute_force=False)
+        forced=evaluate_coupled(model,data,steps=12,compute_force=True)
+    for key,value in probe.items():
+        assert not torch.is_tensor(value) or not value.requires_grad,key
+    for key in ('energy','fermi_level','fourier_potential'):
+        torch.testing.assert_close(probe[key],reference[key],rtol=1.e-12,atol=1.e-12)
+    torch.testing.assert_close(forced['forces'],reference['forces'],rtol=1.e-12,atol=1.e-12)
+
+
+def test_recurrent_total_field_equals_component_observer():
+    from mace_scf.electrostatics.coupled import prepare_coupled, total_spectrum, evaluate_coefficients
+    model=coupled_model();data=small_data();local=model.local_part(data,False)
+    geometry,initial,*_=prepare_coupled(model,data,local)
+    state=(initial+torch.randn_like(initial)*.01).detach().requires_grad_()
+    total=total_spectrum(state,geometry.tensors,geometry.kernels,1.5)
+    parts=evaluate_coefficients(state,geometry.tensors,geometry.kernels,1.5)[0]
+    torch.testing.assert_close(total,parts,atol=1.e-12,rtol=1.e-12)
+    a=torch.autograd.grad(total.square().sum(),state,retain_graph=True)[0]
+    b=torch.autograd.grad(parts.square().sum(),state)[0]
+    torch.testing.assert_close(a,b,atol=1.e-11,rtol=1.e-11)
+
+
+def coupled_model(widths=(1.5, 3.), local_energy=False):
+    model = small_model()
+    model.field_dependent_charges_map = CoupledResponse(
+        node_feats_irreps='4x0e+4x1o', charges_irreps='0e+1o', num_elements=2,
+        potential_widths=widths, include_local_energy=local_energy)
+    model.lr_source_maps.requires_grad_(True)
+    with torch.no_grad():
+        for block in model.lr_source_maps:
+            output=getattr(block,'linear_2',getattr(block,'linear',None))
+            for parameter in output.parameters():parameter.zero_()
+        r = model.field_dependent_charges_map
+        r.species_level[1] = .5
+        r.scalar_out.weight.normal_(std=.01)
+        r.vector_out.weight.normal_(std=.01)
+        r.local_source_scalar.weight.normal_(std=.01)
+        if local_energy:
+            r.energy_readout[-1].weight.normal_(std=.01)
+    return model
+
+
+@pytest.mark.parametrize('widths', [(), (1.5,3.)])
+@pytest.mark.parametrize('mode', ['unroll_scf','shortcut_scf','implicit'])
+def test_modes_force_loss_and_full_field_gradients(widths, mode):
+    model = coupled_model(widths)
+    result = evaluate_coupled(model, small_data(), steps=50 if mode=='implicit' else 12,
+                              training=True, mode=mode)
+    torch.testing.assert_close(result['total_charge'], torch.tensor([.1]), atol=1.e-12, rtol=0.)
+    assert result['scf_residual'].max()<1.e-6
+    loss = result['forces'].square().sum()+result['fermi_level'].square().sum()
+    if widths:
+        loss = loss+result['workfunction'].square().sum()+result['fourier_potential'].square().mean()
+    loss.backward()
+    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+    assert model.field_dependent_charges_map.state_scalar.weight.grad.abs().max()>0.
+    assert model.lr_source_maps[0].linear_2.weight.grad.abs().max()>0.
+    if widths:
+        assert model.field_dependent_charges_map.local_source_scalar.weight.grad.abs().max()>0.
+
+
+def test_checkpointed_gradient_and_converged_root_parity():
+    model = coupled_model()
+    parameters=[p for p in model.parameters() if p.requires_grad]
+    values=[]; gradients=[]
+    for mode in ('unroll_scf','shortcut_scf','implicit'):
+        out=evaluate_coupled(model,small_data(),steps=50,training=True,mode=mode)
+        objective=out['forces'].square().sum()+out['workfunction'].square().sum()
+        gradients.append(torch.autograd.grad(objective,parameters,allow_unused=True))
+        values.append(out)
+    for i in (1,2):
+        for key in ('energy','forces','workfunction','fourier_potential'):
+            torch.testing.assert_close(values[0][key],values[i][key],atol=1.e-6,rtol=1.e-6)
+        for a,b in zip(gradients[0],gradients[i]):
+            if a is None:
+                assert b is None
+            else:
+                torch.testing.assert_close(a,b,atol=2.e-6,rtol=2.e-5)
+
+
+@pytest.mark.parametrize('local_energy',[False,True])
+def test_force_matches_finite_energy_derivative(local_energy):
+    model=coupled_model(local_energy=local_energy)
+    output=evaluate_coupled(model,small_data(),steps=4,training=True)
+    epsilon=1.e-5; energies=[]
+    for sign in (-1,1):
+        data=small_data();data['positions'][0,2]+=sign*epsilon
+        energies.append(evaluate_coupled(model,data,steps=4,compute_force=False)['energy'])
+    torch.testing.assert_close(-(energies[1]-energies[0])/(2*epsilon),output['forces'][0,2:3],atol=3.e-7,rtol=2.e-5)
+    if local_energy:
+        assert output['electron_energy'].abs().max()>0.
+
+
+def test_rotation_and_heterogeneous_batch_invariance():
+    model=coupled_model()
+    first=small_data(batched=False)
+    second=small_data(charge=-.2,batched=False,atoms=Atoms('OH',positions=[[2,2,3],[2.8,2,3.2]],cell=[8,8,14],pbc=[1,1,0]))
+    batch=torch_geometric.Batch.from_data_list([first,second]).to_dict()
+    together=evaluate_coupled(model,batch,steps=12)
+    for i,item in enumerate((first,second)):
+        separate=evaluate_coupled(model,torch_geometric.Batch.from_data_list([item]).to_dict(),steps=12)
+        for key in ('energy','fermi_level','workfunction'):
+            torch.testing.assert_close(together[key][i:i+1],separate[key],atol=1.e-9,rtol=1.e-9)
+        torch.testing.assert_close(together['forces'][batch['ptr'][i]:batch['ptr'][i+1]],separate['forces'],atol=1.e-9,rtol=1.e-9)
+    rotation=o3.rand_matrix();original=small_data();rotated=small_data()
+    for key in ('positions','cell','shifts','external_field'):
+        rotated[key]=rotated[key]@rotation.T
+    a=evaluate_coupled(model,original,steps=12);b=evaluate_coupled(model,rotated,steps=12)
+    for key in ('energy','fermi_level','workfunction'):
+        torch.testing.assert_close(a[key],b[key],atol=1.e-9,rtol=1.e-9)
+    torch.testing.assert_close(a['forces']@rotation.T,b['forces'],atol=1.e-9,rtol=1.e-9)
+
+
+def test_labels_do_not_enter_the_scf_map():
+    model=coupled_model();data=small_data();other=deepcopy(data)
+    other['fermi_level'].fill_(12345.);other['workfunction'].fill_(-10000.)
+    a=evaluate_coupled(model,data,steps=12);b=evaluate_coupled(model,other,steps=12)
+    for key in ('energy','forces','workfunction','fermi_level','density_coefficients','fourier_potential'):
+        torch.testing.assert_close(a[key],b[key],rtol=0.,atol=0.)
+
+
+def test_common_chemical_level_is_charge_null_direction():
+    model=coupled_model();data=small_data()
+    a=evaluate_coupled(model,data,steps=50)
+    with torch.no_grad():
+        model.field_dependent_charges_map.species_level.add_(.5)
+    # Species shifts also change the field descriptor's driving reference, so
+    # test the exact KKT null direction at fixed shared hidden features.
+    r=model.field_dependent_charges_map
+    raw=torch.tensor([[.3,.1,-.2]]);hidden=torch.randn(1,3,64)
+    attrs=data['node_attrs'][None];soft=torch.tensor([[.01,.02,.03]]);mask=torch.ones_like(raw)
+    left=r.chemical_levels(raw,hidden,attrs,soft,mask)
+    with torch.no_grad():r.species_level.add_(.5)
+    right=r.chemical_levels(raw,hidden,attrs,soft,mask)
+    from mace_scf.electrostatics.coupled import charge_closure
+    q,mu,*_=charge_closure(torch.zeros_like(raw),left,soft,torch.tensor([.1]),mask)
+    q1,mu1,*_=charge_closure(torch.zeros_like(raw),right,soft,torch.tensor([.1]),mask)
+    torch.testing.assert_close(q,q1,atol=1.e-15,rtol=0.)
+    torch.testing.assert_close(mu1-mu,torch.tensor([.5]))
+
+
+def test_cached_linear_solve_second_derivative():
+    torch.set_default_dtype(torch.float64)
+    a=torch.tensor([[[3.,.2],[.1,2.]]],requires_grad=True)
+    b=torch.tensor([[[.4],[.7]]],requires_grad=True)
+    def solve(a,b):
+        lu,pivots=factor_linear_system(a)
+        return solve_factored_system(a,lu,pivots,b)
+    assert torch.autograd.gradcheck(solve,(a,b))
+    assert torch.autograd.gradgradcheck(solve,(a,b))
+
+
+def test_implicit_never_accepts_an_unconverged_fixed_step():
+    initial=torch.zeros(1,1,1)
+    with pytest.raises(SCFConvergenceError):
+        implicit_root(lambda x:x+1.,initial,options=RootOptions(max_steps=2))
+
+
+def observations():
+    torch.set_default_dtype(torch.float64)
+    n=3**3
+    ref=SimpleNamespace(weight=torch.tensor([1.,2.,1.]),
+        fourier_potential_weight=torch.tensor([1.,1.,0.]),
+        fourier_density_weight=torch.ones(3),fourier_proto_potential_weight=torch.ones(3),
+        fermi_level=torch.tensor([1.,3.,7.]),fermi_level_weight=torch.tensor([1.,0.,1.]),
+        workfunction=torch.tensor([2.,4.,5.]),workfunction_weight=torch.ones(3),
+        pbc=torch.tensor([[1,1,0],[1,1,0],[1,1,1]],dtype=torch.bool))
+    torch.manual_seed(10)
+    real=torch.randn(3,3,3,3)
+    spectrum=torch.view_as_real(torch.fft.fftn(real,dim=(-3,-2,-1))).reshape(3,n,2)
+    modes=torch.cartesian_prod(*(torch.fft.fftfreq(3)*3 for _ in range(3)))
+    pred={'energy':torch.zeros(3), 'fourier_potential':spectrum.clone().requires_grad_(),
+          'fourier_potential_dft':torch.zeros_like(spectrum),
+          'k_vectors_mask':torch.ones(3,n,dtype=torch.bool),'k_vectors':modes[None].expand(3,-1,-1),
+          'k_vectors_grid_shape':torch.tensor([3,3,3]),
+          'vacuum_potential':torch.tensor([4.,1000.,1000.],requires_grad=True),
+          'fermi_level':torch.tensor([100.,200.,300.],requires_grad=True)}
+    return ref,pred,real
+
+
+def test_parseval_and_vacuum_loss_gradients():
+    ref,pred,real=observations()
+    mse=(real-real.mean((-3,-2,-1),keepdim=True)).square().mean((-3,-2,-1))
+    torch.testing.assert_close(spectral_errors(ref,pred,'fourier_potential')[:2],mse[:2])
+    loss=WeightedFourierPotential(vacuum_weight=10)(ref,pred)
+    torch.testing.assert_close(loss,(mse[0]+2*mse[1])/3+10.)
+    loss.backward()
+    torch.testing.assert_close(pred['vacuum_potential'].grad,torch.tensor([20.,0.,0.]))
+    assert pred['fermi_level'].grad is None
+
+
+def test_masked_labels_and_invalid_observed_labels():
+    ref,pred,real=observations()
+    baseline=WeightedFourierPotential(1)(ref,pred)
+    with torch.no_grad():pred['fourier_potential'][2].fill_(float('nan'))
+    ref.fermi_level[1]=float('nan')
+    torch.testing.assert_close(WeightedFourierPotential(1)(ref,pred),baseline)
+    ref.fermi_level[0]=float('nan')
+    with pytest.raises(FloatingPointError):WeightedFourierPotential(1)(ref,pred)
+
+
+def test_validation_weighted_global_wf_and_batch_partition():
+    from mace_scf.utils.train import evaluate
+    graphs=[]
+    for i in range(1,4):
+        g=small_data(charge=float(i),batched=False)
+        g.weight=torch.tensor(float(i));g.workfunction=torch.tensor(0.);g.workfunction_weight=torch.tensor(1.)
+        g.fermi_level=torch.tensor(0.);g.fermi_level_weight=torch.tensor(1.)
+        g.fourier_potential_weight=torch.tensor(float(i<3))
+        graphs.append(g)
+    def wrapper(model,data,**kwargs):
+        charge=data['total_charge'].reshape(-1)
+        predicted=torch.zeros(len(charge),3,2);predicted[:,1,0]=charge*3
+        return {'energy':charge*0.,'workfunction':charge*2,'vacuum_potential':charge*3,
+                'fermi_level':charge,'fourier_potential':predicted,'fourier_potential_dft':predicted*0,
+                'k_vectors_mask':torch.ones(len(charge),3,dtype=torch.bool),
+                'k_vectors':torch.tensor([[[0.,0.,0.],[0.,0.,1.],[0.,0.,-1.]]]).expand(len(charge),-1,-1),
+                'k_vectors_grid_shape':torch.tensor([1,1,3])}
+    values=[]
+    for batch_size in (1,2,3):
+        loader=torch_geometric.dataloader.DataLoader(graphs,batch_size=batch_size,shuffle=False)
+        loss,metric=evaluate(torch.nn.Linear(1,1),wrapper,WeightedLoss({'fourier_potential':{'weight':100,'vacuum_weight':1}}),None,loader,'cpu')
+        values.append((loss,metric))
+        assert metric['rmse_wf_abs']==pytest.approx(24.**.5)
+        assert metric['rmse_wf_rel']==pytest.approx((24.-(28./6)**2)**.5)
+        assert metric['wf_bias']==pytest.approx(28./6)
+        assert loss==pytest.approx(100*(3.+54.))
+    for value in values[1:]:assert value[0]==pytest.approx(values[0][0])
+
+
+def test_saved_deployment_and_optional_diagnostics(tmp_path):
+    import sys
+    from unittest.mock import patch
+    from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
+    from mace_scf.utils import create_scf_convergence_summary
+    model=coupled_model();model.field_dependent_charges_map.deployment_mixing.fill_(.4)
+    result=evaluate_coupled(model,small_data(),steps=50)
+    path=tmp_path/'coupled.model';torch.save(model,path)
+    atoms=Atoms('OHH',positions=small_data()['positions'].numpy(),cell=[7,7,12],pbc=[1,1,0])
+    atoms.info.update(total_charge=.1,external_field=np.array([0.,0.,.02]))
+    atoms.calc=MACEFixedPointSCF(str(path),device='cpu')
+    np.testing.assert_allclose(atoms.get_potential_energy(),result['energy'].detach()[0],rtol=1.e-10,atol=1.e-10)
+    np.testing.assert_allclose(atoms.get_forces(),result['forces'].detach(),rtol=1.e-10,atol=1.e-10)
+    assert atoms.calc.results['num_scf_steps']==50
+    loader=torch_geometric.dataloader.DataLoader([small_data(batched=False)],batch_size=1)
+    with patch.dict(sys.modules,{'mace_scf.utils.diagnostics':None}):
+        report=create_scf_convergence_summary(model,{'valid':loader},{'forces':True},'cpu',{})
+    assert 'WF_50_minus_100_eV' in report
+
+
+@pytest.mark.parametrize('foundation',[False,True])
+def test_readout_conditioning_preserves_function_and_fits_force_units(foundation):
+    from mace_scf.utils.foundation import condition_readouts, set_foundation_stage
+    model=coupled_model()
+    model.register_buffer('readout_feature_units',torch.ones(1,16))
+    if foundation:
+        model.register_buffer('foundation_element_map',torch.eye(2))
+        model.register_buffer('foundation_atomic_numbers',model.atomic_numbers.clone())
+    graph=small_data(batched=False)
+    def local_force():
+        data=torch_geometric.Batch.from_data_list([graph]).to_dict()
+        energy=model.local_part(data,compute_force=True).energies.sum()
+        return energy,-torch.autograd.grad(energy,data['positions'])[0]
+    before,force=local_force()
+    graph.forces=force.detach()*2
+    graph.forces_weight=torch.tensor(1.)
+    loader=torch_geometric.dataloader.DataLoader([graph],batch_size=1)
+    condition_readouts(model,loader,'cpu')
+    after,result=local_force()
+    torch.testing.assert_close(result,force*(2 if foundation else 1),atol=1.e-12,rtol=1.e-10)
+    torch.testing.assert_close(after,before*(2 if foundation else 1),atol=1.e-12,rtol=1.e-10)
+    assert model.readout_feature_units.min()>=1.
+    if foundation:
+        set_foundation_stage(model,True)
+        assert all(not p.requires_grad for p in model.products.parameters())
+        assert all(p.requires_grad for p in model.readouts.parameters())
+        set_foundation_stage(model,False)
+        assert all(p.requires_grad for p in model.products.parameters())
+
+
+def test_rejected_prior_keeps_conditioned_hidden_energy_features():
+    from mace import modules
+    from mace_scf.utils.foundation import condition_readouts
+    model=coupled_model()
+    model.readouts[0]=modules.NonLinearReadoutBlock(o3.Irreps('4x0e+4x1o'),o3.Irreps('4x0e'),torch.nn.functional.silu)
+    model.register_buffer('readout_feature_units',torch.ones(1,16))
+    model.register_buffer('foundation_element_map',torch.eye(2))
+    model.register_buffer('foundation_atomic_numbers',model.atomic_numbers.clone())
+    graph=small_data(batched=False);data=torch_geometric.Batch.from_data_list([graph]).to_dict()
+    energy=model.local_part(data,compute_force=True).energies.sum()
+    graph.forces=torch.autograd.grad(energy,data['positions'])[0].detach()  # anticorrelated prior
+    graph.forces_weight=torch.tensor(1.)
+    first=model.readouts[0].linear_1.weight.detach().clone()
+    loader=torch_geometric.dataloader.DataLoader([graph],batch_size=1)
+    condition_readouts(model,loader,'cpu')
+    assert not bool(model.readouts[0].linear_2.weight.any())
+    torch.testing.assert_close(model.readouts[0].linear_1.weight,first,rtol=0.,atol=0.)
+
+
+def test_finite_trajectory_stress_matches_strained_energy():
+    model=coupled_model();data=small_data()
+    result=evaluate_coupled(model,data,steps=4,compute_force=False,compute_stress=True)
+    epsilon=1.e-5;energies=[]
+    for sign in (-1,1):
+        shifted=small_data();strain=torch.eye(3);strain[0,0]+=sign*epsilon
+        for key in ('positions','cell','shifts'):shifted[key]=shifted[key]@strain
+        energies.append(evaluate_coupled(model,shifted,steps=4,compute_force=False)['energy'])
+    volume=torch.linalg.det(data['cell'].reshape(3,3)).abs()
+    torch.testing.assert_close((energies[1]-energies[0])/(2*epsilon*volume),result['stress'][:,0,0],atol=1.e-8,rtol=2.e-5)
