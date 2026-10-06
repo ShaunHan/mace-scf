@@ -58,7 +58,7 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
     import json
     from contextlib import nullcontext
     from mace_scf.electrostatics.potential import evaluate_electronic
-    from mace_scf.electrostatics.coupled_solver import SCFConvergenceError, SCFNumericalError
+    from mace_scf.electrostatics.coupled import SCFConvergenceError, SCFNumericalError
     if not getattr(getattr(model,"field_dependent_charges_map",None),"spectral",False):
         return
     rows={}
@@ -77,6 +77,7 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                 features=[]
                 targets=[]
                 low=[]
+                low_modes=[]
                 drifts=[]
                 charges=[]
                 force_squares=[]
@@ -87,6 +88,8 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                     batch=batch.to(device)
                     data=batch.to_dict()
                     output=evaluate_electronic(model,data,steps=50,compute_force=True)
+                    output={key:value.detach() if torch.is_tensor(value) else value
+                            for key,value in output.items()}
                     atom_error=(output["forces"].detach()-batch.forces).square()
                     observed=(batch.weight*batch.forces_weight)[batch.batch]>0
                     force_squares.append(atom_error[observed].reshape(-1).cpu())
@@ -146,6 +149,7 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                             if positive.numel():
                                 shell=use&(k2<=4*positive.min())
                                 low.append([float(diff[shell].square().sum()),float(diff[use].square().sum())])
+                                low_modes.append([int(shell.sum()),int(use.sum())])
                 rows[label]={"graphs":len(charges),"charge_span":[min(charges),max(charges)],
                     "step_comparison":drifts,"dEF_dQ_and_dWF_dQ_eV_per_e":charge_responses,
                     "force_RMSE_by_atomic_number_eV_A":{z:float(torch.cat(v).mean().sqrt()) for z,v in species_errors.items()}}
@@ -170,9 +174,25 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                 if low:
                     low=torch.tensor(low).sum(0)
                     rows[label]['low_k_potential_error_power_fraction']=float(low[0]/low[1].clamp_min(1.e-30))
+                    mode_counts=torch.tensor(low_modes).sum(0)
+                    rows[label]['low_k_mode_fraction']=float(mode_counts[0]/mode_counts[1])
+                    rows[label]['low_k_error_concentration']=float((low[0]/low[1].clamp_min(1.e-30))/(mode_counts[0]/mode_counts[1]))
             if all(k in feature_rows for k in ('train','validation')):
                 rows['model_field_readout_probe']=_ridge_report(feature_rows['train'],residual_rows['train'],feature_rows['validation'],residual_rows['validation'])
             rows['epoch']=epoch
+            if all('WF_relative_RMSE_eV' in rows[k] for k in ('train','validation')):
+                train,valid=rows['train'],rows['validation']
+                rows['WF_generalization']={
+                    'panel_relative_gap_eV':valid['WF_relative_RMSE_eV']-train['WF_relative_RMSE_eV'],
+                    'validation_covariance_amplification_eV2':-2*valid['EF_vac_covariance'],
+                    'bias_only_correction_is_insufficient':valid['WF_relative_RMSE_eV']>abs(valid['EF_vac_WF_bias'][2])}
+            response=model.field_dependent_charges_map
+            rows['response_weight_norms']={name:float(p.detach().norm()) for name,p in response.named_parameters()
+                                          if name.endswith('weight') and name.split('.')[0] in
+                                          ('common_level','scalar_out','vector_out','state_scalar','state_vector','neighbor_scalar','neighbor_vector')}
+            groups=getattr(getattr(wrapper,'optimizer',None),'param_groups',[])
+            rows['regularization']={'field_weight_decay':next((g['weight_decay'] for g in groups
+                if g.get('name')=='field_dependent_charges_map'),None)}
             rows['scope']='Deterministic panels, not whole-dataset metrics. Validation is development data, never used for fitting or selecting the probe.'
             logging.info("Electronic diagnostic %s",json.dumps(rows,allow_nan=False))
     finally:

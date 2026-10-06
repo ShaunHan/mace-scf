@@ -72,25 +72,17 @@ def build_model(
         radial_MLP=ast.literal_eval(args.radial_MLP),
         radial_type=args.radial_type,
     )
+    native_cueq = bool(getattr(args, 'enable_cueq', False)) and args.model in ('MACE','ScaleShiftMACE')
+    if native_cueq:
+        from mace.modules.wrapper_ops import CUET_AVAILABLE, CuEquivarianceConfig
+        if not CUET_AVAILABLE:
+            raise ImportError('enable_cueq=True requires the CuEquivariance packages')
+        model_config['cueq_config'] = CuEquivarianceConfig(
+            enabled=True, layout='ir_mul', group='O3_e3nn', optimize_all=True)
 
     model: torch.nn.Module
 
     if args.model == "MACE":
-        """ if args.scaling == "no_scaling":
-            std = 1.0
-            logging.info("No scaling selected")
-        else:
-            mean, std = mace.modules.scaling_classes[args.scaling](
-                train_loader, atomic_energies
-            )
-        model = mace.modules.ScaleShiftMACE(
-            **model_config,
-            interaction_cls_first=mace.modules.interaction_classes[
-                "RealAgnosticInteractionBlock"
-            ],
-            atomic_inter_scale=std,
-            atomic_inter_shift=0.0,
-        ) """
         model = mace.modules.MACE(
             **model_config,
             interaction_cls_first=mace.modules.interaction_classes[
@@ -221,6 +213,8 @@ def build_model(
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
+    if native_cueq:
+        model.backbone_layout = 'ir_mul'
     if foundation is not None:
         install_foundation(model, foundation)
         del foundation
@@ -255,6 +249,11 @@ def build_model(
         else:
             initialize(model, train_loader, args.device)
         condition_energy(model, train_loader, args.device)
+    if getattr(args, 'enable_cueq', False) and not native_cueq:
+        from .foundation import accelerate_backbone
+        if args.model not in ('FixedPoint','FixedPointCore'):
+            raise ValueError('CuEq conversion is supported for FixedPoint, FixedPointCore, MACE and ScaleShiftMACE')
+        accelerate_backbone(model, args.device)
     return model
 
 

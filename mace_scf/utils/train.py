@@ -1,6 +1,7 @@
 import random
 import logging
 import time
+from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
@@ -39,6 +40,7 @@ class CheckpointHandler(NativeCheckpointHandler):
         value["numpy_rng"] = np.random.get_state()
         value["torch_rng"] = torch.random.get_rng_state()
         value["cuda_rng"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        value['backbone_layout'] = getattr(state.model, 'backbone_layout', 'mul_ir')
         return value
 
     def save(self,state,epochs,keep_last=False):
@@ -77,6 +79,10 @@ class CheckpointHandler(NativeCheckpointHandler):
             logging.info("Loading checkpoint: %s", path)
             value=torch.load(path,map_location=device,weights_only=False)
             epoch=self.io._parse_checkpoint_path(path).epochs
+        layout = getattr(state.model, 'backbone_layout', 'mul_ir')
+        if value.get('backbone_layout', 'mul_ir') != layout:
+            raise ValueError('Checkpoint and requested backbone use different tensor-product layouts. '
+                             'Keep the original enable_cueq setting to resume, or start a fresh CuEq run in a new checkpoint directory; Adam moments cannot be relabeled.')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         self.best_loss=value.get("best_loss",float("inf"))
         if self.ema is not None and value.get("ema") is not None:
@@ -110,6 +116,10 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     stalled = 0
     best_epoch = None
     for epoch in range(start_epoch, end_epoch+1):
+        epoch_start = time.perf_counter()
+        cuda_device = torch.device(device).type == 'cuda'
+        if cuda_device:
+            torch.cuda.reset_peak_memory_stats(device)
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
         if hasattr(optimizer, "train"):
@@ -122,12 +132,21 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             norms.append(metrics["grad_norm_before_clip"])
             clipped += int(metrics["grad_clip_applied"])
         if epoch % eval_interval == 0 or epoch == end_epoch:
+            if cuda_device:
+                torch.cuda.synchronize(device)
+            train_seconds = time.perf_counter()-epoch_start
+            peak_mib = torch.cuda.max_memory_allocated(device)/2**20 if cuda_device else 0.
+            validation_start = time.perf_counter()
             if hasattr(optimizer, "eval"):
                 optimizer.eval()
             valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
             logging.info("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
                          [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)), clipped, len(norms))
+            logging.info('Epoch timing: train=%.3fs, validation=%.3fs, updates=%d, train/update=%.5fs, peak allocated=%.1f MiB, backbone=%s',
+                         train_seconds, time.perf_counter()-validation_start, len(norms),
+                         train_seconds/max(1,len(norms)), peak_mib,
+                         'CuEq' if getattr(model,'backbone_layout','mul_ir') == 'ir_mul' else 'e3nn')
             if log_wandb:
                 import wandb
                 wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
@@ -200,7 +219,11 @@ def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device):
     try:
         model.eval()
         model.requires_grad_(False)
-        return _evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device)
+        for parameter in model.parameters():
+            parameter.grad = None
+        # One EMA swap per split, not two full-model copies per minibatch.
+        with ema.average_parameters() if ema is not None else nullcontext():
+            return _evaluate(model, model_eval_wrapper, loss_fn, None, data_loader, device)
     finally:
         for parameter, flag in zip(model.parameters(), flags):
             parameter.requires_grad_(flag)
@@ -243,7 +266,6 @@ def _evaluate(
     delta_polarizability_per_atom_list = []
     total_charge_computed = False
     delta_total_charge_list = []
-    fermi_level_computed = False
     delta_fermi_level_list = []
     batch = None  # for pylint
 
@@ -265,10 +287,6 @@ def _evaluate(
 
         if hasattr(model, "batch_positions"):
             del model.batch_positions
-        for name, param in model.named_parameters():
-            param.requires_grad_(False)
-            param.grad = None
-
         # avoid memory leaks
         for key in output:
             if isinstance(output[key], torch.Tensor):
@@ -370,7 +388,6 @@ def _evaluate(
             )
             delta_total_charge_list.append(batch.total_charge - total_charge)
         if output.get("fermi_level") is not None and batch.fermi_level is not None:
-            fermi_level_computed = True
             use = batch.fermi_level_weight > 0
             if bool(use.any()):
                 delta_fermi_level_list.append((batch.fermi_level-output["fermi_level"])[use])
@@ -543,16 +560,16 @@ def valid_err_log(
 ):
     if "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
-                  (('rmse_e_per_atom','rmse_E','meV/atom'), ('rmse_f','rmse_F','meV/A'),
-                   ('rmse_mu_per_atom','rmse_dip','meA/atom'), ('rmse_rho','rmse_rho','me/A^3'),
-                   ('rmse_fermi_level','rmse_EF','meV')) if key in eval_metrics]
+                  (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
+                   ('rmse_mu_per_atom','RMSE_MU_per_atom','meA'), ('rmse_rho','RMSE_RHO','me/A^3'),
+                   ('rmse_fermi_level','RMSE_EF','meV')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
         if 'rmse_esp' in eval_metrics:
-            pieces.append(('rmse_esp(tot/vac)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_vac')
-                           if eval_metrics['esp_vacuum_enabled'] else 'rmse_esp='+fmt('rmse_esp'))+' mV')
+            pieces.append(('RMSE_ESP(tot/vac)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_vac')
+                           if eval_metrics['esp_vacuum_enabled'] else 'RMSE_ESP='+fmt('rmse_esp'))+' mV')
         if 'rmse_wf_abs' in eval_metrics:
-            pieces.append('rmse_wf(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
-        logging.info("Deployment validation epoch %d | loss=%.6g | %s", epoch, valid_loss, ' | '.join(pieces))
+            pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+        logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.info('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch
@@ -626,11 +643,6 @@ def valid_err_log(
         error_dma = eval_metrics["rmse_dma"] * 1e3
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_DMA={error_dma:.1f} me"
-        )
-    elif log_errors == "DipoleRMSE":
-        error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
-        logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_MU_per_atom={error_mu:.6f} meA/atom"
         )
     elif log_errors == "DensityDipoleRMSE":
         error_dma = eval_metrics["rmse_dma"] * 1e3

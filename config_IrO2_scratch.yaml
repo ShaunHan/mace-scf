@@ -17,6 +17,7 @@ heads:
       workfunction: vasp_workfunction
 seed: 7777
 device: cuda
+enable_cueq: true
 default_dtype: float64
 model: FixedPoint
 hidden_irreps: 64x0e + 64x1o
@@ -60,7 +61,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch_v367_hotfix2
+checkpoints_dir: checkpoints_IrO2_scratch_v368
 compute_forces: true
 train_schedule:
   0:

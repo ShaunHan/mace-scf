@@ -638,7 +638,7 @@ def create_scf_convergence_summary(
 
     if getattr(module.field_dependent_charges_map, 'spectral', False):
         from mace_scf.electrostatics.potential import evaluate_electronic
-        from mace_scf.electrostatics.coupled_solver import SCFConvergenceError, SCFNumericalError
+        from mace_scf.electrostatics.coupled import SCFConvergenceError, SCFNumericalError
         import json
         module.eval()
         module.requires_grad_(False)

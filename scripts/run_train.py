@@ -535,6 +535,7 @@ def main() -> None:
             if args.save_cpu:
                 model = model.to("cpu")
             torch.save(model, model_path)
+            Path(args.model_dir).mkdir(parents=True, exist_ok=True)
             torch.save(model, Path(args.model_dir) / (args.name + "_" + stage_name + ".model"))
             stages_with_models.append((train_stage, stage_tag))
 

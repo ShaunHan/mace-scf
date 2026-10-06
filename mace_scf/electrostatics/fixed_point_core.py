@@ -470,10 +470,12 @@ class FixedPointCore(torch.nn.Module):
                 sc=sc,
                 node_attrs=backbone_attrs,
             )
-            features.append(node_feats.clone())
+            physical_feats = (node_feats[:, self.backbone_to_e3nn]
+                              if getattr(self, 'backbone_layout', 'mul_ir') == 'ir_mul' else node_feats)
+            features.append(physical_feats)
             readout = self.readouts[0 if len(self.readouts)==1 else layer_index]
-            readout_feats = (node_feats/self.readout_feature_units[layer_index]
-                             if hasattr(self,'readout_feature_units') else node_feats)
+            readout_feats = (physical_feats/self.readout_feature_units[layer_index]
+                             if hasattr(self,'readout_feature_units') else physical_feats)
             node_energies = readout(readout_feats).squeeze(-1)
             energy = scatter_sum(
                 src=node_energies,
@@ -486,7 +488,7 @@ class FixedPointCore(torch.nn.Module):
             if not getattr(self.field_dependent_charges_map, "variational", False):
                 charge_sources = lr_source_map(
                     node_attrs=data["node_attrs"] if getattr(self.field_dependent_charges_map, "coupled", False) else backbone_attrs,
-                    node_feats=readout_feats if getattr(self.field_dependent_charges_map, "coupled", False) else node_feats,
+                    node_feats=readout_feats if getattr(self.field_dependent_charges_map, "coupled", False) else physical_feats,
                 )
                 charge_density += charge_sources.squeeze(-2)
 
@@ -522,7 +524,7 @@ class FixedPointCore(torch.nn.Module):
         )
 
         return LocalState(
-            node_feats=node_feats,
+            node_feats=physical_feats,
             all_layer_feats=all_layer_feats,
             edge_attrs=edge_attrs,
             edge_feats=edge_feats,

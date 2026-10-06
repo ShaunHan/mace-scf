@@ -43,6 +43,7 @@ def install_foundation(model, foundation):
         mapping[i, source.index(z)] = 1.
     model.register_buffer("foundation_element_map", mapping)
     model.register_buffer("foundation_atomic_numbers", foundation.atomic_numbers.clone())
+    model.use_reduced_cg = bool(getattr(foundation, 'use_reduced_cg', False))
     for name in ("node_embedding", "radial_embedding", "spherical_harmonics", "interactions", "products", "readouts", "layer_feature_mixer"):
         if hasattr(foundation, name):
             setattr(model, name, deepcopy(getattr(foundation, name)))
@@ -55,6 +56,112 @@ def install_foundation(model, foundation):
     model.register_buffer("foundation_energy_scale", torch.tensor(scale))
     model.register_buffer("foundation_energy_shift", torch.tensor(shift))
     logging.info("Foundation: exact module adoption, %d species retained, native neighbour normalization preserved", len(source))
+
+
+class FusedConvolution(torch.nn.Module):
+    """Serializable CuEq tensor product and scatter, with the same CPU map.
+
+    Older MACE releases attach a local Python function to the CuEq module.
+    A normal module keeps full-model exports reloadable on those releases too.
+    """
+    def __init__(self, unfused, dtype):
+        super().__init__()
+        import cuequivariance as cue
+        import cuequivariance_torch as cuet
+        descriptor = cue.descriptors.channelwise_tensor_product(
+            unfused.irreps_in1, unfused.irreps_in2, unfused.irreps_out)
+        polynomial = descriptor.flatten_coefficient_modes().squeeze_modes().polynomial
+        self.fused = cuet.SegmentedPolynomial(polynomial, math_dtype=dtype, method='uniform_1d')
+        if self.fused.method != 'uniform_1d':
+            raise RuntimeError('CuEq fused CUDA convolution is unavailable; check the CUDA ops installation.')
+        self.weight_numel = polynomial.operands[0].size
+        self.unfused = unfused
+
+    def forward(self, node_feats, edge_attrs, weights, edge_index):
+        sender, receiver = edge_index
+        if node_feats.device.type == 'cuda':
+            return self.fused([weights, node_feats, edge_attrs], {1:sender},
+                              {0:node_feats}, {0:receiver})[0]
+        messages = self.unfused(node_feats[sender], edge_attrs, weights)
+        return scatter_sum(messages, receiver, dim=0, dim_size=len(node_feats))
+
+
+def accelerate_backbone(model, device):
+    """Convert the realized backbone with MACE's CuEq weight transformation.
+
+    Conversion follows conditioning and precedes optimizer/EMA creation. The
+    electronic law and readouts stay in their physical/e3nn coordinates; the
+    equivariant message-passing blocks use ir_mul and fused CUDA convolution.
+    The upstream symmetric-contraction projection preserves the realized CG
+    basis, including the older MACE-POLAR basis. No flattened-weight guessing.
+    """
+    from mace.modules import EquivariantProductBasisBlock
+    from mace.modules.wrapper_ops import CUET_AVAILABLE, CuEquivarianceConfig
+    from mace.cli.convert_e3nn_cueq import transfer_weights
+    if not CUET_AVAILABLE:
+        raise ImportError('enable_cueq=True requires cuequivariance and cuequivariance-torch; install the matching CUDA ops package on GPU hosts.')
+    if torch.device(device).type == 'cuda':
+        try:
+            import cuequivariance_ops_torch  # noqa: F401
+        except ImportError as exc:
+            raise ImportError('enable_cueq=True on CUDA requires cuequivariance-ops-torch matching torch.version.cuda; refusing a silent unaccelerated run.') from exc
+    if getattr(model, 'backbone_layout', 'mul_ir') == 'ir_mul':
+        return
+    dtype = next(model.parameters()).dtype
+    original_dtype = torch.get_default_dtype()
+    source = torch.nn.Module()
+    source.interactions, source.products = model.interactions, model.products
+    target = torch.nn.Module()
+    target.interactions, target.products = torch.nn.ModuleList(), torch.nn.ModuleList()
+    cuda_fusion = torch.device(device).type == 'cuda'
+    # The serializable adapter below avoids the old MACE bound-method export.
+    config = CuEquivarianceConfig(enabled=True, layout='ir_mul', group='O3_e3nn',
+                                  optimize_all=True, conv_fusion=False)
+    reduced = bool(getattr(model, 'use_reduced_cg', False))
+    try:
+        torch.set_default_dtype(dtype)
+        # Backend conversion must not alter later shuffling or initialization.
+        with torch.random.fork_rng(devices=[]):
+            for interaction, product in zip(source.interactions, source.products):
+                names = ('node_attrs_irreps', 'node_feats_irreps', 'edge_attrs_irreps',
+                         'edge_feats_irreps', 'target_irreps', 'hidden_irreps', 'radial_MLP')
+                options = {name: getattr(interaction, name) for name in names}
+                options.update(avg_num_neighbors=float(interaction.avg_num_neighbors),
+                               edge_irreps=getattr(interaction, 'edge_irreps', None), cueq_config=config)
+                target.interactions.append(type(interaction)(**options))
+                contraction = product.symmetric_contractions
+                correlation = len(contraction.contractions[0].weights)+1
+                target.products.append(EquivariantProductBasisBlock(
+                    node_feats_irreps=contraction.irreps_in,
+                    target_irreps=o3.Irreps(str(product.linear.irreps_out)),
+                    correlation=correlation, use_sc=product.use_sc,
+                    num_elements=interaction.node_attrs_irreps.dim,
+                    use_agnostic_product=getattr(product, 'use_agnostic_product', False),
+                    use_reduced_cg=reduced, cueq_config=config))
+            target.to(device=device, dtype=dtype)
+            transfer_weights(source, target, o3.Irreps(str(source.products[0].linear.irreps_out)).lmax,
+                             correlation, len(source.products), reduced, True)
+            if cuda_fusion:
+                for interaction in target.interactions:
+                    interaction.conv_tp = FusedConvolution(interaction.conv_tp, dtype).to(device)
+                    interaction.conv_fusion = True
+    finally:
+        torch.set_default_dtype(original_dtype)
+    for old, new in zip(source.interactions, target.interactions):
+        new.requires_grad_(any(p.requires_grad for p in old.parameters()))
+    for old, new in zip(source.products, target.products):
+        new.requires_grad_(any(p.requires_grad for p in old.parameters()))
+    # One common realized feature irrep is required by the layer mixer.
+    irreps = o3.Irreps(str(source.products[0].linear.irreps_out))
+    indices=[]
+    for (mul, ir), sl in zip(irreps, irreps.slices()):
+        indices.append(torch.arange(sl.start, sl.stop).reshape(ir.dim,mul).T.flatten())
+    model.register_buffer('backbone_to_e3nn', torch.cat(indices).to(device), persistent=False)
+    model.interactions, model.products = target.interactions, target.products
+    model.backbone_layout = 'ir_mul'
+    model.train(model.training)
+    logging.info('CuEquivariance ACTIVE: %d interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=%s; electronic response/readouts retain their original coordinates',
+                 len(model.interactions), cuda_fusion)
 
 
 def calibration_loader(loader, maximum=64):

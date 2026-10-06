@@ -58,8 +58,8 @@ def create_error_table(
 
     if table_type == "ElectrostaticRMSE":
         vacuum_enabled = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
-        esp_title = 'rmse_esp(tot/vac) mV' if vacuum_enabled else 'rmse_esp mV'
-        table.field_names = ["split", "rmse_E meV/atom", "rmse_F meV/A", "rmse_dip meA/atom", "rmse_rho me/A^3", "rmse_EF meV", esp_title, "rmse_wf(abs/rel) meV"]
+        esp_title = 'RMSE_ESP(tot/vac) mV' if vacuum_enabled else 'RMSE_ESP mV'
+        table.field_names = ["split", "RMSE_E meV/atom", "RMSE_F meV/A", "RMSE_MU meA/atom", "RMSE_RHO me/A^3", "RMSE_EF meV", esp_title, "RMSE_WF(abs/rel) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 

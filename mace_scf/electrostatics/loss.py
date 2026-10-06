@@ -11,7 +11,6 @@ from mace.modules.loss import (
     weighted_mean_squared_stress,
 )
 from .utils import compute_effective_index
-import logging
 
 
 def weighted_mean_squared_error_charge(ref: Batch, pred: TensorDict) -> torch.Tensor:
@@ -444,7 +443,6 @@ class WeightedLoss(torch.nn.Module):
         
     def forward(self, ref: Batch, pred: TensorDict) -> torch.Tensor:
         loss = 0.
-        logstring = "loss breakdown: "
         # set weights to discount non-converged scf
         if "loss_weight_modifier" in pred:
             data_weight = torch.clone(ref.weight)
@@ -454,8 +452,6 @@ class WeightedLoss(torch.nn.Module):
                 continue
             loss_component = self.loss_weights[name] * func(ref, pred)
             loss += loss_component
-            logstring += f'{name}: {loss_component}, ' 
-        logging.debug(logstring)
         if "loss_weight_modifier" in pred:
             ref.weight = data_weight
         return loss
