@@ -72,11 +72,12 @@ def test_validation_restores_frozen_parameters_after_failure():
     assert not model.bias.requires_grad
 
 
-def test_validation_and_calculator_use_deployment_step_count(tmp_path):
+@pytest.mark.parametrize('mode', ['implicit', 'unroll_scf', 'shortcut_scf'])
+def test_validation_and_calculator_use_deployment_step_count(tmp_path, mode):
     from ase import Atoms
     from mace_scf.electrostatics.potential import evaluate_variational
     model=small_model()
-    options=FixedPointTrainingOptions(mode='implicit',scf=FixedPointSCFOptions(num_scf_steps=100,constant_charge=True))
+    options=FixedPointTrainingOptions(mode=mode,scf=FixedPointSCFOptions(num_scf_steps=100,constant_charge=True))
     wrapper=FixedPointWrapper(None,{'forces':True,'stress':False,'virials':False},options)
     training=wrapper(model,small_data(),training=True)
     validation=wrapper(model,small_data(),training=False)
@@ -113,9 +114,27 @@ def test_validation_and_calculator_use_deployment_step_count(tmp_path):
 def test_diagnostics_module_is_optional():
     import sys
     from unittest.mock import patch
+    from mace.tools import torch_geometric
     from mace_scf.utils import create_scf_convergence_summary
+    model = small_model()
+    model.field_dependent_charges_map.deployment_mode = 'unroll_scf'
+    model.train()
+    flags = [p.requires_grad for p in model.parameters()]
+    loader = torch_geometric.dataloader.DataLoader([small_data(batched=False)], batch_size=1)
     with patch.dict(sys.modules, {'mace_scf.utils.diagnostics': None}):
-        assert 'not installed' in create_scf_convergence_summary(None)
+        result = create_scf_convergence_summary(model, {'valid': loader}, {'forces': True}, 'cpu', {})
+    assert 'mode=unroll_scf' in result
+    assert 'residual_50' in result and 'WF_50_minus_100_eV' in result
+    assert model.training
+    assert [p.requires_grad for p in model.parameters()] == flags
+
+
+def test_md_package_keeps_public_and_submodule_imports():
+    from mace_scf.md import NVTPhiLangevin, NVTPhiVelocityVerlet, NVTPhiMDLogger
+    from mace_scf.md.nvtphi_langevin import NVTPhiLangevin as Langevin
+    from mace_scf.md.nvtphi_verlet import NVTPhiVelocityVerlet as Verlet
+    from mace_scf.md.logger import NVTPhiMDLogger as Logger
+    assert (NVTPhiLangevin, NVTPhiVelocityVerlet, NVTPhiMDLogger) == (Langevin, Verlet, Logger)
 
 
 def test_yaml_false_is_not_true_for_amsgrad(tmp_path):
@@ -136,3 +155,39 @@ def test_bulk_does_not_dilute_vacuum_observation():
     pred = {'vacuum_potential': torch.tensor([2., 0.]),
             'vacuum_potential_dft': torch.tensor([1., 0.])}
     torch.testing.assert_close(weighted_vacuum_potential(ref, pred), torch.tensor(1.))
+
+
+def test_saved_solver_policy_and_original_v367_state_dict():
+    source = small_model()
+    target = small_model()
+    source.field_dependent_charges_map.deployment_mode = 'unroll_scf'
+    state = source.state_dict()
+    target.load_state_dict(state)
+    assert target.field_dependent_charges_map.deployment_mode == 'unroll_scf'
+    del state['field_dependent_charges_map._extra_state']
+    target.load_state_dict(state, strict=True)
+    assert target.field_dependent_charges_map.deployment_mode == 'implicit'
+
+
+def test_finite_validation_can_report_an_unconverged_state(tmp_path):
+    model = small_model()
+    with torch.no_grad():
+        model.field_dependent_charges_map.hardness_scale.mul_(1.e-4)
+    options = FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=1))
+    wrapper = FixedPointWrapper(None, {'forces':True, 'stress':False, 'virials':False}, options)
+    output = wrapper(model, small_data(), training=False)
+    assert output['scf_steps'].item() == 50
+    assert output['scf_residual'].item() > options.scf.scf_tolerance
+    assert torch.isfinite(output['forces']).all()
+    from ase import Atoms
+    path = tmp_path/'finite.model'
+    torch.save(model, path)
+    atoms = Atoms('OHH', positions=small_data()['positions'].numpy(), cell=[7, 7, 12], pbc=[1, 1, 0])
+    atoms.info.update(total_charge=.1, external_field=np.array([0., 0., .02]))
+    atoms.calc = MACEFixedPointSCF(str(path), device='cpu')
+    np.testing.assert_allclose(atoms.get_potential_energy(), output['energy'].detach().numpy()[0], rtol=1.e-9, atol=1.e-9)
+    np.testing.assert_allclose(atoms.get_forces(), output['forces'].detach().numpy(), rtol=1.e-9, atol=1.e-9)
+    assert not atoms.calc.results['scf_converged']
+    atoms.calc = MACEFixedPointSCF(str(path), device='cpu', ignore_nonconverged=False)
+    with pytest.raises(RuntimeError, match='Electronic residual'):
+        atoms.get_potential_energy()

@@ -4,7 +4,7 @@ from dataclasses import fields
 from .fixed_point_state import FixedPointSCFOptions, FixedPointTrainingOptions
 
 
-FIXED_POINT_MODES = ("direct", "unroll_scf", "implicit", "linearize_solve")
+FIXED_POINT_MODES = ("direct", "unroll_scf", "shortcut_scf", "implicit", "linearize_solve")
 SCF_OPTION_KEYS = {field.name for field in fields(FixedPointSCFOptions)}
 TRAINING_OPTION_KEYS = {
     "mode",

@@ -112,7 +112,7 @@ class FixedPointSCFRunner:
 
         local_state = model.local_part(
             data,
-            compute_force=compute_force,
+            compute_force=compute_force or training,
         )
 
         initial_density = self.get_initial_density(local_state, data)
@@ -124,7 +124,7 @@ class FixedPointSCFRunner:
             local_state=local_state,
             initial_density=initial_density,
             initial_fermi_level=initial_fermi_level,
-            compute_force=compute_force,
+            compute_force=compute_force or training,
             num_scf_steps=num_scf_steps,
         )
         

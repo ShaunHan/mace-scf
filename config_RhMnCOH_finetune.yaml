@@ -94,7 +94,7 @@ train_schedule:
         use_autograd_forces: true
   2:
     name: stage3
-    start: 50
+    start: 500
     end: 550
     lr: 0.001
     loss:

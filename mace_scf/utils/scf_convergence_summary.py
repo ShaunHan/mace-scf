@@ -1,3 +1,4 @@
+"""Permanent SCF convergence reports, independent of optional diagnostics."""
 import logging
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -11,17 +12,21 @@ from mace.tools.torch_tools import tensor_dict_to_device
 from mace.tools.utils import compute_rel_rmse, compute_rmse
 
 from mace_scf.electrostatics.fixed_point_runner import FixedPointSCFRunner
-from mace_scf.electrostatics.fixed_point_scf import (
-    CONSTANT_CHARGE_CONVERGED_TOTAL_CHARGE_TOL,
-)
+from mace_scf.electrostatics.fixed_point_scf import CONSTANT_CHARGE_CONVERGED_TOTAL_CHARGE_TOL
 from mace_scf.electrostatics.fixed_point_state import FixedPointSCFOptions
-
 
 SCF_SUMMARY_NUM_STEPS = 100
 SCF_SUMMARY_TOLERANCE = 1e-7
 SCF_SUMMARY_DEFAULT_MIXING_VALUES = (0.2,)
 SCF_SUMMARY_INITIAL_DENSITY = "local_guess"
 SCF_SUMMARY_INITIAL_FERMI_LEVEL = "from_data"
+
+
+def _panel(loader, maximum):
+    count = len(loader.dataset)
+    indices = np.linspace(0, count-1, min(maximum, count)).round().astype(int)
+    return torch_geometric.dataloader.DataLoader(
+        [loader.dataset[int(i)] for i in np.unique(indices)], batch_size=1, shuffle=False)
 
 
 def is_fixed_point_model(model: torch.nn.Module) -> bool:
@@ -600,6 +605,23 @@ def _render_error_table(setting_result, table_type: str):
     return table
 
 
+def _preserve_model_state(function):
+    from functools import wraps
+    @wraps(function)
+    def wrapped(model, *args, **kwargs):
+        module = model.module if hasattr(model, 'module') else model
+        flags = [p.requires_grad for p in module.parameters()]
+        training = module.training
+        try:
+            return function(model, *args, **kwargs)
+        finally:
+            for p, flag in zip(module.parameters(), flags):
+                p.requires_grad_(flag)
+            module.train(training)
+    return wrapped
+
+
+@_preserve_model_state
 def create_scf_convergence_summary(
     model,
     all_data_loaders: Dict,
@@ -613,6 +635,35 @@ def create_scf_convergence_summary(
     module = model.module if hasattr(model, "module") else model
     if not is_fixed_point_model(module):
         return "SCF convergence summary skipped: model is not FixedPoint/FixedPointCore."
+
+    if getattr(module.field_dependent_charges_map, 'variational', False):
+        from mace_scf.electrostatics.potential import evaluate_variational
+        import json
+        module.eval()
+        module.requires_grad_(False)
+        report = {}
+        mode = getattr(module.field_dependent_charges_map, 'deployment_mode', 'implicit')
+        for name, loader in all_data_loaders.items():
+            values = []
+            for batch in _panel(loader, 16):
+                data = batch.to(device).to_dict()
+                outputs, row = {}, {}
+                for steps in (50, 100):
+                    try:
+                        output = evaluate_variational(module, data, steps=steps, compute_force=True, mode=mode)
+                    except RuntimeError as exc:
+                        if 'Electronic linear solve did not converge' not in str(exc):
+                            raise
+                        row[f'failure_{steps}'] = str(exc)
+                    else:
+                        outputs[steps] = output
+                        row[f'residual_{steps}'] = float(output['scf_residual'].detach().max())
+                if len(outputs) == 2:
+                    row['WF_50_minus_100_eV'] = float((outputs[50]['workfunction']-outputs[100]['workfunction']).detach().abs().max())
+                    row['F_50_minus_100_max_eV_A'] = float((outputs[50]['forces']-outputs[100]['forces']).detach().abs().max())
+                values.append(row)
+            report[name] = values
+        return f'Electronic convergence panels, mode={mode} (50 versus 100 steps): '+json.dumps(report)
 
     for param in module.parameters():
         param.requires_grad_(False)

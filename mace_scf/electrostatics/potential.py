@@ -59,6 +59,7 @@ class VariationalResponse(nn.Module):
         self.register_buffer("proto_coefficients", torch.zeros(num_elements, 64))
         self.register_buffer("proto_fitted", torch.tensor(False))
         self.register_buffer("deployment_steps", torch.tensor(50))
+        self.deployment_mode = "implicit"
         self.register_buffer("spectral_cutoff", torch.tensor(1.))
         with torch.no_grad():
             for p in self.drive.parameters():
@@ -80,6 +81,25 @@ class VariationalResponse(nn.Module):
             pieces.append(value)
             diagonals.append(h[:, j:j+1].expand(-1, mul * ir.dim))
         return torch.cat(pieces, -1), torch.cat(diagonals, -1)
+
+    def get_extra_state(self):
+        return {"deployment_mode": getattr(self, "deployment_mode", "implicit")}
+
+    def set_extra_state(self, state):
+        mode = state.get("deployment_mode", "implicit")
+        if mode not in ("implicit", "unroll_scf"):
+            raise ValueError(f"Unsupported saved deployment mode: {mode}")
+        self.deployment_mode = mode
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Original v367 checkpoints predate solver metadata and used implicit.
+        key = prefix+"_extra_state"
+        if key not in state_dict:
+            state_dict = dict(state_dict)
+            state_dict[key] = {"deployment_mode": "implicit"}
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
 
 def reciprocal_grid(cell, cutoff):
@@ -379,10 +399,63 @@ class _ElectronicSolve(torch.autograd.Function):
         return (adjoint, *derivatives, None, None)
 
 
+def unroll_electronic(operator, rhs, hardness, coulomb_diagonal, constraint, steps,
+                      checkpoint_steps=False):
+    """Finite Chebyshev iteration of the positive electronic functional.
+
+    Local-hardness preconditioning preserves rotations within each irrep.
+    The transformed Hessian is I + C with C positive semidefinite, so
+    [1, 1 + trace(C)] bounds its spectrum, also after charge projection.
+    This gives a stable polynomial iteration without a convergence requirement
+    or a density-dependent line search. Its zero-RHS susceptibility is nonzero.
+    All configured iterations are differentiated; checkpointing only recomputes
+    intermediates and does not replace force derivatives with a terminal map.
+    """
+    from torch.utils.checkpoint import checkpoint
+
+    root = hardness.rsqrt()
+    normal = root*constraint
+    norm = normal.square().sum((1, 2), keepdim=True).clamp_min(1.e-30)
+
+    def project(value):
+        return value-normal*(value*normal).sum((1, 2), keepdim=True)/norm
+
+    upper = 1.+(coulomb_diagonal/hardness).sum((1, 2), keepdim=True)
+    center = (upper+1.)/2.
+    radius = (upper-1.)/2.
+    right = project(root*rhs)
+    solution = torch.zeros_like(right)
+    direction = torch.zeros_like(right)
+    alpha = 1./center
+    for iteration in range(int(steps)):
+        if iteration == 0:
+            beta = torch.zeros_like(alpha)
+        else:
+            beta = (radius*alpha).square()*(.5 if iteration == 1 else .25)
+            alpha = 1./(center-beta/alpha)
+
+        def update(value, previous, step_size, momentum):
+            residual = right-project(root*operator(root*project(value)))
+            next_direction = residual+momentum*previous
+            return value+step_size*next_direction, next_direction
+
+        if checkpoint_steps and torch.is_grad_enabled():
+            solution, direction = checkpoint(update, solution, direction, alpha, beta,
+                                             use_reentrant=False, preserve_rng_state=False)
+        else:
+            solution, direction = update(solution, direction, alpha, beta)
+    return root*project(solution)
+
+
+@torch.enable_grad()
 def evaluate_variational(model, data, steps=50, training=False, compute_force=True,
-                         constant_charge=True, compute_stress=False):
-    """Evaluate the same converged electronic solve used by the deployed model."""
+                         constant_charge=True, compute_stress=False, mode=None):
+    """Evaluate a finite trajectory or a converged implicit electronic state."""
     response = model.field_dependent_charges_map
+    mode = getattr(response, "deployment_mode", "implicit") if mode is None else mode
+    if mode not in ("unroll_scf", "shortcut_scf", "implicit"):
+        raise ValueError(f"Unknown variational electronic mode: {mode}")
+    finite_steps = mode != "implicit"
     if int(steps) < 1:
         raise ValueError("num_scf_steps must be positive")
     # Strain all coordinates, cells and periodic image shifts together.
@@ -422,6 +495,10 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     fixed_drive = drive+geom.adjoint(geom.applied+geom.counter)
     rhs = fixed_drive
     target = data["total_charge"].reshape(-1)
+    if finite_steps and constant_charge:
+        # Away from stationarity the KKT multiplier alone is not -dE/dQ.
+        # Differentiate the actual finite-budget energy, just as for forces.
+        target.requires_grad_(True)
     constraint = geom.constraint
     if not constant_charge:
         mu = data["fermi_level"].reshape(-1)-model.fermi_level_offset
@@ -440,7 +517,11 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     tangent_rhs = _project_charge(rhs-operator(seed), constraint)
     matrix = (hardness, geom.phase, geom.basis, geom.coulomb/geom.volume[:, None],
               geom.normal_moment, geom.slab_factor, constraint)
-    correction = _ElectronicSolve.apply(tangent_rhs, *matrix, diagonal, int(steps))
+    if finite_steps:
+        correction = unroll_electronic(operator, tangent_rhs, hardness,
+            geom.diagonal(), constraint, int(steps), checkpoint_steps=mode == "shortcut_scf")
+    else:
+        correction = _ElectronicSolve.apply(tangent_rhs, *matrix, diagonal, int(steps))
     state = seed+_project_charge(correction, constraint)
     gradient = operator(state)-rhs
     multiplier = -(gradient*constraint).sum((1, 2))/norm.reshape(-1)
@@ -457,11 +538,15 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     # For fixed mu the differentiated mechanical potential is E + mu*Q.
     mechanical = energy if constant_charge else energy+mu*charge
     forces, stress = None, None
-    if compute_force or compute_stress:
-        inputs = ([positions] if compute_force else [])+([strain] if compute_stress else [])
+    charge_derivative = finite_steps and constant_charge
+    if compute_force or compute_stress or charge_derivative:
+        inputs = ([target] if charge_derivative else [])+([positions] if compute_force else [])+([strain] if compute_stress else [])
         derivatives = torch.autograd.grad(mechanical.sum(), inputs, create_graph=training, retain_graph=training, allow_unused=True)
+        if charge_derivative:
+            mu = -derivatives[0]
         if compute_force:
-            forces = -derivatives[0] if derivatives[0] is not None else torch.zeros_like(positions)
+            derivative = derivatives[int(charge_derivative)]
+            forces = -derivative if derivative is not None else torch.zeros_like(positions)
         if compute_stress:
             derivative = derivatives[-1]
             stress = derivative/geom.volume[:, None, None] if derivative is not None else torch.zeros_like(strain)

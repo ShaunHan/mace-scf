@@ -72,12 +72,13 @@ class FixedPointWrapper:
 
     Supports fixed-point training modes:
       - direct: single fixed-point update using reference density from data
-      - unroll_scf: full SCF convergence with gradients through the loop
+      - unroll_scf: differentiate the configured finite electronic trajectory
+      - shortcut_scf: checkpoint/recompute the trajectory, preserving derivatives
       - implicit: converge SCF then use implicit differentiation for gradients
       - linearize_solve: converge SCF then differentiate a dense linearization
     """
 
-    MODES = ("direct", "unroll_scf", "implicit", "linearize_solve")
+    MODES = ("direct", "unroll_scf", "shortcut_scf", "implicit", "linearize_solve")
 
     def __init__(
         self,
@@ -106,10 +107,13 @@ class FixedPointWrapper:
             f"fixedpoint_scf_stability={training_options.fixedpoint_scf_stability}"
         )
 
-        if self.mode in ("unroll_scf", "implicit", "linearize_solve"):
+        if self.mode in ("unroll_scf", "shortcut_scf", "implicit", "linearize_solve"):
             if not isinstance(self.scf_options, FixedPointSCFOptions):
                 raise ValueError(f"mode={self.mode} requires FixedPointSCFOptions")
-            self._runner = FixedPointSCFRunner(self.scf_options)
+            from dataclasses import replace
+            runner_options = (replace(self.scf_options, use_autograd_forces=True)
+                              if self.mode in ("unroll_scf", "shortcut_scf") else self.scf_options)
+            self._runner = FixedPointSCFRunner(runner_options)
         if self.mode in ("implicit", "linearize_solve"):
             self._linear_solve = training_options.linear_solve
 
@@ -128,28 +132,40 @@ class FixedPointWrapper:
         with param_context:
             if getattr(model.field_dependent_charges_map, "variational", False):
                 from mace_scf.electrostatics.potential import evaluate_variational
-                if self.mode != "implicit":
-                    raise ValueError("VariationalResponse uses implicit mode to differentiate its converged positive electronic functional")
+                if self.mode not in ("unroll_scf", "shortcut_scf", "implicit"):
+                    raise ValueError("VariationalResponse supports unroll_scf, shortcut_scf and implicit")
+                # The exported model records its forward solver. Checkpointed
+                # training deploys the identical ordinary finite trajectory.
+                response = model.field_dependent_charges_map
+                response.deployment_mode = "unroll_scf" if self.mode == "shortcut_scf" else self.mode
+                if not getattr(self, '_logged_variational_policy', False):
+                    logging.info('VariationalResponse mode=%s: %d training steps; %d validation/deployment steps. '
+                                 'Finite modes use bounded Chebyshev coefficients, not the native mixing_parameter.',
+                                 self.mode, self.scf_options.num_scf_steps, int(response.deployment_steps))
+                    self._logged_variational_policy = True
                 steps = (self.scf_options.num_scf_steps if training else
                          int(model.field_dependent_charges_map.deployment_steps))
                 return evaluate_variational(model, batch_dict, steps=steps,
                     training=training, compute_force=self.output_args.get("forces", False),
                     constant_charge=self.scf_options.constant_charge,
-                    compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False))
+                    compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
+                    mode=self.mode if training else response.deployment_mode)
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)
             elif self.mode == "unroll_scf":
                 return self._forward_unroll_scf(model, batch_dict, training)
+            elif self.mode == "shortcut_scf":
+                if not training:
+                    return self._forward_unroll_scf(model, batch_dict, training)
+                from torch.utils.checkpoint import checkpoint
+                return checkpoint(lambda data: self._forward_unroll_scf(model, data, training),
+                                  batch_dict, use_reentrant=False, preserve_rng_state=True)
             elif self.mode == "implicit":
                 return self._forward_implicit(model, batch_dict, training)
             elif self.mode == "linearize_solve":
                 return self._forward_linearize_solve(model, batch_dict, training)
 
     def _forward_direct(self, model, batch_dict, training):
-        if training:
-            for p in model.parameters():
-                p.requires_grad = True
-
         local_state = model.local_part(
             batch_dict,
             compute_force=self.output_args["forces"],
@@ -244,9 +260,6 @@ class FixedPointWrapper:
         )
 
     def _forward_implicit(self, model, batch_dict, training):
-        for p in model.parameters():
-            p.requires_grad = True
-
         local_state = model.local_part(
             batch_dict, compute_force=self.output_args["forces"]
         )
@@ -321,9 +334,6 @@ class FixedPointWrapper:
         return output
 
     def _forward_linearize_solve(self, model, batch_dict, training):
-        for p in model.parameters():
-            p.requires_grad = True
-
         local_state = model.local_part(
             batch_dict,
             compute_force=self.output_args["forces"],

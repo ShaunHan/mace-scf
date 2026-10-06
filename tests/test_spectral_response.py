@@ -11,8 +11,88 @@ from mace_scf.data import ExtAtomicData
 from mace_scf.electrostatics.fixed_point_core import FixedPointCore
 from mace_scf.electrostatics.field_blocks import StrictQuadraticFieldEnergyReadout
 from mace_scf.electrostatics.potential import (
-    VariationalResponse, SpectralGeometry, conjugate_gradient, evaluate_variational,
+    VariationalResponse, SpectralGeometry, conjugate_gradient, evaluate_variational, unroll_electronic,
 )
+
+
+@pytest.mark.parametrize('zero', [False, True])
+def test_finite_iteration_first_second_derivatives_and_checkpoint(zero):
+    torch.set_default_dtype(torch.float64)
+    torch.manual_seed(13)
+    matrix = torch.randn(1, 6, 6)*.2
+    coulomb = matrix@matrix.mT
+    hardness = torch.full((1, 3, 2), 2., requires_grad=True)
+    rhs = (torch.zeros_like(hardness) if zero else torch.randn_like(hardness)).requires_grad_()
+    constraint = torch.zeros_like(rhs)
+    constraint[..., 0] = 1.
+    diag = coulomb.diagonal(dim1=-2, dim2=-1).reshape_as(rhs)
+
+    def solve(value, local, checkpoint=False):
+        operator = lambda state: local*state+(coulomb@state.flatten(1)[..., None]).reshape_as(state)
+        return unroll_electronic(operator, value, local, diag, constraint, 3, checkpoint)
+
+    assert torch.autograd.gradcheck(solve, (rhs, hardness))
+    assert torch.autograd.gradgradcheck(solve, (rhs, hardness))
+    full = solve(rhs, hardness)
+    short = solve(rhs, hardness, True)
+    torch.testing.assert_close(full, short)
+    for result in (full, short):
+        gradient = torch.autograd.grad(result.square().sum()+result[0, 0, 1], (rhs, hardness), create_graph=True)
+        assert torch.isfinite(torch.autograd.grad(sum(g.square().sum() for g in gradient), rhs)[0]).all()
+        assert gradient[0].abs().max() > 0
+
+
+@pytest.mark.parametrize('steps', [1, 3, 12])
+def test_finite_energy_force_ef_conjugacy(steps):
+    model = small_model()
+    data = small_data()
+    result = evaluate_variational(model, data, steps=steps, mode='unroll_scf', training=True)
+    epsilon = 1.e-5
+    charge_energies, position_energies = [], []
+    for sign in (-1, 1):
+        charge_energies.append(evaluate_variational(model, small_data(.1+sign*epsilon), steps=steps,
+                                                   mode='unroll_scf', compute_force=False)['energy'])
+        shifted = small_data()
+        shifted['positions'][0, 2] += sign*epsilon
+        position_energies.append(evaluate_variational(model, shifted, steps=steps,
+                                                     mode='unroll_scf', compute_force=False)['energy'])
+    torch.testing.assert_close(-(charge_energies[1]-charge_energies[0])/(2*epsilon), result['fermi_level'], atol=2.e-7, rtol=2.e-5)
+    torch.testing.assert_close(-(position_energies[1]-position_energies[0])/(2*epsilon), result['forces'][0, 2:3], atol=2.e-7, rtol=2.e-5)
+    loss = result['forces'].square().sum()+result['workfunction'].square().sum()
+    loss.backward(inputs=[p for p in model.parameters() if p.requires_grad])
+    assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
+
+
+def test_finite_checkpoint_mode_matches_forward_and_parameter_gradients():
+    model = small_model()
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    results, gradients = [], []
+    for mode in ('unroll_scf', 'shortcut_scf'):
+        output = evaluate_variational(model, small_data(), steps=3, mode=mode, training=True)
+        objective = output['energy'].square().sum()+output['forces'].square().sum()+output['workfunction'].square().sum()
+        gradients.append(torch.autograd.grad(objective, parameters, allow_unused=True))
+        results.append(output)
+    for key in ('energy', 'forces', 'fermi_level', 'workfunction', 'density_coefficients'):
+        torch.testing.assert_close(results[0][key], results[1][key])
+    for left, right in zip(*gradients):
+        if left is None:
+            assert right is None
+        else:
+            torch.testing.assert_close(left, right, atol=1.e-10, rtol=1.e-9)
+
+
+def test_finite_trajectory_rotation_invariance():
+    model = small_model()
+    original = small_data()
+    rotated = small_data()
+    rotation = o3.rand_matrix()
+    for key in ('positions', 'cell', 'shifts', 'external_field'):
+        rotated[key] = rotated[key]@rotation.T
+    before = evaluate_variational(model, original, steps=3, mode='unroll_scf')
+    after = evaluate_variational(model, rotated, steps=3, mode='unroll_scf')
+    for key in ('energy', 'fermi_level', 'workfunction'):
+        torch.testing.assert_close(before[key], after[key], atol=1.e-9, rtol=1.e-9)
+    torch.testing.assert_close(before['forces']@rotation.T, after['forces'], atol=1.e-9, rtol=1.e-9)
 
 
 def small_model(widths=(1.5, 3.)):

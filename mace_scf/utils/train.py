@@ -133,7 +133,12 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
             residual = metrics.get('scf_residual_max', 0.)
             tolerance = getattr(getattr(model_eval_wrapper, 'scf_options', None), 'scf_tolerance', float('inf'))
-            deployable = np.isfinite(residual) and residual <= tolerance
+            finite_budget = (getattr(getattr(model, 'field_dependent_charges_map', None), 'variational', False)
+                             and model_eval_wrapper.mode in ('unroll_scf', 'shortcut_scf'))
+            deployable = np.isfinite(residual) and (finite_budget or residual <= tolerance)
+            if finite_budget and residual > tolerance:
+                logging.info('50-step finite-budget validation residual %.5g exceeds equilibrium tolerance %.5g; '
+                             'metrics describe the exported finite trajectory, not a converged root', residual, tolerance)
             improved = valid_loss < best and deployable
             if not deployable:
                 logging.warning('50-step validation residual %.5g exceeds %.5g; keeping the previous deployable best checkpoint', residual, tolerance)

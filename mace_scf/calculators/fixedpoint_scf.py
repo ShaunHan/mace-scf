@@ -146,7 +146,7 @@ class MACEFixedPointSCF(Calculator):
         fermi_level_key: str = "initial_fermi_level",
         external_field_key: str = "external_field",
         total_charge_key: str = "total_charge",
-        ignore_nonconverged: bool = False,
+        ignore_nonconverged: Optional[bool] = None,
         save_full_scf_history: bool = False,
         scf_restart: bool = False,
         restart_density: bool = None,
@@ -247,7 +247,11 @@ class MACEFixedPointSCF(Calculator):
             external_field_key=external_field_key,
             total_charge_key=total_charge_key,
         )
-        self.ignore_nonconverged = ignore_nonconverged
+        # A saved finite-step model is defined by its trajectory, not a root.
+        # Explicit False still requests the strict equilibrium check for MD.
+        self.ignore_nonconverged = (
+            getattr(response, 'deployment_mode', 'implicit') == 'unroll_scf'
+            if ignore_nonconverged is None else bool(ignore_nonconverged))
         self.save_full_scf_history = save_full_scf_history
         self.scf_restart = scf_restart
         self.restart_density = scf_restart if restart_density is None else restart_density
@@ -560,6 +564,7 @@ class MACEFixedPointSCF(Calculator):
             "convergence_history": diagnostics["convergence_history"],
             "num_scf_steps": diagnostics["num_scf_steps"],
             "scf_residual": diagnostics["final_abs_difference"],
+            "scf_converged": diagnostics["final_abs_difference"] <= self.scf_options.scf_tolerance,
             "electrostatic_features": electrostatic_features,
         }
         for key in ("workfunction", "vacuum_potential"):

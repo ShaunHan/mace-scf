@@ -226,6 +226,9 @@ def build_model(
         del foundation
     if getattr(getattr(model, "field_dependent_charges_map", None), "variational", False):
         from mace_scf.electrostatics.potential import initialize_response
+        first_mode = args.train_schedule[0]["fixed_point_training_options"].mode
+        model.field_dependent_charges_map.deployment_mode = (
+            "unroll_scf" if first_mode == "shortcut_scf" else first_mode)
         model.lr_source_maps = torch.nn.ModuleList([torch.nn.Identity() for _ in model.interactions])
         model.local_electron_energy = torch.nn.Identity()
         model = model.to(args.device)

@@ -83,6 +83,12 @@ def test_old_fixed_point_mode_is_rejected():
         validate_fixed_point_training_options({"mode": "fixed_point"})
 
 
+def test_shortcut_scf_is_a_supported_training_mode():
+    options = validate_fixed_point_training_options({'mode':'shortcut_scf', 'scf':{'num_scf_steps':12}})
+    assert options.mode == 'shortcut_scf'
+    assert options.scf.num_scf_steps == 12
+
+
 def test_old_scf_training_options_stage_key_is_converted():
     stage = {
         "loss": {"atomic_multipoles": {"weight": 1.0}},
