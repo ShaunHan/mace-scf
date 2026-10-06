@@ -40,6 +40,8 @@ class MACEFixedPointSCF(Calculator):
         "electrostatic_potentials",
         "dipole",
         "fermi_level",
+        "workfunction",
+        "vacuum_potential",
         "electrostatic_energy",
         "electron_energy",
         "convergence_history",
@@ -162,6 +164,7 @@ class MACEFixedPointSCF(Calculator):
         compensating_jellium: bool = False,
         jellium_slab_bounds: Optional[tuple[float, float]] = None,
         adjust_kspace_cutoff: float = 1.0,
+        counter_charge_width: float = 1.0,
         **kwargs,
     ):
         Calculator.__init__(self, **kwargs)
@@ -181,6 +184,14 @@ class MACEFixedPointSCF(Calculator):
             f=model_path, map_location=self.device, weights_only=False
         ).to(self.device)
         self.model.kspace_cutoff *= adjust_kspace_cutoff
+        response = getattr(self.model, "field_dependent_charges_map", None)
+        if getattr(response, "variational", False):
+            from dataclasses import replace
+            if scf_options is None or "num_scf_steps" not in scf_options:
+                self.scf_options = replace(self.scf_options, num_scf_steps=int(response.deployment_steps))
+            if use_compile:
+                raise ValueError("VariationalResponse currently uses the differentiable eager solver; use_compile=False")
+
 
         if isinstance(self.model, FixedPoint) and not isinstance(
             self.model, FixedPointCore
@@ -197,7 +208,7 @@ class MACEFixedPointSCF(Calculator):
             pbc_handling=pbc_handling,
             jellium_slab_bounds=jellium_slab_bounds,
         )
-        if compensating_jellium:
+        if compensating_jellium and not getattr(response, "variational", False):
             self._apply_compensating_jellium(
                 self.model,
                 slab_bounds=jellium_slab_bounds,
@@ -216,6 +227,7 @@ class MACEFixedPointSCF(Calculator):
         self.pbc_handling = pbc_handling
         self.compensating_jellium = compensating_jellium
         self.jellium_slab_bounds = jellium_slab_bounds
+        self.counter_charge_width = float(counter_charge_width)
         self.compiled_evaluator = None
 
         self.r_max = float(self.model.r_max)
@@ -227,6 +239,8 @@ class MACEFixedPointSCF(Calculator):
         self.head = self.model.heads[0] if hasattr(self.model, "heads") else "Default"
         self.max_l = int(self.model.coulomb_energy.density_max_l)
         self.total_charge_key = total_charge_key
+        self.external_field_key = external_field_key
+        self.fermi_level_key = fermi_level_key
         self.keyspec = self._build_keyspec(
             atomic_multipoles_key=atomic_multipoles_key,
             fermi_level_key=fermi_level_key,
@@ -305,6 +319,8 @@ class MACEFixedPointSCF(Calculator):
                 "external_field": external_field_key,
                 "fermi_level": fermi_level_key,
                 "total_charge": total_charge_key,
+                "vacuum_zfrac": "vacuum_zfrac",
+                "dipole_correction_zfrac": "dipole_correction_zfrac",
             },
             arrays_keys={
                 "atomic_multipoles": atomic_multipoles_key,
@@ -391,6 +407,15 @@ class MACEFixedPointSCF(Calculator):
 
     def _run_model(self, batch, restart_state):
         batch_dict = batch.to_dict()
+        if getattr(self.model.field_dependent_charges_map, "variational", False):
+            if self.compensating_jellium:
+                batch_dict["counter_charge"] = -batch_dict["total_charge"]
+                batch_dict["counter_slab_bounds"] = batch_dict["positions"].new_tensor(self.jellium_slab_bounds).reshape(1,2)
+            elif "counter_charge_center" in self.atoms.info:
+                batch_dict["counter_charge"] = batch_dict["positions"].new_tensor(self.atoms.info.get("counter_charge", 0.)).reshape(1)
+                batch_dict["counter_charge_center"] = batch_dict["positions"].new_tensor(self.atoms.info["counter_charge_center"]).reshape(1,3)
+                batch_dict["counter_charge_width"] = batch_dict["positions"].new_tensor([self.counter_charge_width])
+            return self.runner.eval(self.model,batch_dict,compute_force=True)
         if self.compiled_evaluator is not None:
             return self.compiled_evaluator.evaluate(batch_dict)
 
@@ -436,6 +461,9 @@ class MACEFixedPointSCF(Calculator):
             for i in range(charge_history.shape[-1] - 1)
         ]
         final_abs_difference = abs_difference[-1] if abs_difference else 0.0
+        if "scf_residual" in output:
+            final_abs_difference = float(output["scf_residual"].detach().max())
+            abs_difference = [final_abs_difference]
         total_charge_target = float(atoms.info.get(self.total_charge_key, 0.0))
         partial_charges = output["density_coefficients"].detach().cpu().numpy()[:, 0]
         charge_error = float(np.sum(partial_charges) - total_charge_target)
@@ -446,10 +474,22 @@ class MACEFixedPointSCF(Calculator):
             "final_abs_difference": final_abs_difference,
             "charge_error": charge_error,
             "total_charge_error": total_charge_error,
-            "num_scf_steps": charge_history.shape[-1],
+            "num_scf_steps": int(output["scf_steps"][0]) if "scf_steps" in output else charge_history.shape[-1],
         }
 
     def _handle_scf_status(self, diagnostics):
+        if getattr(self.model.field_dependent_charges_map, "variational", False):
+            residual = diagnostics["final_abs_difference"]
+            if not np.isfinite(residual):
+                raise FloatingPointError("Nonfinite electronic solve residual")
+            if self.scf_options.constant_charge and abs(diagnostics["charge_error"]) > 1.e-6:
+                raise RuntimeError("Electronic solve violated the fixed-charge constraint")
+            if not self.ignore_nonconverged and residual > self.scf_options.scf_tolerance:
+                raise RuntimeError(
+                    f"Electronic residual {residual:.4g} exceeds {self.scf_options.scf_tolerance:.4g} "
+                    f"after {diagnostics['num_scf_steps']} steps. Check conditioning before MD."
+                )
+            return
         final_abs_difference = diagnostics["final_abs_difference"]
         if final_abs_difference > 1.0 or (
             self.scf_options.constant_charge and diagnostics["total_charge_error"]
@@ -519,8 +559,12 @@ class MACEFixedPointSCF(Calculator):
             "electron_energy": electron_energy,
             "convergence_history": diagnostics["convergence_history"],
             "num_scf_steps": diagnostics["num_scf_steps"],
+            "scf_residual": diagnostics["final_abs_difference"],
             "electrostatic_features": electrostatic_features,
         }
+        for key in ("workfunction", "vacuum_potential"):
+            if output.get(key) is not None:
+                results[key] = float(output[key].detach().reshape(-1)[0])
         if self.save_full_scf_history:
             results["full_scf_history"] = diagnostics["charge_history"]
         return results
@@ -532,6 +576,14 @@ class MACEFixedPointSCF(Calculator):
         self.most_recent_fermi_level = (
             output["fermi_level"].detach().cpu().item()
         )
+
+    def check_state(self, atoms, tol=1.e-15):
+        changes = super().check_state(atoms, tol=tol)
+        if self.atoms is not None:
+            for key in (self.total_charge_key, self.external_field_key, self.fermi_level_key, "vacuum_zfrac", "dipole_correction_zfrac", "counter_charge", "counter_charge_center"):
+                if not np.array_equal(np.asarray(atoms.info.get(key)), np.asarray(self.atoms.info.get(key))):
+                    changes.append(key)
+        return changes
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         Calculator.calculate(self, atoms, system_changes=system_changes)

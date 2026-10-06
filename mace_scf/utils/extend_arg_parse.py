@@ -34,6 +34,15 @@ def preprocess_extended_arg_parser() -> argparse.ArgumentParser:
 
 def extended_arg_parser() -> argparse.ArgumentParser:
     parser = build_default_arg_parser()
+    # MACE develop now defines several formerly SCF-only options. Replace
+    # those definitions intentionally instead of failing with duplicate flags.
+    parser.conflict_handler = "resolve"
+    parser._optionals.conflict_handler = "resolve"
+    parser.add_argument("--amsgrad", type=strict_str2bool, nargs="?", const=True,
+                        default=True, help="Use the AMSGrad optimizer variant")
+    for action in parser._actions:
+        if action.dest == "scheduler" and action.choices is not None:
+            action.choices = list(action.choices)+["none"]
 
     # new arguments
     parser.add_argument(
@@ -331,6 +340,9 @@ def extended_arg_parser() -> argparse.ArgumentParser:
 
     # overwrite all key defaults to None
     for item in parser._actions:
+        if item.type is bool:
+            # bool("false") is True; YAML False must retain its meaning.
+            item.type = strict_str2bool
         if item.option_strings[0][-4:] == "_key":
             item.default = None
 

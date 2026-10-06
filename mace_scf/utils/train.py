@@ -1,21 +1,16 @@
-import dataclasses
+import random
 import logging
 import time
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import torch
-from torch.optim.swa_utils import SWALR, AveragedModel
 from torch.utils.data import DataLoader
 from torch_ema import ExponentialMovingAverage
-from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data.distributed import DistributedSampler
 
-from mace.tools import torch_geometric
-from mace.tools.checkpoint import CheckpointHandler, CheckpointState
+from mace.tools.checkpoint import CheckpointHandler as NativeCheckpointHandler, CheckpointState
 from mace.tools.torch_tools import tensor_dict_to_device, to_numpy
 from mace.tools.utils import (
-    MetricsLogger,
     compute_mae,
     compute_q95,
     compute_rel_mae,
@@ -24,409 +19,190 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
+from mace_scf.electrostatics.loss import vacuum_observation_weight
 
 
-def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
-    return frequency is not None and frequency > 0 and opt_step % frequency == 0
+class CheckpointHandler(NativeCheckpointHandler):
+    """Separate resumable raw parameters from deployable EMA parameters."""
+    def __init__(self, *args, ema=None, deployment=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        from pathlib import Path
+        self.ema, self.deployment = ema, deployment
+        self.progress_path = Path(kwargs["directory"])/"resume"/(kwargs["tag"]+".pt")
+        self.best_loss = float("inf")
+
+    def _checkpoint(self,state):
+        value = self.builder.create_checkpoint(state)
+        value["ema"] = None if self.ema is None else self.ema.state_dict()
+        value["best_loss"] = self.best_loss
+        value["python_rng"] = random.getstate()
+        value["numpy_rng"] = np.random.get_state()
+        value["torch_rng"] = torch.random.get_rng_state()
+        value["cuda_rng"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        return value
+
+    def save(self,state,epochs,keep_last=False):
+        from pathlib import Path
+        directory = Path(self.io.directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory/self.io._get_checkpoint_filename(epochs, self.io.swa_start)
+        temporary = path.with_suffix('.tmp')
+        torch.save(self._checkpoint(state), temporary)
+        os.replace(temporary, path)
+        # Commit the new checkpoint before removing its predecessor.
+        if not self.io.keep and self.io.old_path and not keep_last:
+            previous = Path(self.io.old_path)
+            if previous.resolve().parent != directory.resolve():
+                raise ValueError('Previous checkpoint is outside the checkpoint directory')
+            if previous != path and previous.exists():
+                previous.unlink()
+        self.io.old_path = str(path)
+
+    def save_progress(self,state,epoch):
+        value=self._checkpoint(state)
+        value["epoch"]=epoch
+        self.progress_path.parent.mkdir(parents=True,exist_ok=True)
+        temporary=self.progress_path.with_suffix(".tmp")
+        torch.save(value,temporary)
+        os.replace(temporary,self.progress_path)
+
+    def load_latest(self,state,swa=False,device=None,strict=True):
+        if not self.deployment and self.progress_path.exists():
+            value=torch.load(self.progress_path,map_location=device,weights_only=False)
+            epoch=value["epoch"]
+        else:
+            path=self.io._get_latest_checkpoint_path(swa=swa)
+            if path is None:
+                return None
+            logging.info("Loading checkpoint: %s", path)
+            value=torch.load(path,map_location=device,weights_only=False)
+            epoch=self.io._parse_checkpoint_path(path).epochs
+        self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
+        self.best_loss=value.get("best_loss",float("inf"))
+        if self.ema is not None and value.get("ema") is not None:
+            self.ema.load_state_dict(value["ema"])
+        if self.deployment:
+            if value.get("ema") is not None:
+                from torch_ema import ExponentialMovingAverage
+                shadow=ExponentialMovingAverage(state.model.parameters(),decay=0.)
+                shadow.load_state_dict(value["ema"])
+                shadow.copy_to()
+        elif value.get("torch_rng") is not None:
+            torch.random.set_rng_state(value["torch_rng"].cpu())
+            if "python_rng" in value:
+                random.setstate(value["python_rng"])
+            if "numpy_rng" in value:
+                np.random.set_state(value["numpy_rng"])
+            if torch.cuda.is_available() and value.get("cuda_rng") is not None:
+                torch.cuda.set_rng_state_all([x.cpu() for x in value["cuda_rng"]])
+        return epoch
 
 
-def _scalar_param_grad_summary(model: torch.nn.Module) -> Dict[str, Any]:
-    param_norm_sq = 0.0
-    grad_norm_sq = 0.0
-    grad_max_abs = 0.0
-    nonfinite_grad_count = 0
-    none_grad_param_count = 0
-
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if name == "batch_positions":
-                continue
-            param_detached = param.detach()
-            param_norm_sq += float(torch.sum(param_detached * param_detached).item())
-
-            grad = param.grad
-            if grad is None:
-                none_grad_param_count += 1
-                continue
-
-            grad_detached = grad.detach()
-            finite_mask = torch.isfinite(grad_detached)
-            nonfinite_grad_count += int((~finite_mask).sum().item())
-            if torch.any(finite_mask):
-                finite_grad = grad_detached[finite_mask]
-                grad_norm_sq += float(torch.sum(finite_grad * finite_grad).item())
-                grad_max_abs = max(
-                    grad_max_abs,
-                    float(torch.max(torch.abs(finite_grad)).item()),
-                )
-
-    param_norm = param_norm_sq**0.5
-    grad_norm = grad_norm_sq**0.5
-    grad_param_norm_ratio = grad_norm / param_norm if param_norm > 0.0 else np.nan
-    return {
-        "grad/global_norm": grad_norm,
-        "grad/global_max_abs": grad_max_abs,
-        "grad/nonfinite_count": nonfinite_grad_count,
-        "grad/none_param_count": none_grad_param_count,
-        "param/global_norm": param_norm,
-        "grad/param_norm_ratio": grad_param_norm_ratio,
-    }
-
-
-def _log_wandb_parameter_histograms(model: torch.nn.Module) -> None:
-    import wandb
-
-    histograms = {}
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if name == "batch_positions":
-                continue
-            histograms[f"parameters/{name}"] = wandb.Histogram(
-                param.detach().cpu().flatten()
-            )
-    if histograms:
-        wandb.log(histograms)
-
-
-def train(
-    model: torch.nn.Module,
-    model_eval_wrapper,
-    loss_fn: torch.nn.Module,
-    train_loader: DataLoader,
-    valid_loader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler.ExponentialLR,
-    start_epoch: int,
-    end_epoch: int,
-    patience: int,
-    checkpoint_handler: CheckpointHandler,
-    logger: MetricsLogger,
-    eval_interval: int,
-    device: torch.device,
-    log_errors: str,
-    rank: int,
-    save_all_checkpoints: bool = False,
-    train_sampler: Optional[DistributedSampler] = None,
-    ema: Optional[ExponentialMovingAverage] = None,
-    distributed_model: Optional[DistributedDataParallel] = None,
-    max_grad_norm: Optional[float] = 10.0,
-    log_wandb: bool = False,
-    test_loaders: Optional[dict] = None,
-    debug_log_grad_summary: bool = False,
-    debug_grad_log_frequency: Optional[int] = None,
-    wandb_watch: str = "off",
-):
-    lowest_loss = np.inf
-    valid_loss = np.inf
-    patience_counter = 0
-    keep_last = False
-
-    if max_grad_norm is not None:
-        logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
-
-    model_to_train = model if distributed_model is None else distributed_model
-    epoch = start_epoch
-    opt_step = 0
-    while epoch <= end_epoch:
-        if epoch > start_epoch:
-            lr_scheduler.step(metrics=valid_loss)
-
+def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
+          optimizer, lr_scheduler, start_epoch, end_epoch, patience,
+          checkpoint_handler, logger, eval_interval, device, log_errors,
+          rank=0, save_all_checkpoints=False, train_sampler=None, ema=None,
+          distributed_model=None, max_grad_norm=10., log_wandb=False,
+          test_loaders=None, debug_log_grad_summary=False,
+          debug_grad_log_frequency=None, wandb_watch="off"):
+    """Train each stage without resetting Adam moments or the EMA trajectory."""
+    best = getattr(checkpoint_handler, "best_loss", float("inf"))
+    stalled = 0
+    best_epoch = None
+    for epoch in range(start_epoch, end_epoch+1):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
-
-        # Train
-        if "ScheduleFree" in type(optimizer).__name__:
+        if hasattr(optimizer, "train"):
             optimizer.train()
-
-        for batch in train_loader:
-            _, opt_metrics = take_step(
-                model=model_to_train,
-                model_eval_wrapper=model_eval_wrapper,
-                loss_fn=loss_fn,
-                batch=batch,
-                optimizer=optimizer,
-                ema=ema,
-                max_grad_norm=max_grad_norm,
-                device=device,
-                debug_log_grad_summary=debug_log_grad_summary,
-                debug_grad_log_frequency=debug_grad_log_frequency,
-                opt_step=opt_step,
-            )
-            if rank == 0:
-                opt_metrics["mode"] = "opt"
-                opt_metrics["epoch"] = epoch
-                opt_metrics["opt_step"] = opt_step
-                logger.log(opt_metrics)
-                if log_wandb and debug_log_grad_summary and _should_log_grad_summary(
-                    opt_step, debug_grad_log_frequency
-                ):
-                    import wandb
-
-                    wandb.log(opt_metrics)
-                if (
-                    log_wandb
-                    and wandb_watch in ("parameters", "all")
-                    and _should_log_grad_summary(opt_step, debug_grad_log_frequency)
-                ):
-                    # W&B's native parameter watcher is a top-level forward hook.
-                    # FixedPoint training calls model submethods directly, so log
-                    # parameter histograms explicitly instead of relying on forward().
-                    _log_wandb_parameter_histograms(model_to_train)
-            opt_step += 1
-        if train_sampler is not None:
-            torch.distributed.barrier()
-
-        # Validate
-        if "ScheduleFree" in type(optimizer).__name__:
-            optimizer.eval()
-        if epoch % eval_interval == 0:
-            valid_loss, eval_metrics = evaluate(
-                model=model,
-                model_eval_wrapper=model_eval_wrapper,
-                loss_fn=loss_fn,
-                ema=ema,
-                data_loader=valid_loader,
-                device=device,
-            )
-            eval_metrics["mode"] = "eval"
-            eval_metrics["epoch"] = epoch
-            logger.log(eval_metrics)
-            if test_loaders is not None:
-                for name, loader in test_loaders.items():
-                    _, test_eval_metrics = evaluate(
-                        model=model,
-                        model_eval_wrapper=model_eval_wrapper,
-                        loss_fn=loss_fn,
-                        ema=ema,
-                        data_loader=loader,
-                        device=device,
-                    )
-                    test_eval_metrics["epoch"] = epoch
-                    test_eval_metrics["mode"] = "eval_test"
-                    test_eval_metrics["test_name"] = name
-                    logger.log(test_eval_metrics)
-            
-            if rank == 0:
-                valid_err_log(
-                    valid_loss,
-                    eval_metrics,
-                    logger,
-                    log_errors,
-                    epoch,
-                )
-
-                if log_wandb:
-                    import wandb
-                    wandb_log_dict = {
-                        "epoch": epoch,
-                        "valid_loss": valid_loss,
-                        "valid_rmse_e_per_atom": eval_metrics["rmse_e_per_atom"],
-                        "valid_rmse_f": eval_metrics["rmse_f"],
-                        "valid_mae_f": eval_metrics["mae_f"],
-                    }
-                    if "rmse_dma" in eval_metrics:
-                        wandb_log_dict["valid_rmse_dma"] = eval_metrics["rmse_dma"]
-                        wandb_log_dict["valid_mae_dma"] = eval_metrics["mae_dma"]
-                    if "rmse_mu_per_atom" in eval_metrics:
-                        wandb_log_dict["valid_rmse_mu_per_atom"] = eval_metrics["rmse_mu_per_atom"]
-                        wandb_log_dict["valid_mae_mu_per_atom"] = eval_metrics["mae_mu_per_atom"]
-                    if "mae_total_charge" in eval_metrics:
-                        wandb_log_dict["valid_mae_total_charge"] = eval_metrics["mae_total_charge"]
-                        wandb_log_dict["valid_rmse_total_charge"] = eval_metrics["rmse_total_charge"]
-                    if "mae_fermi_level" in eval_metrics:
-                        wandb_log_dict["valid_mae_fermi_level"] = eval_metrics["mae_fermi_level"]
-                        wandb_log_dict["valid_rmse_fermi_level"] = eval_metrics["rmse_fermi_level"]
-                    
-                    wandb.log(wandb_log_dict)
-                if valid_loss >= lowest_loss:
-                    if save_all_checkpoints:
-                        if ema is not None:
-                            with ema.average_parameters():
-                                checkpoint_handler.save(
-                                    state=CheckpointState(model, optimizer, lr_scheduler),
-                                    epochs=epoch,
-                                    keep_last=True,
-                                )
-                        else:
-                            checkpoint_handler.save(
-                                state=CheckpointState(model, optimizer, lr_scheduler),
-                                epochs=epoch,
-                                keep_last=True,
-                            )
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        logging.info(
-                            f"Stopping optimization after {patience_counter} epochs without improvement"
-                        )
-                        break
-                else:
-                    lowest_loss = valid_loss
-                    patience_counter = 0
-                    if ema is not None:
-                        with ema.average_parameters():
-                            checkpoint_handler.save(
-                                state=CheckpointState(model, optimizer, lr_scheduler),
-                                epochs=epoch,
-                                keep_last=keep_last,
-                            )
-                            keep_last = False or save_all_checkpoints
-                    else:
-                        checkpoint_handler.save(
-                            state=CheckpointState(model, optimizer, lr_scheduler),
-                            epochs=epoch,
-                            keep_last=keep_last,
-                        )
-                        keep_last = False or save_all_checkpoints
-        if train_sampler is not None:
-            torch.distributed.barrier()
-        epoch += 1
-
-    logging.info("Training complete")
-
-
-def get_attribute(obj, attr_name):
-    """ parse a string to access an attribute of an object """
-    parts = attr_name.split('.')
-    try:
-        for part in parts:
-            if '[' in part and ']' in part:
-                key, index = part.split('[')
-                index = int(index[:-1])
-                obj = getattr(obj, key)[index]
+        norms, clipped = [], 0
+        for step, batch in enumerate(train_loader):
+            _, metrics = take_step(model if distributed_model is None else distributed_model,
+                model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
+                debug_log_grad_summary, debug_grad_log_frequency, step)
+            norms.append(metrics["grad_norm_before_clip"])
+            clipped += int(metrics["grad_clip_applied"])
+        if epoch % eval_interval == 0 or epoch == end_epoch:
+            if hasattr(optimizer, "eval"):
+                optimizer.eval()
+            valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
+            valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
+            logging.info("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
+                         [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)), clipped, len(norms))
+            if log_wandb:
+                import wandb
+                wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
+            residual = metrics.get('scf_residual_max', 0.)
+            tolerance = getattr(getattr(model_eval_wrapper, 'scf_options', None), 'scf_tolerance', float('inf'))
+            deployable = np.isfinite(residual) and residual <= tolerance
+            improved = valid_loss < best and deployable
+            if not deployable:
+                logging.warning('50-step validation residual %.5g exceeds %.5g; keeping the previous deployable best checkpoint', residual, tolerance)
+            if improved:
+                best, best_epoch, stalled = valid_loss, epoch, 0
             else:
-                obj = getattr(obj, part)
-        if not( type(obj) == torch.nn.Parameter):
-            raise AttributeError(f"model.{attr_name} is not a parameter")
-    except AttributeError as e:
-        raise ValueError(f"gradient debugging: weight {attr_name} was not found") from e
-    return obj
+                stalled += eval_interval
+            checkpoint_handler.best_loss = best
+            if improved or save_all_checkpoints:
+                checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=save_all_checkpoints)
+            lr_scheduler.step(metrics=valid_loss)
+            # Optional, read-only probes. Removing diagnostics.py is supported.
+            if epoch % max(50, eval_interval) == 0:
+                try:
+                    from mace_scf.utils.diagnostics import audit_training
+                except ModuleNotFoundError as exc:
+                    if exc.name != "mace_scf.utils.diagnostics":
+                        raise
+                else:
+                    audit_training(model, model_eval_wrapper, loss_fn, ema,
+                                   train_loader, valid_loader, device, epoch)
+        if hasattr(checkpoint_handler, "save_progress"):
+            checkpoint_handler.save_progress(CheckpointState(model,optimizer,lr_scheduler),epoch)
+        if stalled >= patience:
+            logging.info("Stage early stopping after %d epochs without improvement", stalled)
+            break
+    return best_epoch
 
 
-def take_step(
-    model: torch.nn.Module,
-    model_eval_wrapper,
-    loss_fn: torch.nn.Module,
-    batch: torch_geometric.batch.Batch,
-    optimizer: torch.optim.Optimizer,
-    ema: Optional[ExponentialMovingAverage],
-    max_grad_norm: Optional[float],
-    device: torch.device,
-    debug_log_grad_summary: bool = False,
-    debug_grad_log_frequency: Optional[int] = None,
-    opt_step: int = 0,
-) -> Tuple[float, Dict[str, Any]]:
-    start_time = time.time()
-    batch = batch.to(device)
+def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
+              max_grad_norm, device, debug_log_grad_summary=False,
+              debug_grad_log_frequency=None, opt_step=0):
+    """One atomic optimizer update, differentiating model parameters only."""
+    start = time.time()
+    model.train()
     optimizer.zero_grad(set_to_none=True)
-    batch_dict = batch.to_dict()
-
-    # do not set ema when training
-    output = model_eval_wrapper(
-        model,
-        batch_dict,
-        training=True,
-    )
+    batch = batch.to(device)
+    output = model_eval_wrapper(model, batch.to_dict(), training=True)
     loss = loss_fn(pred=output, ref=batch)
-    loss.backward()
-    del output
-    loss_dict = {
-        "loss": to_numpy(loss),
-        "time": time.time() - start_time,
-    }
-
-    if debug_log_grad_summary and _should_log_grad_summary(opt_step, debug_grad_log_frequency):
-        loss_dict.update(_scalar_param_grad_summary(model))
-
-    if "DEBUG_IMPLICIT_GRADIENTS" in os.environ:
-        the_weight = get_attribute(model, os.environ["DEBUG_IMPLICIT_GRADIENTS"])
-
-        the_loss = loss.clone().detach()
-        the_gradient = the_weight.grad.clone().detach()
-
-        # re-evaluate with different values
-        delta = 1e-3
-        initial_value = the_weight.clone().detach()
-        initial_value[0] += delta
-        the_weight.requires_grad_(False)
-        the_weight.copy_(initial_value)
-        the_weight.requires_grad_(True)
-
-        output = model_eval_wrapper(
-            model,
-            batch_dict,
-            training=True,
-        )
-        loss_ = loss_fn(pred=output, ref=batch)
-
-        # compute deltas and reset weight
-        fd_gradient = (loss_ - the_loss)/delta
-        diff_gradient = the_gradient[0]
-        error = fd_gradient.detach() - diff_gradient
-        frac_error = error / fd_gradient.detach()
-
-        initial_value[0] -= delta
-        the_weight.requires_grad_(False)
-        the_weight.copy_(initial_value)
-        the_weight.requires_grad_(True)
-        del output
-        del loss_
-        del diff_gradient
-        del error
-        del frac_error
-
-        # re-evaluate with different values
-        initial_value = the_weight.clone().detach()
-        initial_value[0] += delta*2
-        the_weight.requires_grad_(False)
-        the_weight.copy_(initial_value)
-        the_weight.requires_grad_(True)
-
-        output = model_eval_wrapper(
-            model,
-            batch_dict,
-            training=True,
-        )
-        loss_ = loss_fn(pred=output, ref=batch)
-
-        # compute deltas and reset weight
-        fd_gradient1 = 0.5 * (loss_ - the_loss) / delta
-        diff_gradient = the_gradient[0]
-        error = fd_gradient1.detach() - diff_gradient
-        frac_error = error / fd_gradient.detach()
-        estimate_of_noise = fd_gradient1.detach() - fd_gradient.detach()
-        logging.info(f"true g(2)={fd_gradient1.item():1.4g}+-{abs(estimate_of_noise):1.3g}, diff_gradient={diff_gradient.item():1.10g}, actual error={error.item()}, fractional={frac_error.item()}")
-
-        initial_value[0] -= delta*2
-        the_weight.requires_grad_(False)
-        the_weight.copy_(initial_value)
-        the_weight.requires_grad_(True)
-        del output
-        del loss_
-        del fd_gradient
-        del diff_gradient
-        del error
-        del frac_error
-        del the_gradient
-    
-    if max_grad_norm is not None:
-        grad_norm_before_clip = torch.nn.utils.clip_grad_norm_(
-            model.parameters(), max_norm=max_grad_norm
-        )
-        grad_norm_before_clip_value = float(grad_norm_before_clip.detach().cpu().item())
-        loss_dict["grad_norm_before_clip"] = grad_norm_before_clip_value
-        loss_dict["grad_clip_applied"] = grad_norm_before_clip_value > max_grad_norm
-    
-    if hasattr(model, "batch_positions"):
-        del model.batch_positions
-
+    if not bool(torch.isfinite(loss.detach())):
+        raise FloatingPointError("Nonfinite loss; no optimizer/EMA update performed")
+    parameters = [p for group in optimizer.param_groups for p in group["params"] if p.requires_grad]
+    torch.autograd.backward(loss, inputs=parameters)
+    norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
+                                         error_if_nonfinite=True)
+    metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": float(norm),
+               "grad_clip_applied": max_grad_norm is not None and float(norm)>max_grad_norm}
     optimizer.step()
     if ema is not None:
         ema.update()
-    loss_dict["time"] = time.time() - start_time
-    return loss, loss_dict
+    metrics["time"] = time.time()-start
+    return loss.detach(), metrics
 
 
-def evaluate(
+def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device):
+    """Restore trainability and mode even when a validation batch fails."""
+    flags = [p.requires_grad for p in model.parameters()]
+    was_training = model.training
+    try:
+        model.eval()
+        model.requires_grad_(False)
+        return _evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device)
+    finally:
+        for parameter, flag in zip(model.parameters(), flags):
+            parameter.requires_grad_(flag)
+        model.train(was_training)
+
+
+def _evaluate(
     model: torch.nn.Module,
     model_eval_wrapper,
     loss_fn: torch.nn.Module,
@@ -466,11 +242,9 @@ def evaluate(
     delta_fermi_level_list = []
     batch = None  # for pylint
 
-    for name, param in model.named_parameters():
-        if name == 'batch_positions':
-            continue
-        param.requires_grad_(False)
-        param.grad = None
+    voltage_errors = {"workfunction": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
+    scf_residuals = []
+    objective_sums = {key:[0.,0.] for key in loss_fn.loss_fns}
 
     start_time = time.time()
     for batch in data_loader:
@@ -498,19 +272,59 @@ def evaluate(
         output = tensor_dict_to_device(output, device=torch.device("cpu"))
 
         loss = loss_fn(pred=output, ref=batch)
-        total_loss += to_numpy(loss).item()
+        total_loss += to_numpy(loss).item()*batch.num_graphs
+        for key, function in loss_fn.loss_fns.items():
+            if loss_fn.loss_weights[key] == 0:
+                continue
+            if key in ("fourier_density", "fourier_potential", "fermi_level", "workfunction"):
+                denominator = float((batch.weight*getattr(batch,key+"_weight")).sum())
+            elif key == "vacuum_potential":
+                denominator = float(vacuum_observation_weight(batch).sum())
+            elif key == "forces":
+                denominator = float(batch.forces.numel())
+            else:
+                denominator = float(batch.num_graphs)
+            objective_sums[key][0] += float(function(batch,output))*denominator
+            objective_sums[key][1] += denominator
         num_configs += batch.num_graphs
 
+        from mace_scf.electrostatics.loss import spectral_errors
+        for key in voltage_errors:
+            if key not in output:
+                continue
+            if key.startswith("fourier"):
+                weight = (batch.fourier_potential_weight*batch.fourier_proto_potential_weight*batch.weight
+                          if key == "fourier_total_potential" else getattr(batch,key+"_weight")*batch.weight)
+                if key+"_dft" not in output:
+                    continue
+                error = spectral_errors(batch,output,key)
+            elif key == "workfunction":
+                weight = batch.workfunction_weight*batch.weight
+                error = (output[key]-batch.workfunction).square()
+            else:
+                if "vacuum_potential_dft" not in output:
+                    continue
+                weight = vacuum_observation_weight(batch)
+                error = (output[key]-output["vacuum_potential_dft"]).square()
+            use = weight>0
+            voltage_errors[key].append(torch.stack(((error[use]*weight[use]).sum(),weight[use].sum())))
+        if output.get("scf_residual") is not None:
+            scf_residuals.append(output["scf_residual"].max())
+
         if output.get("energy") is not None and batch.energy is not None:
-            E_computed = True
-            delta_es_list.append(batch.energy - output["energy"])
-            delta_es_per_atom_list.append(
-                (batch.energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1])
-            )
+            observed = batch.weight*batch.energy_weight > 0
+            if bool(observed.any()):
+                E_computed = True
+                delta_es_list.append((batch.energy - output["energy"])[observed])
+                delta_es_per_atom_list.append(
+                    ((batch.energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1]))[observed]
+                )
         if output.get("forces") is not None and batch.forces is not None:
-            Fs_computed = True
-            delta_fs_list.append(batch.forces - output["forces"])
-            fs_list.append(batch.forces)
+            observed = (batch.weight*batch.forces_weight)[batch.batch] > 0
+            if bool(observed.any()):
+                Fs_computed = True
+                delta_fs_list.append((batch.forces - output["forces"])[observed])
+                fs_list.append(batch.forces[observed])
         if output.get("stress") is not None and batch.stress is not None:
             stress_computed = True
             delta_stress_list.append(batch.stress - output["stress"])
@@ -533,7 +347,9 @@ def evaluate(
             delta_total_charge_list.append(batch.total_charge - total_charge)
         if output.get("fermi_level") is not None and batch.fermi_level is not None:
             fermi_level_computed = True
-            delta_fermi_level_list.append(batch.fermi_level - output["fermi_level"])
+            use = batch.fermi_level_weight > 0
+            if bool(use.any()):
+                delta_fermi_level_list.append((batch.fermi_level-output["fermi_level"])[use])
         if output.get("dipole") is not None and batch.dipole is not None:
             dipole_components_to_include = batch.dipole_weight.view(-1, 3) > 0.0
             if torch.any(dipole_components_to_include):
@@ -550,11 +366,11 @@ def evaluate(
             output.get("density_coefficients") is not None
             and batch.density_coefficients is not None
         ):
-            dmas_computed = True
-            delta_dmas_list.append(
-                batch.density_coefficients - output["density_coefficients"]
-            )
-            dmas_list.append(batch.density_coefficients)
+            observed = batch.density_coefficients_weight[batch.batch]>0
+            if bool(observed.any()):
+                dmas_computed = True
+                delta_dmas_list.append((batch.density_coefficients-output["density_coefficients"])[observed])
+                dmas_list.append(batch.density_coefficients[observed])
 
         if (
             output.get("electrostatic_potentials") is not None
@@ -580,7 +396,8 @@ def evaluate(
     Mus_computed = len(delta_mus_list) > 0
     polars_computed = len(delta_polarizability_list) > 0
 
-    avg_loss = total_loss / len(data_loader)
+    avg_loss = sum(loss_fn.loss_weights[key]*values[0]/values[1]
+                   for key,values in objective_sums.items() if values[1]>0)
 
     aux = {
         "loss": avg_loss,
@@ -664,7 +481,7 @@ def evaluate(
         aux["mae_total_charge"] = compute_mae(delta_total_charge)
         aux["rmse_total_charge"] = compute_rmse(delta_total_charge)
         aux["q95_total_charge"] = compute_q95(delta_total_charge)
-    if fermi_level_computed:
+    if delta_fermi_level_list:
         delta_fermi_level = to_numpy(torch.cat(delta_fermi_level_list, dim=0))
         aux["mae_fermi_level"] = compute_mae(delta_fermi_level)
         aux["rmse_fermi_level"] = compute_rmse(delta_fermi_level)
@@ -672,11 +489,14 @@ def evaluate(
 
     aux["time"] = time.time() - start_time
 
-    for name, param in model.named_parameters():
-        param.requires_grad = True
-
+    for key, values in voltage_errors.items():
+        if values:
+            sums = torch.stack(values).sum(0)
+            if sums[1]>0:
+                aux["rmse_"+key] = float((sums[0]/sums[1]).sqrt())
+    if scf_residuals:
+        aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
     return avg_loss, aux
-
 
 
 def valid_err_log(
@@ -686,6 +506,12 @@ def valid_err_log(
     log_errors,
     epoch,
 ):
+    if "rmse_workfunction" in eval_metrics or "rmse_fourier_density" in eval_metrics:
+        logging.info("Deployment validation epoch %d: %s", epoch,
+            ", ".join(f"{key}={1000*eval_metrics[key]:.4f}" for key in
+                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_fourier_density", "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction")
+                if key in eval_metrics))
+        logging.info('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch
     logger.log(eval_metrics)

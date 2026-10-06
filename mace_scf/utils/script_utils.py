@@ -29,6 +29,7 @@ class SubsetCollection:
 
 
 NEW_TABLE_TYPES = [
+    "ElectrostaticRMSE",
     "DensityCoefficientsRMSE", 
     "DensityEnergyRMSE", 
     "PerAtomRMSE",
@@ -55,7 +56,9 @@ def create_error_table(
         import wandb
     table = PrettyTable()
 
-    if table_type == "DensityCoefficientsRMSE":
+    if table_type == "ElectrostaticRMSE":
+        table.field_names = ["split", "E meV/atom", "F meV/A", "dipole meA/atom", "EF meV", "ESP obs mV", "ESP total mV", "vac mV", "WF meV", "rho me/A^3"]
+    elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
             "RMSE DMA / e A^l", 
@@ -158,6 +161,7 @@ def create_error_table(
             "rmse_esp",
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
+            "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction", "rmse_fourier_density",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
@@ -169,7 +173,10 @@ def create_error_table(
                 metrics[metric_name] = f"{metrics[metric_name]:.2f}"
         
         # add new tables here...
-        if table_type == "DensityCoefficientsRMSE":
+        if table_type == "ElectrostaticRMSE":
+            table.add_row([name]+[metrics[key] for key in
+                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_fermi_level", "rmse_fourier_potential", "rmse_fourier_total_potential", "rmse_vacuum_potential", "rmse_workfunction", "rmse_fourier_density")])
+        elif table_type == "DensityCoefficientsRMSE":
             table.add_row(
                 [
                     name,
