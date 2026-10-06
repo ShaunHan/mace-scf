@@ -134,7 +134,7 @@ def _load_reference_model(device=DEVICE):
 
 def _load_reference_atoms(num_configs=2):
     require_file(CONFIGS_PATH, "Reference configs")
-    atoms_list = read(CONFIGS_PATH, index=":")
+    atoms_list = read(CONFIGS_PATH, index=":", format="extxyz")
     if PERIODIC:
         for atoms in atoms_list:
             atoms.set_pbc([True, True, True])

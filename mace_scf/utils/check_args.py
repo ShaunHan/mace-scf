@@ -105,7 +105,7 @@ def fill_default_train_settings(train_stage_dict):
 
     loss_dict = {}
     for key, val in train_stage_dict["loss"].items():
-        if not (type(val) in [float, dict]):
+        if not (type(val) in [int, float, dict]):
             raise TypeError(f"loss {key} must be followed by a weight (float) or a dictionary of options")
         if type(val) == dict:
             assert "weight" in val, "loss dictionary must contain a weight"

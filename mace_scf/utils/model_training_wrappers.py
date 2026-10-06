@@ -126,6 +126,16 @@ class FixedPointWrapper:
             else nullcontext()
         )
         with param_context:
+            if getattr(model.field_dependent_charges_map, "variational", False):
+                from mace_scf.electrostatics.potential import evaluate_variational
+                if self.mode != "implicit":
+                    raise ValueError("VariationalResponse uses implicit mode to differentiate its converged positive electronic functional")
+                steps = (self.scf_options.num_scf_steps if training else
+                         int(model.field_dependent_charges_map.deployment_steps))
+                return evaluate_variational(model, batch_dict, steps=steps,
+                    training=training, compute_force=self.output_args.get("forces", False),
+                    constant_charge=self.scf_options.constant_charge,
+                    compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False))
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)
             elif self.mode == "unroll_scf":

@@ -12,7 +12,7 @@ TRAINING_OPTION_KEYS = {
     "linear_solve",
     "fixedpoint_scf_stability",
 }
-REQUIRED_TRAINING_SCF_KEYS = {"num_scf_steps", "mixing_parameter"}
+REQUIRED_TRAINING_SCF_KEYS = {"num_scf_steps"}
 
 FIXED_POINT_SCF_DEFAULTS = {
     "num_scf_steps": 100,
@@ -114,12 +114,6 @@ def validate_fixed_point_training_options(
             linear_solve=raw.get("linear_solve", "inverse"),
             fixedpoint_scf_stability=fixedpoint_scf_stability,
         )
-
-    if mode == "implicit":
-        try:
-            import torchopt  # noqa: F401
-        except ImportError as exc:
-            raise ImportError("torchopt 0.7.3 is required for implicit mode.") from exc
 
     if "scf" not in raw:
         raise ValueError(f"fixed_point_training_options.scf must be set for mode={mode!r}")

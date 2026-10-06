@@ -537,7 +537,7 @@ class LocalSplitCharges(_LocalSourceModelBase):
             cart_polarizability = None
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        _outputs = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -547,6 +547,9 @@ class LocalSplitCharges(_LocalSourceModelBase):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
         )
+        forces = _outputs[0]
+        virials = _outputs[1]
+        stress = _outputs[2]
 
         return {
             "energy": total_energy,
@@ -781,7 +784,7 @@ class LocalCharges(_LocalSourceModelBase):
         )
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        _outputs = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -791,6 +794,9 @@ class LocalCharges(_LocalSourceModelBase):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
         )
+        forces = _outputs[0]
+        virials = _outputs[1]
+        stress = _outputs[2]
 
         return {
             "energy": total_energy,
@@ -1013,7 +1019,7 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
         )
 
         # Outputs
-        forces, virials, stress, _, _ = get_outputs(
+        _outputs = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
@@ -1023,6 +1029,9 @@ class FixedChargeBaselinedMACE(_LocalSourceModelBase):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
         )
+        forces = _outputs[0]
+        virials = _outputs[1]
+        stress = _outputs[2]
 
         return {
             "energy": total_energy,

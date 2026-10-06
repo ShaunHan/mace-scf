@@ -584,7 +584,7 @@ class MACEQEq(torch.nn.Module):
             data["batch"],
             num_graphs,
         )
-        forces, _, _, _, _ = get_outputs(
+        _outputs = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
@@ -594,6 +594,7 @@ class MACEQEq(torch.nn.Module):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
         )
+        forces = _outputs[0]
         return {
             "enegs": enegs,
             "hardness": hardness,

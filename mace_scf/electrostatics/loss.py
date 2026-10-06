@@ -242,7 +242,78 @@ class FixedPointStability(torch.nn.Module):
         return torch.mean(self.activation(output_norms / perturbation_norms - self.offset))
 
 
+
+def _label_mean(error, weights):
+    """Mean over observed labels; missing labels never dilute the objective."""
+    weights = torch.broadcast_to(weights, error.shape)
+    valid = (weights > 0) & torch.isfinite(error) & torch.isfinite(weights)
+    if bool(((weights > 0) & ~torch.isfinite(error)).any()):
+        raise FloatingPointError("A positively weighted label or prediction is nonfinite")
+    safe = torch.where(valid, error, 0.)
+    weight = torch.where(valid, weights, 0.)
+    return (safe.square()*weight).sum()/weight.sum().clamp_min(1.e-30)
+
+
+def spectral_errors(ref, pred, key):
+    """Per-graph Parseval MSE in physical real-space units."""
+    target = pred.get(key+"_dft")
+    if target is None:
+        if bool((getattr(ref, key+"_weight") > 0).any()):
+            raise ValueError("Missing Fourier observation for " + key)
+        return pred["energy"]*0.
+    difference = pred[key]-target
+    active = pred["k_vectors_mask"]
+    if key+"_dft_mask" in pred:
+        active = active & pred[key+"_dft_mask"]
+    if key in ("fourier_potential", "fourier_total_potential"):
+        active = active & (pred["k_vectors"].square().sum(-1)>0)
+    mode_weight = pred.get("potential_mode_weight", active.to(difference)) if key == "fourier_potential" else active.to(difference)
+    difference = torch.where(active[..., None], difference, 0.)
+    size = pred["k_vectors_grid_shape"].prod().to(difference)
+    return (difference.square().sum(-1)*mode_weight).sum(-1)/size.square()
+
+
+def weighted_fourier_density(ref, pred):
+    # Density is expressed in millielectrons/Angstrom^3 to keep weights legible.
+    weight = ref.weight*ref.fourier_density_weight
+    square = spectral_errors(ref, pred, "fourier_density")/1.e-6
+    return (square*weight).sum()/weight.sum().clamp_min(1.e-30)
+
+
+def weighted_fourier_potential(ref, pred):
+    weight = ref.weight*ref.fourier_potential_weight
+    square = spectral_errors(ref, pred, "fourier_potential")
+    return (square*weight).sum()/weight.sum().clamp_min(1.e-30)
+
+
+def weighted_fermi_level(ref, pred):
+    return _label_mean(pred["fermi_level"]-ref.fermi_level, ref.weight*ref.fermi_level_weight)
+
+
+def weighted_workfunction(ref, pred):
+    return _label_mean(pred["workfunction"]-ref.workfunction, ref.weight*ref.workfunction_weight)
+
+
+def vacuum_observation_weight(ref):
+    """Only two-periodic slabs have a vacuum plane observation."""
+    slab = ref.pbc.reshape(-1, 3).sum(-1) == 2
+    return ref.weight*ref.fourier_potential_weight*ref.fourier_proto_potential_weight*slab
+
+
+def weighted_vacuum_potential(ref, pred):
+    weight = vacuum_observation_weight(ref)
+    if "vacuum_potential_dft" not in pred:
+        if bool((weight>0).any()):
+            raise ValueError("Vacuum supervision requires both deformation and proto spectra")
+        return pred["energy"].sum()*0.
+    return _label_mean(pred["vacuum_potential"]-pred["vacuum_potential_dft"], weight)
+
+
 _LOSS_FUNCTIONS = {
+    "fourier_density": weighted_fourier_density,
+    "fourier_potential": weighted_fourier_potential,
+    "workfunction": weighted_workfunction,
+    "vacuum_potential": weighted_vacuum_potential,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
     "stress": weighted_mean_squared_stress,
@@ -253,7 +324,7 @@ _LOSS_FUNCTIONS = {
     "dipole_per_atom": weighted_mean_squared_error_dipole,
     "polarizability": weighted_mean_squared_error_polarizability,
     "fermi_level_per_atom": weighted_mean_squared_error_fermi,
-    "fermi_level": weighted_mean_squared_error_fermi_extensive,
+    "fermi_level": weighted_fermi_level,
     "esps": weighted_mean_squared_error_esp,
     "cluster_virial_per_atom": weighted_mean_squared_cluster_virial,
     "cluster_virial": weighted_mean_squared_cluster_virial_extensive,
@@ -292,6 +363,8 @@ class WeightedLoss(torch.nn.Module):
             data_weight = torch.clone(ref.weight)
             ref.weight = ref.weight * pred["loss_weight_modifier"]
         for name, func in self.loss_fns.items():
+            if self.loss_weights[name] == 0:
+                continue
             loss_component = self.loss_weights[name] * func(ref, pred)
             loss += loss_component
             logstring += f'{name}: {loss_component}, ' 

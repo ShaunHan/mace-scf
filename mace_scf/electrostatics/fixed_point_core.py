@@ -411,26 +411,34 @@ class FixedPointCore(torch.nn.Module):
         )
 
         # Embeddings
-        node_feats = self.node_embedding(data["node_attrs"])
+        backbone_attrs = data["node_attrs"]
+        if hasattr(self, "foundation_element_map"):
+            backbone_attrs = backbone_attrs @ self.foundation_element_map
+        node_feats = self.node_embedding(backbone_attrs)
         vectors, lengths = get_edge_vectors_and_lengths(
             positions=positions,
             edge_index=data["edge_index"],
             shifts=data["shifts"],
         )
-        edge_attrs = self.spherical_harmonics(permute_to_e3nn_convention(vectors))
+        edge_attrs = self.spherical_harmonics(
+            vectors if hasattr(self, "foundation_element_map") else permute_to_e3nn_convention(vectors)
+        )
         edge_feats, cutoff = self.radial_embedding(
-            lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
+            lengths, backbone_attrs, data["edge_index"],
+            getattr(self, "foundation_atomic_numbers", self.atomic_numbers)
         )
 
-        # K-space grid
-        k_vectors, k_vectors_norms_squared, k_vectors_batch, k0_mask = (
-            compute_k_vectors_flat(
-                self.kspace_cutoff,
-                data["cell"].view(-1, 3, 3),
-                data["rcell"].view(-1, 3, 3),
+        k_vectors = k_vectors_norms_squared = k_vectors_batch = k0_mask = None
+        if not getattr(self.field_dependent_charges_map, "variational", False):
+            # K-space grid
+            k_vectors, k_vectors_norms_squared, k_vectors_batch, k0_mask = (
+                compute_k_vectors_flat(
+                    self.kspace_cutoff,
+                    data["cell"].view(-1, 3, 3),
+                    data["rcell"].view(-1, 3, 3),
+                )
             )
-        )
-
+    
         # Interaction layers
         energies = [e0]
         features = []
@@ -440,20 +448,22 @@ class FixedPointCore(torch.nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        for interaction, product, readout, lr_source_map in zip(
+        for layer_index, (interaction, product, readout, lr_source_map) in enumerate(zip(
             self.interactions, self.products, self.readouts, self.lr_source_maps
-        ):
+        )):
             node_feats, sc = interaction(
-                node_attrs=data["node_attrs"],
+                node_attrs=backbone_attrs,
                 node_feats=node_feats,
                 edge_attrs=edge_attrs,
                 edge_feats=edge_feats,
                 edge_index=data["edge_index"],
+                **({"cutoff": cutoff, "first_layer": layer_index == 0}
+                   if hasattr(self, "foundation_element_map") else {}),
             )
             node_feats = product(
                 node_feats=node_feats,
                 sc=sc,
-                node_attrs=data["node_attrs"],
+                node_attrs=backbone_attrs,
             )
             features.append(node_feats.clone())
             node_energies = readout(node_feats).squeeze(-1)
@@ -465,28 +475,35 @@ class FixedPointCore(torch.nn.Module):
             )
             energies.append(energy)
 
-            charge_sources = lr_source_map(
-                node_attrs=data["node_attrs"],
-                node_feats=node_feats,
-            )
-            charge_density += charge_sources.squeeze(-2)
+            if not getattr(self.field_dependent_charges_map, "variational", False):
+                charge_sources = lr_source_map(
+                    node_attrs=backbone_attrs,
+                    node_feats=node_feats,
+                )
+                charge_density += charge_sources.squeeze(-2)
 
         all_layer_feats = self.layer_feature_mixer(torch.stack(features, dim=0))
+        if hasattr(self, "foundation_energy_scale"):
+            energies = [energies[0]] + [value*self.foundation_energy_scale for value in energies[1:]]
+            energies[0] = energies[0]+(data["ptr"][1:]-data["ptr"][:-1])*self.foundation_energy_shift
         stacked_energies = torch.stack(energies, dim=-1)
 
-        # Precompute geometry for electrostatics
-        electrostatics_cache = self.electric_potential_descriptor.precompute_geometry(
-            k_vectors=k_vectors,
-            k_norm2=k_vectors_norms_squared,
-            k_vector_batch=k_vectors_batch,
-            k0_mask=k0_mask,
-            node_positions=positions,
-            batch=data["batch"],
-            volume=data["volume"],
-            pbc=data["pbc"].view(-1, 3),
-        )
-        self.electric_potential_descriptor.static_quantities = None
-
+        # The variational functional assembles its own shared Fourier operator.
+        electrostatics_cache = None
+        if not getattr(self.field_dependent_charges_map, "variational", False):
+            # Precompute geometry for electrostatics
+            electrostatics_cache = self.electric_potential_descriptor.precompute_geometry(
+                k_vectors=k_vectors,
+                k_norm2=k_vectors_norms_squared,
+                k_vector_batch=k_vectors_batch,
+                k0_mask=k0_mask,
+                node_positions=positions,
+                batch=data["batch"],
+                volume=data["volume"],
+                pbc=data["pbc"].view(-1, 3),
+            )
+            self.electric_potential_descriptor.static_quantities = None
+    
         # Precompute external E-field features (no Fermi level)
         efield_potential = torch.zeros(
             (num_graphs, 4), dtype=positions.dtype, device=positions.device
@@ -644,7 +661,7 @@ class FixedPointCore(torch.nn.Module):
         displacement = torch.zeros(
             (num_graphs, 3, 3), dtype=positions.dtype, device=positions.device
         )
-        forces, _, _, _, _ = get_outputs(
+        _outputs = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
@@ -654,6 +671,7 @@ class FixedPointCore(torch.nn.Module):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
         )
+        forces = _outputs[0]
 
         return {
             "energy": total_energy,

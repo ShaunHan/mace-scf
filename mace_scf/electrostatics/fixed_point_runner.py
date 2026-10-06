@@ -101,12 +101,14 @@ class FixedPointSCFRunner:
         For custom initial values, call local_part/converge/build_observables
         directly instead.
         """
-        if training:
-            for p in model.parameters():
-                p.requires_grad = True
-        else:
-            for p in model.parameters():
-                p.requires_grad = False
+        if getattr(model.field_dependent_charges_map, "variational", False):
+            from .potential import evaluate_variational
+            steps = self.scf_options.num_scf_steps if num_scf_steps is None else num_scf_steps
+            return evaluate_variational(
+                model, data, steps=steps, training=training, compute_force=compute_force,
+                constant_charge=self.scf_options.constant_charge,
+                compute_stress=compute_stress or compute_virials,
+            )
 
         local_state = model.local_part(
             data,
