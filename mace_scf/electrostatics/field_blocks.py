@@ -1363,7 +1363,3 @@ class ManyBodyChargesFieldReadout(PostScfReadout):
         new_feats = self.tp_out(node_feats, invariant_descriptors)
         energy = self.element_select_out(new_feats, node_attrs)
         return energy.squeeze(-1)
-
-
-# Optional common energy/charge/potential response.
-from .potential import VariationalResponse

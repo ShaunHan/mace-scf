@@ -52,8 +52,6 @@ def build_model(
     atomic_charges,
     train_loader,
 ):
-    from .foundation import load_foundation, install_foundation, condition_energy
-    foundation = load_foundation(args)
     model_config = dict(
         r_max=args.r_max,
         num_bessel=args.num_radial_basis,
@@ -221,16 +219,6 @@ def build_model(
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
-    if foundation is not None:
-        install_foundation(model, foundation)
-        del foundation
-    if getattr(getattr(model, "field_dependent_charges_map", None), "variational", False):
-        from mace_scf.electrostatics.potential import initialize_response
-        model.lr_source_maps = torch.nn.ModuleList([torch.nn.Identity() for _ in model.interactions])
-        model.local_electron_energy = torch.nn.Identity()
-        model = model.to(args.device)
-        initialize_response(model, train_loader, args.device)
-        condition_energy(model, train_loader, args.device)
     return model
 
 
@@ -347,17 +335,6 @@ def get_param_options(model, args):
                 "weight_decay": args.weight_decay,
             }
         )
-    seen = set()
-    for group in param_options["params"]:
-        group["params"] = [p for p in group["params"] if p.requires_grad]
-        for parameter in group["params"]:
-            if id(parameter) in seen:
-                raise RuntimeError("A parameter has more than one optimizer owner")
-            seen.add(id(parameter))
-    missing = [p for p in model.parameters() if p.requires_grad and id(p) not in seen]
-    if missing:
-        param_options["params"].append({"name": "remaining", "params": missing, "weight_decay": args.weight_decay})
-    param_options["params"] = [group for group in param_options["params"] if group["params"]]
     return param_options
 
 
@@ -443,8 +420,7 @@ def get_fermi_level_offset(dataloader, args, device):
         num_values += 1
 
     if num_values == 0:
-        logging.info("No observed Fermi levels; using the zero electronic gauge reference")
-        return 0.0
+        raise ValueError("No Fermi level data found, can't compute an average fermi level")
 
     fermi_level_offset = fermi_sum / num_values
     logging.info("computed Fermi level offset %s", fermi_level_offset)

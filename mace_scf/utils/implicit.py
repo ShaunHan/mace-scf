@@ -1,6 +1,11 @@
 import torch
 import warnings
 
+try:
+    import torchopt
+except ImportError:
+    warnings.warn("torchopt not found, implicit differentiation not available")
+
 from mace.tools.scatter import scatter_sum
 
 
@@ -13,10 +18,6 @@ def make_implicit_scf_module(
     num_graphs,
     linear_solve="inverse",
 ):
-    try:
-        import torchopt
-    except ImportError as exc:
-        raise ImportError("torchopt 0.7.3 is required for the native nonlinear implicit solver") from exc
     if linear_solve == "inverse":
         ls = torchopt.linear_solve.solve_inv()
     elif linear_solve == "normal_cg":

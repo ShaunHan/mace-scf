@@ -20,7 +20,6 @@ from mace.tools import torch_geometric, init_wandb
 from mace import tools
 import mace.modules
 from mace.tools.scripts_utils import LRScheduler
-from mace_scf.utils.train import CheckpointHandler
 
 # mace_scf replaces data, and some utils
 import mace_scf.data
@@ -79,9 +78,9 @@ class NoOpLRScheduler:
 
 
 def build_lr_scheduler(optimizer, args):
-    if args.optimizer == "schedulefree" or args.scheduler == "none":
+    if args.optimizer == "schedulefree":
         logging.info(
-            "No external LR schedule: the learning rate follows the explicit training stages."
+            "ScheduleFree optimizer selected; LR scheduler options are ignored."
         )
         return NoOpLRScheduler()
     return LRScheduler(optimizer, args)
@@ -254,14 +253,11 @@ def main() -> None:
 
     assert not "batch_positions" in dict(model.named_parameters()), "batch_positions should not be a parameter of the model"
 
-    ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay) if args.ema else None
-
     # find most recent epoch
     start_epoch = 0
     if args.restart_latest:
         for stage_number, train_stage in enumerate(args.train_schedule):
-            checkpoint_handler_stage = CheckpointHandler(
-                ema=ema,
+            checkpoint_handler_stage = tools.CheckpointHandler(
                 directory=args.checkpoints_dir,
                 tag=tag+"_"+train_stage["name"],
                 keep=args.keep_checkpoints,
@@ -272,12 +268,15 @@ def main() -> None:
                 device=device,
             )
             if latest_checkpoint_epoch is not None:
-                start_epoch = latest_checkpoint_epoch+1
+                start_epoch = latest_checkpoint_epoch
             else:
                 break
     else:
         logging.info("restart_latest is False; starting from initialized model and optimizer.")
 
+    ema: Optional[ExponentialMovingAverage] = None
+    if args.ema:
+        ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
 
     if rank == 0 and args.wandb:
         logging.info("Using Weights and Biases for logging")
@@ -352,9 +351,10 @@ def main() -> None:
 
     # training loop
     for stage_index, train_stage in enumerate(args.train_schedule):
-        if train_stage["end"] < start_epoch:
+        if train_stage["end"] <= start_epoch:
             continue
-        start_epoch = max(start_epoch, train_stage["start"])
+        else:
+            start_epoch = train_stage["start"]
 
         stage_name = train_stage["name"]
         loss_fn = mace_scf.electrostatics.loss.WeightedLoss(train_stage["loss"])
@@ -374,8 +374,7 @@ def main() -> None:
                 param_group["lr"] = new_lr
         logging.debug(f"Optimizer: {optimizer}")
 
-        checkpoint_handler_stage = CheckpointHandler(
-                ema=ema,
+        checkpoint_handler_stage = tools.CheckpointHandler(
             directory=args.checkpoints_dir,
             tag=tag+"_"+stage_name,
             keep=args.keep_checkpoints,
@@ -387,10 +386,7 @@ def main() -> None:
                 device=device,
             )
             if latest_checkpoint_epoch is not None:
-                start_epoch = latest_checkpoint_epoch+1
-
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = train_stage.get(param_group["name"]+"_lr", train_stage["lr"])
+                start_epoch = latest_checkpoint_epoch
 
         # train_loader = get_data_loader(train_dataset, train_stage["fixed_point_training_options"])
 
@@ -487,8 +483,7 @@ def main() -> None:
             output_args=output_args,
             fixed_point_training_options=train_stage.get("fixed_point_training_options"),
         )
-        checkpoint_handler_stage = CheckpointHandler(
-                ema=ema, deployment=True,
+        checkpoint_handler_stage = tools.CheckpointHandler(
             directory=args.checkpoints_dir,
             tag=stage_tag,
             keep=args.keep_checkpoints,
@@ -540,8 +535,7 @@ def main() -> None:
         logging.info("Computing SCF convergence summaries")
         for train_stage, stage_tag in stages_with_models:
             stage_name = train_stage["name"]
-            checkpoint_handler_stage = CheckpointHandler(
-                ema=ema, deployment=True,
+            checkpoint_handler_stage = tools.CheckpointHandler(
                 directory=args.checkpoints_dir,
                 tag=stage_tag,
                 keep=args.keep_checkpoints,
