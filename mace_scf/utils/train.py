@@ -131,12 +131,14 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             train_sampler.set_epoch(epoch)
         if hasattr(optimizer, "train"):
             optimizer.train()
-        norms, clipped = [], 0
+        norms, retained, clipped, graphs_seen = [], [], 0, 0
         for step, batch in enumerate(train_loader):
             _, metrics = take_step(model if distributed_model is None else distributed_model,
                 model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
                 debug_log_grad_summary, debug_grad_log_frequency, step)
             norms.append(metrics["grad_norm_before_clip"])
+            retained.append(metrics["gradient_retained"])
+            graphs_seen += metrics["graphs"]
             clipped += int(metrics["grad_clip_applied"])
         if epoch % eval_interval == 0 or epoch == end_epoch:
             if cuda_device:
@@ -154,6 +156,15 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                          train_seconds, time.perf_counter()-validation_start, len(norms),
                          train_seconds/max(1,len(norms)), peak_mib,
                          'CuEq' if getattr(model,'backbone_layout','mul_ir') == 'ir_mul' else 'e3nn')
+            logging.info('Optimization budget: graphs=%d/%d, updates=%d, mean retained gradient=%.5g, min retained gradient=%.5g',
+                         graphs_seen, len(train_loader.dataset), len(norms), float(np.mean(retained)), min(retained,default=1.))
+            try:
+                from mace_scf.utils.diagnostics import optimizer_budget
+            except ModuleNotFoundError as exc:
+                if exc.name != 'mace_scf.utils.diagnostics':
+                    raise
+            else:
+                optimizer_budget(optimizer, ema, len(norms))
             if hasattr(optimizer, '_device_batch_size'):
                 logging.info('Batching: optimizer graphs=%s, device graphs<=%d; one clipping/Adam/EMA update per optimizer batch',
                              train_loader.batch_size, optimizer._device_batch_size)
@@ -188,7 +199,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                         raise
                 else:
                     audit_training(model, model_eval_wrapper, loss_fn, ema,
-                                   train_loader, valid_loader, device, epoch)
+                                   train_loader, valid_loader, device, epoch, validation_metrics=metrics)
         if hasattr(checkpoint_handler, "save_progress"):
             checkpoint_handler.save_progress(CheckpointState(model,optimizer,lr_scheduler),epoch)
         if stalled >= patience:
@@ -213,7 +224,8 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     graphs=batch.to_data_list() if adaptive else None
     capacity=getattr(optimizer,'_device_batch_size',len(graphs)) if adaptive else batch.num_graphs
     limit=min(len(graphs),capacity) if adaptive else capacity
-    normalizers=loss_fn.normalizers(batch) if adaptive else None
+    normalizers=({key:value.to(device) for key,value in loss_fn.normalizers(batch).items()}
+                 if adaptive else None)
 
     def backward_batch():
         from mace.tools.torch_geometric import Batch
@@ -256,8 +268,11 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     if adaptive:optimizer._device_batch_size=capacity
     norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
                                          error_if_nonfinite=True)
-    metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": float(norm),
-               "grad_clip_applied": max_grad_norm is not None and float(norm)>max_grad_norm,
+    norm_value = float(norm)
+    metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": norm_value,
+               "grad_clip_applied": max_grad_norm is not None and norm_value>max_grad_norm,
+               "gradient_retained": min(1., max_grad_norm/(norm_value+1.e-6)) if max_grad_norm is not None else 1.,
+               "graphs": int(batch.num_graphs),
                "device_batch_size":limit}
     optimizer.step()
     if ema is not None:
@@ -266,7 +281,7 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     return loss.detach(), metrics
 
 
-def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device):
+def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device, split='validation'):
     """Restore trainability and mode even when a validation batch fails."""
     flags = [p.requires_grad for p in model.parameters()]
     was_training = model.training
@@ -277,7 +292,7 @@ def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device):
             parameter.grad = None
         # One EMA swap per split, not two full-model copies per minibatch.
         with ema.average_parameters() if ema is not None else nullcontext():
-            return _evaluate(model, model_eval_wrapper, loss_fn, None, data_loader, device)
+            return _evaluate(model, model_eval_wrapper, loss_fn, None, data_loader, device, split=split)
     finally:
         for parameter, flag in zip(model.parameters(), flags):
             parameter.requires_grad_(flag)
@@ -332,6 +347,7 @@ def _evaluate(
     ema: Optional[ExponentialMovingAverage],
     data_loader: DataLoader,
     device: torch.device,
+    split: str = 'validation',
 ) -> Tuple[float, Dict[str, Any]]:
     E_computed = False
     delta_es_list = []
@@ -535,6 +551,8 @@ def _evaluate(
 
     aux = {
         "loss": avg_loss,
+        "weighted_loss_terms": {key+('/'+part if part else ''):loss_fn.loss_weights[key]*values[0]/values[1]
+            for (key,part),values in objective_sums.items() if values[1]>0},
     }
 
     if E_computed:
@@ -645,7 +663,7 @@ def _evaluate(
         import json
         report=validation_audit.summary()
         report['atomic_numbers']=model.atomic_numbers.tolist() if hasattr(model,'atomic_numbers') else None
-        logging.info('Full validation audit %s',json.dumps(report,allow_nan=False))
+        logging.info('Full %s audit %s',split,json.dumps(report,allow_nan=False))
     return avg_loss, aux
 
 
@@ -656,10 +674,10 @@ def valid_err_log(
     log_errors,
     epoch,
 ):
-    if "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
+    if log_errors == "ElectrostaticRMSE" or "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
                   (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
-                   ('rmse_mu_per_atom','RMSE_MU_per_atom','meA'), ('rmse_rho','RMSE_RHO','me/A^3'),
+                   ('rmse_mu_per_atom','RMSE_dip','meA/atom'), ('rmse_rho','RMSE_rho','me/A^3'),
                    ('rmse_fermi_level','RMSE_EF','meV')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
         if 'rmse_esp' in eval_metrics:
@@ -720,14 +738,14 @@ def valid_err_log(
     elif log_errors == "DipoleRMSE":
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_MU_per_atom={error_mu:.2f} mDebye"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_dip={error_mu:.2f} meA/atom"
         )
     elif log_errors == "EnergyDipoleRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} mDebye"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip={error_mu:.2f} meA/atom"
         )
     elif log_errors == "DensityCoefficientsRMSE":
         error_dma = eval_metrics["rmse_dma"] * 1e3
@@ -746,7 +764,7 @@ def valid_err_log(
         error_dma = eval_metrics["rmse_dma"] * 1e3
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_DMA={error_dma:.1f} me, RMSE_MU_per_atom={error_mu:.6f} meA/atom"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_DMA={error_dma:.1f} me, RMSE_dip={error_mu:.6f} meA/atom"
         )
     elif log_errors == "EnergyDensityDipoleRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
@@ -763,7 +781,7 @@ def valid_err_log(
             error_polarizability = eval_metrics["rmse_polarizability_per_atom"] * 1e3
             error_polarizability = f"{error_polarizability:.2f}"
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_DMA={error_dma:.1f} me, RMSE_Mu_per_atom={error_mu} meA, RMSE_polarizability_per_atom={error_polarizability} me A^2 / V"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_DMA={error_dma:.1f} me, RMSE_dip={error_mu} meA/atom, RMSE_polarizability_per_atom={error_polarizability} me A^2 / V"
         )
     elif log_errors == "EnergyDipolePotentialsRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
@@ -775,5 +793,5 @@ def valid_err_log(
             error_mu = f"{error_mu:.2f}"
         error_esp = eval_metrics["rmse_esp"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu} meA, RMSE_ESP={error_esp:.1f} mV"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip={error_mu} meA/atom, RMSE_ESP={error_esp:.1f} mV"
         )

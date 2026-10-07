@@ -17,10 +17,52 @@ from mace_scf.electrostatics.loss import WeightedLoss, WeightedFourierPotential,
 from tests.test_spectral_response import small_model, small_data
 
 
+def test_fused_angular_transport_has_the_same_first_and_second_derivatives():
+    from mace_scf.electrostatics.coupled import angular_transport, local_transport
+    torch.manual_seed(370)
+    positions=torch.randn(5,3,dtype=torch.float64,requires_grad=True)
+    edges=torch.tensor([[0,1,2,3,4,0,0],[1,2,0,4,3,1,0]])
+    shifts=torch.randn(edges.shape[1],3,dtype=torch.float64)*.1
+    batch=torch.tensor([0,0,0,1,1]);slot=torch.tensor([0,1,2,0,1])
+    kwargs=dict(positions=positions,edge_index=edges,shifts=shifts,batch=batch,slot=slot,
+                graphs=2,max_nodes=3,cutoff=6.,width=3.)
+    scalar=local_transport(**kwargs)
+    sender,receiver=edges
+    vector=positions[sender]-positions[receiver]-shifts
+    square=vector.square().sum(-1)
+    weight=torch.exp(-square/18.)*(1.-square/36.).clamp_min(0.).pow(3)
+    index=(batch[receiver]*3+slot[receiver])*3+slot[sender]
+    direction=positions.new_zeros(18,3).index_add(0,index,weight[:,None]*vector/3.).reshape(2,3,3,3)
+    denom=1.+positions.new_zeros(18).index_add(0,index,weight).reshape(2,3,3).sum(-1,keepdim=True)
+    expected=torch.cat((scalar[...,None],direction/denom[...,None]),-1)
+    actual=angular_transport(**kwargs)
+    torch.testing.assert_close(actual,expected,rtol=1.e-12,atol=1.e-12)
+    def derivatives(value):
+        first=torch.autograd.grad(value.square().sum(),positions,create_graph=True,retain_graph=True)[0]
+        second=torch.autograd.grad(first.square().sum(),positions,retain_graph=True)[0]
+        return first,second
+    for a,b in zip(derivatives(actual),derivatives(expected)):
+        torch.testing.assert_close(a,b,rtol=1.e-10,atol=1.e-12)
+
+
+def test_spectral_metric_is_the_real_space_inverse_fft_rmse():
+    torch.manual_seed(370)
+    shape=(5,5,7)
+    field=torch.randn(2,*shape,dtype=torch.float64)
+    field-=field.mean((1,2,3),keepdim=True)
+    coefficients=torch.fft.fftshift(torch.fft.fftn(field,dim=(1,2,3)),dim=(1,2,3))
+    modes=torch.stack(torch.meshgrid(*(torch.fft.fftshift(torch.fft.fftfreq(n))*n for n in shape),indexing='ij'),-1).reshape(-1,3)
+    pred={'energy':torch.zeros(2),'fourier_potential':torch.view_as_real(coefficients.reshape(2,-1)),
+          'fourier_potential_dft':torch.zeros(2,modes.shape[0],2),
+          'k_vectors':modes[None].expand(2,-1,-1),'k_vectors_mask':torch.ones(2,len(modes),dtype=torch.bool),
+          'k_vectors_grid_shape':torch.tensor(shape)}
+    torch.testing.assert_close(spectral_errors(None,pred,'fourier_potential'),field.square().mean((1,2,3)),rtol=1.e-12,atol=1.e-12)
+
+
 @pytest.mark.parametrize('device', ['cpu', 'cuda'])
 def test_cueq_backend_preserves_fields_forces_gradients_and_export(tmp_path, device):
     if device == 'cuda' and not torch.cuda.is_available():
-        pytest.skip('CUDA hardware is unavailable')
+        pytest.skip('A CUDA-enabled PyTorch device is unavailable in this environment')
     pytest.importorskip('cuequivariance_torch')
     if device == 'cuda':
         pytest.importorskip('cuequivariance_ops_torch')
@@ -115,6 +157,50 @@ def coupled_model(widths=(1.5, 3.), local_energy=False):
     return model
 
 
+def test_electronic_reference_is_not_weight_decayed():
+    from mace_scf.utils.run_train_utils import get_param_options
+    m=coupled_model()
+    args=SimpleNamespace(model='FixedPoint',weight_decay=.001,local_charges_weight_decay=0.,
+                         field_block_weight_decay=.1,lr=.003,amsgrad=False,beta=.9,beta_two=.999)
+    groups=get_param_options(m,args)['params']
+    decay={id(p):g['weight_decay'] for g in groups for p in g['params']}
+    r=m.field_dependent_charges_map
+    assert decay[id(r.common_level.weight)]==.1
+    for p in (r.species_level,r.species_source,r.scalar_out.bias,r.chemical_scalar.bias):
+        assert decay[id(p)]==0.
+
+
+def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels():
+    graphs=[]
+    for i in range(3):
+        atoms=Atoms('O'+'H'*(i+1), positions=[[3.,3.,4.]]+[[3.5+j*.3,3.,4.5] for j in range(i+1)], cell=[7.,7.,12.],pbc=[1,1,0])
+        g=small_data(charge=.1*i,batched=False,atoms=atoms)
+        g.weight=torch.tensor(float(i+1));g.forces_weight=torch.tensor(float(i!=1))
+        g.fermi_level=torch.tensor(.2*i);g.fermi_level_weight=torch.tensor(float(i!=2))
+        g.workfunction=torch.tensor(.1*i);g.workfunction_weight=torch.tensor(float(i!=1))
+        g.fourier_potential_weight=torch.tensor(float(i!=1));graphs.append(g)
+    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'dipole':10,'fermi_level':100,
+                       'fourier_potential':{'weight':100,'vacuum_weight':1}})
+    full=torch_geometric.Batch.from_data_list(graphs)
+    theta=torch.tensor(.2,requires_grad=True)
+    def prediction(batch):
+        n=batch.num_graphs;z=theta*torch.ones(n)
+        return {'energy':z,'forces':theta*torch.ones_like(batch.forces),'dipole':z[:,None].expand(-1,3),
+                'fermi_level':z,'vacuum_potential':2*z,'fourier_potential':z[:,None,None].expand(-1,3,2),
+                'fourier_potential_dft':torch.zeros(n,3,2),'k_vectors_mask':torch.ones(n,3,dtype=torch.bool),
+                'k_vectors':torch.tensor([[[0.,0.,0.],[0.,0.,1.],[0.,0.,-1.]]]).expand(n,-1,-1),
+                'k_vectors_grid_shape':torch.tensor([1,1,3])}
+    reference=loss(full,prediction(full));grad=torch.autograd.grad(reference,theta)[0]
+    for parts in ((graphs[:1],graphs[1:]),([graphs[0]],[graphs[1]],[graphs[2]])):
+        value=0.;gradient=0.
+        for part in parts:
+            batch=torch_geometric.Batch.from_data_list(part)
+            item=loss(batch,prediction(batch),normalizers=loss.normalizers(full))
+            value+=item.detach();gradient+=torch.autograd.grad(item,theta)[0]
+        torch.testing.assert_close(value,reference)
+        torch.testing.assert_close(gradient,grad)
+
+
 @pytest.mark.parametrize('widths', [(), (1.5,3.)])
 @pytest.mark.parametrize('mode', ['unroll_scf','shortcut_scf','implicit'])
 def test_modes_force_loss_and_full_field_gradients(widths, mode):
@@ -177,6 +263,25 @@ def test_rotation_and_heterogeneous_batch_invariance():
         for key in ('energy','fermi_level','workfunction'):
             torch.testing.assert_close(together[key][i:i+1],separate[key],atol=1.e-9,rtol=1.e-9)
         torch.testing.assert_close(together['forces'][batch['ptr'][i]:batch['ptr'][i+1]],separate['forces'],atol=1.e-9,rtol=1.e-9)
+    # Atom-normalized force losses and their full parameter derivatives must
+    # also be invariant to the device partition, including different FFT grids.
+    for graph in (first,second):
+        graph.energy_weight=torch.tensor(1.);graph.forces_weight=torch.tensor(1.)
+    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'fermi_level':100})
+    full=torch_geometric.Batch.from_data_list([first,second])
+    parameters=tuple(p for p in model.parameters() if p.requires_grad)
+    out=evaluate_coupled(model,full.to_dict(),steps=3,training=True)
+    reference=loss(full,out)
+    gradients=torch.autograd.grad(reference,parameters,allow_unused=True)
+    accumulated=[torch.zeros_like(p) for p in parameters]
+    for graph in (first,second):
+        part=torch_geometric.Batch.from_data_list([graph])
+        out=evaluate_coupled(model,part.to_dict(),steps=3,training=True)
+        objective=loss(part,out,normalizers=loss.normalizers(full))
+        for a,g in zip(accumulated,torch.autograd.grad(objective,parameters,allow_unused=True)):
+            if g is not None:a.add_(g)
+    for a,g in zip(accumulated,gradients):
+        torch.testing.assert_close(a,torch.zeros_like(a) if g is None else g,atol=1.e-9,rtol=1.e-9)
     rotation=o3.rand_matrix();original=small_data();rotated=small_data()
     for key in ('positions','cell','shifts','external_field'):
         rotated[key]=rotated[key]@rotation.T

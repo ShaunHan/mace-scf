@@ -66,19 +66,32 @@ def angular_transport(positions, edge_index, shifts, batch, slot, graphs, max_no
     harmonics avoid the non-differentiable unit direction at a coincident edge.
     The same smooth cutoff supplies second derivatives for force training.
     """
-    scalar = local_transport(positions, edge_index, shifts, batch, slot, graphs,
-                             max_nodes, cutoff, width)
+    if cutoff <= 0 or width <= 0:
+        raise ValueError('current transport cutoff and width must be positive')
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError('current edge_index must have shape [2, edges]')
     sender, receiver = edge_index
-    shifts = positions.new_zeros((0, 3)) if shifts is None else shifts.to(positions)
+    if shifts is None:
+        if sender.numel():
+            raise ValueError('current transport requires the Cartesian image shifts of the MACE graph')
+        shifts = positions.new_zeros((0, 3))
+    if shifts.shape != (sender.numel(), 3):
+        raise ValueError('current Cartesian edge shifts must have shape [edges, 3]')
+    if sender.numel() and bool((batch[sender] != batch[receiver]).any()):
+        raise ValueError('current electronic transport cannot connect different graphs')
+    shifts = shifts.to(positions)
     vector = positions[sender]-positions[receiver]-shifts
     square = vector.square().sum(-1)
     weights = torch.exp(-.5*square/float(width)**2)*(1.-square/float(cutoff)**2).clamp_min(0.).pow(3)
     index = (batch[receiver]*max_nodes+slot[receiver])*max_nodes+slot[sender]
-    raw = positions.new_zeros((graphs*max_nodes*max_nodes, 3)).index_add(
-        0, index, weights[:, None]*vector/float(width)).reshape(graphs,max_nodes,max_nodes,3)
-    denom = positions.new_zeros(graphs*max_nodes*max_nodes).index_add(0,index,weights)
-    denom = 1.+denom.reshape(graphs,max_nodes,max_nodes).sum(-1,keepdim=True)
-    return torch.cat((scalar[..., None],raw/denom[..., None]),-1)
+    # One edge reduction supplies both the scalar weights and their first
+    # moment. The original implementation built the same dense scalar matrix
+    # twice, including two independent coordinate-derivative graphs.
+    values = torch.cat((weights[:, None], weights[:, None]*vector/float(width)), -1)
+    raw = positions.new_zeros((graphs*max_nodes*max_nodes, 4)).index_add(
+        0, index, values).reshape(graphs,max_nodes,max_nodes,4)
+    denom = 1.+raw[..., 0].sum(-1,keepdim=True)
+    return raw/denom[..., None]
 
 def angular_differences(operator, scalar_values, vector_values):
     """(l=1 x vector)->scalar and (l=1 x scalar)->vector neighbor differences."""
@@ -435,7 +448,7 @@ def coefficient_contributions(state,geometry,kernels):
     shape=torch.stack((real[...,4:].sum(-1),imag[...,4:].sum(-1)),-1)
     return carrier,shape
 
-def evaluate_coefficients(state,geometry,kernels,density_width):
+def evaluate_coefficients(state,geometry,kernels,density_width,include_carrier=False):
     """Two node-to-Fourier matrix products replace six separate contractions.
 
     Returns the observer tuple, whose pieces are diagnostic contributions of
@@ -450,7 +463,8 @@ def evaluate_coefficients(state,geometry,kernels,density_width):
     boundary=dipole_normal[:,None,None]*ramp
     carrier_with_boundary=carrier+boundary+applied
     total=carrier_with_boundary+shape+proto
-    return total,carrier_with_boundary,shape,source
+    result = (total,carrier_with_boundary,shape,source)
+    return (*result,carrier) if include_carrier else result
 
 
 def total_spectrum(state, geometry, kernels, density_width):
@@ -1069,7 +1083,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
         chem, vec, attrs, initial, present, charge, neighbors, ref, moment = args[:9]
         factor = args[9:13]
         geometry, kernels = args[13:27], args[27:29]
-        spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width)
+        spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
                     if observe else (total_spectrum(z*present[..., None], geometry, kernels, r.density_width),))
         potential, field = sample_spectrum(spectral[0], geometry)
         inputs = (z, chem, vec, attrs, potential, field, initial, present, charge, neighbors)
@@ -1157,8 +1171,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         state = state*g.present[..., None]
         moments = torch.cat((state[..., :1], state[..., 1:4]*r.density_width), -1)
         density_coefficients = g.unpack(moments)[..., [0, 2, 3, 1]]
-        carrier, regular = coefficient_contributions(state, g.tensors, g.kernels)
-        carrier, regular = g.expand_spectrum(carrier), g.expand_spectrum(regular)
+        # Reuse the terminal observation's carrier; do not repeat the two
+        # source-to-Fourier products or recover it by subtracting large fields.
+        carrier, regular = g.expand_spectrum(spectral[4]), sr
         safe = torch.where(g.coulomb>0, -g.coulomb, 1.)
         coarse = carrier/safe[..., None]
         charge = state[..., 0].sum(-1)

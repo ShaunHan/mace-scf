@@ -14,6 +14,141 @@ from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
 from .test_spectral_response import small_model, small_data
 
 
+def test_log_uses_requested_density_and_dipole_names(caplog):
+    import logging
+    from mace_scf.utils.train import valid_err_log
+    class Logger:
+        def log(self,metrics):pass
+    metrics={'rmse_rho':.001,'rmse_mu_per_atom':.002,'rmse_esp':.1,'rmse_esp_vac':.2,
+             'esp_vacuum_enabled':True,'rmse_wf_abs':.15,'rmse_wf_rel':.14}
+    with caplog.at_level(logging.INFO):valid_err_log(1.,metrics,Logger(),'ElectrostaticRMSE',5)
+    assert 'RMSE_dip=2.0000 meA/atom' in caplog.text
+    assert 'RMSE_rho=1.0000 me/A^3' in caplog.text
+    assert 'RMSE_WF(abs/rel)=150.0000/140.0000 meV' in caplog.text
+    assert 'RMSE_MU' not in caplog.text and 'RMSE_RHO' not in caplog.text
+
+
+def test_optimizer_budget_does_not_change_the_optimizer(caplog):
+    import logging,json
+    from mace_scf.utils.diagnostics import optimizer_budget
+    model=torch.nn.Linear(2,1)
+    opt=torch.optim.AdamW(model.parameters(),lr=.003,weight_decay=.1)
+    ema=ExponentialMovingAverage(model.parameters(),decay=.99)
+    with caplog.at_level(logging.INFO):optimizer_budget(opt,ema,86)
+    text=next(r.message for r in caplog.records if r.message.startswith('Optimizer time scales'))
+    report=json.loads(text[text.index('{'):])
+    assert report['groups'][0]['AdamW_decay_only_retention_per_epoch']==pytest.approx((1.-.003*.1)**86)
+    assert not opt.state
+
+
+def test_whole_split_audit_restores_ema_rng_and_frozen_parameters(caplog):
+    import logging
+    from mace.tools import torch_geometric
+    from mace_scf.utils.diagnostics import audit_training
+    from mace_scf.electrostatics.loss import WeightedLoss
+    from .test_coupled_response import coupled_model
+    model=coupled_model();model.node_embedding.requires_grad_(False)
+    loader=torch_geometric.dataloader.DataLoader([small_data(batched=False)]*3,batch_size=2,drop_last=False)
+    options=FixedPointTrainingOptions(mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=2))
+    wrapper=FixedPointWrapper(None,{'forces':True,'stress':False,'virials':False},options)
+    loss=WeightedLoss({'forces':1.})
+    ema=ExponentialMovingAverage(model.parameters(),decay=.99)
+    flags=[p.requires_grad for p in model.parameters()]
+    weights=[p.detach().clone() for p in model.parameters()]
+    state=torch.random.get_rng_state()
+    with caplog.at_level(logging.INFO):
+        audit_training(model,wrapper,loss,ema,loader,loader,'cpu',50,validation_metrics={'rmse_f':.1})
+    assert torch.equal(torch.random.get_rng_state(),state)
+    assert flags==[p.requires_grad for p in model.parameters()]
+    for a,b in zip(weights,model.parameters()):torch.testing.assert_close(a,b,rtol=0,atol=0)
+    assert 'Full-split generalization' in caplog.text and '"training_graphs": 3' in caplog.text
+
+
+def test_allocation_retry_preserves_update_and_discards_partial_gradients(monkeypatch):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from ase import Atoms
+    from mace.tools.torch_geometric import Batch
+    from mace_scf.electrostatics.loss import WeightedLoss
+    from mace_scf.utils.train import take_step, _evaluation_batches
+    torch.set_default_dtype(torch.float64)
+    graphs=[]
+    for i in range(4):
+        atoms=Atoms('O'+'H'*(i+1),positions=[[3.,3.,4.]]+[[3.5+j*.3,3.,4.5] for j in range(i+1)],
+                    cell=[7.,7.,12.],pbc=[1,1,0])
+        graph=small_data(atoms=atoms,batched=False)
+        graph.energy=torch.tensor(.1*i);graph.energy_weight=torch.tensor(1.)
+        graph.forces_weight=torch.tensor(float(i!=1));graph.fermi_level_weight=torch.tensor(float(i!=2))
+        graphs.append(graph)
+    batch=Batch.from_data_list(graphs)
+    model=torch.nn.Linear(3,1)
+    model.field_dependent_charges_map=SimpleNamespace(coupled=True)
+    reference=deepcopy(model)
+    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'fermi_level':100})
+    def prediction(model,data,**kwargs):
+        n=len(data['ptr'])-1
+        return {'energy':model.bias.expand(n),'forces':model.weight.expand_as(data['positions']),
+                'fermi_level':model.bias.expand(n)}
+    reference_optimizer=torch.optim.AdamW(reference.parameters(),lr=.001)
+    reference_ema=ExponentialMovingAverage(reference.parameters(),decay=.9)
+    take_step(reference,prediction,loss,batch.clone(),reference_optimizer,reference_ema,.5,'cpu')
+    optimizer=torch.optim.AdamW(model.parameters(),lr=.001)
+    ema=ExponentialMovingAverage(model.parameters(),decay=.9)
+    # Exercise CUDA retry decisions with CPU tensors; the real CUDA path has
+    # its own hardware-dependent test. Fail once AFTER a partial backward.
+    original_to=Batch.to
+    monkeypatch.setattr(Batch,'to',lambda self,device,*a,**kw:original_to(self,'cpu',*a,**kw))
+    tensor_to=torch.Tensor.to
+    def simulated_device_copy(value,*args,**kwargs):
+        if args and isinstance(args[0],(str,torch.device)) and torch.device(args[0]).type=='cuda':
+            args=('cpu',*args[1:])
+        return tensor_to(value,*args,**kwargs)
+    monkeypatch.setattr(torch.Tensor,'to',simulated_device_copy)
+    monkeypatch.setattr(torch.cuda,'get_rng_state',lambda device:torch.random.get_rng_state())
+    monkeypatch.setattr(torch.cuda,'set_rng_state',lambda state,device:None)
+    monkeypatch.setattr(torch.cuda,'empty_cache',lambda:None)
+    calls=[]
+    def wrapper(model,data,**kwargs):
+        count=len(data['ptr'])-1;calls.append(count)
+        torch.rand(())
+        if count==4 or (count==2 and calls.count(2)==2):
+            raise torch.cuda.OutOfMemoryError('simulated allocation failure')
+        return prediction(model,data,**kwargs)
+    torch.manual_seed(17)
+    expected_rng=torch.random.get_rng_state()
+    for _ in graphs:torch.rand(())
+    expected_next=torch.rand(())
+    torch.random.set_rng_state(expected_rng)
+    _,metrics=take_step(model,wrapper,loss,batch.clone(),optimizer,ema,.5,'cuda')
+    assert calls==[4,2,2,1,1,1,1]
+    assert metrics['device_batch_size']==1
+    assert ema.num_updates==reference_ema.num_updates==1
+    torch.testing.assert_close(torch.rand(()),expected_next,atol=0.,rtol=0.)
+    for a,b in zip(model.parameters(),reference.parameters()):torch.testing.assert_close(a,b,atol=1.e-14,rtol=1.e-14)
+    for a,b in zip(ema.shadow_params,reference_ema.shadow_params):torch.testing.assert_close(a,b,atol=1.e-14,rtol=1.e-14)
+    # A short final loader batch must not permanently reduce device capacity.
+    optimizer._device_batch_size=4
+    take_step(model,prediction,loss,Batch.from_data_list(graphs[:1]),optimizer,None,.5,'cuda')
+    assert optimizer._device_batch_size==4
+    before=[p.detach().clone() for p in model.parameters()]
+    def numerical_failure(*args,**kwargs):raise FloatingPointError('not an allocation failure')
+    with pytest.raises(FloatingPointError,match='not an allocation'):
+        take_step(model,numerical_failure,loss,batch.clone(),optimizer,ema,.5,'cuda')
+    for a,b in zip(model.parameters(),before):torch.testing.assert_close(a,b,atol=0.,rtol=0.)
+    assert ema.num_updates==1
+    with pytest.raises(torch.cuda.OutOfMemoryError):
+        take_step(model,lambda *a,**k:(_ for _ in ()).throw(torch.cuda.OutOfMemoryError('single graph')),
+                  loss,Batch.from_data_list(graphs[:1]),optimizer,ema,.5,'cuda')
+    # Validation similarly visits every graph exactly once after allocation retry.
+    def validation(model,data,**kwargs):
+        if len(data['ptr'])-1>2:raise torch.cuda.OutOfMemoryError('validation allocation')
+        return prediction(model,data,**kwargs)
+    output=list(_evaluation_batches(model,validation,[batch.clone()],'cuda',None))
+    assert [piece.num_graphs for piece,_ in output]==[2,2]
+    assert validation._evaluation_device_batch_size==2
+    torch.testing.assert_close(torch.cat([piece.energy for piece,_ in output]),batch.energy)
+
+
 def test_raw_resume_and_ema_deployment_are_distinct(tmp_path):
     torch.set_default_dtype(torch.float64)
     model = torch.nn.Linear(2, 1)

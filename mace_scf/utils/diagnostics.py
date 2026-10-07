@@ -33,6 +33,8 @@ class ValidationAudit:
                 row.update(weight=float(weight[i]), ef=float(ef[i]-batch.fermi_level[i]),
                            vac=float(vac[i]-vacuum_target[i]),
                            wf=float(output['workfunction'][i]-batch.workfunction[i]))
+                if 'vacuum_potential_dft' in output and batch.fourier_potential_weight[i]*batch.fourier_proto_potential_weight[i]>0:
+                    row['vacuum_reference_gap'] = float(output['vacuum_potential_dft'][i]-vacuum_target[i])
             if output.get('forces') is not None and batch.forces_weight[i]*batch.weight[i]>0:
                 square=(output['forces'][start:stop]-batch.forces[start:stop]).square()
                 row['force_rmse']=float(square.mean().sqrt())
@@ -53,7 +55,7 @@ class ValidationAudit:
 
     def summary(self):
         rows=[r for r in self.rows if 'wf' in r]
-        report={'graphs':len(self.rows), 'index_convention':'validation loader order, zero based',
+        report={'graphs':len(self.rows), 'index_convention':'supplied loader order, zero based',
                 'force_rmse_by_element_column_eV_A':{z:(v[0]/v[1])**.5
                     for z,v in self.species.items() if v[1]}}
         total=sum(r.get('potential_error_power_eV2',0.) for r in self.rows)
@@ -72,6 +74,13 @@ class ValidationAudit:
         report.update(observed_EF_vac_WF=len(rows), EF_vac_WF_rmse_eV=np.sqrt(weights@error**2).tolist(),
                       EF_vac_WF_bias_eV=mean.tolist(),EF_vac_covariance_eV2=float(weights@(center[:,0]*center[:,1])),
                       WF_absolute_error_quantiles_eV=dict(zip(('median','p90','p99','max'),np.quantile(abs(error[:,2]),[.5,.9,.99,1.]).tolist())))
+        report['WF_identity_max_error_eV']=float(abs(error[:,2]-(error[:,1]-error[:,0])).max())
+        report['WF_variance_components_eV2']={
+            'EF':float(weights@center[:,0]**2), 'vacuum':float(weights@center[:,1]**2),
+            'covariance_contribution':float(-2*(weights@(center[:,0]*center[:,1])))}
+        gaps=[r['vacuum_reference_gap'] for r in rows if 'vacuum_reference_gap' in r]
+        if gaps:
+            report['spectral_vacuum_minus_EF_plus_WF_RMSE_eV']=float(np.sqrt(np.mean(np.square(gaps))))
         power=weights*error[:,2]**2
         order=np.argsort(-power)
         report['WF_squared_error_share_largest_10_percent']=float(power[order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(power.sum(),1.e-30))
@@ -81,7 +90,7 @@ class ValidationAudit:
         report['composition_cohorts']=sorted(({'element_counts':k,'graphs':len(v),
                 'wf_rmse_eV':float(np.sqrt(np.average([r['wf']**2 for r in v],weights=[r['weight'] for r in v])))}
                 for k,v in groups.items()),key=lambda r:r['wf_rmse_eV'],reverse=True)[:12]
-        report['scope']='Full validation split; diagnostic only, no reference-dependent correction is installed.'
+        report['scope']='Full supplied split; diagnostic only, no reference-dependent correction is installed.'
         return report
 
 
@@ -102,6 +111,28 @@ def runtime_inventory(model, optimizer, device, batch_size):
         props=torch.cuda.get_device_properties(device)
         report.update(gpu=props.name,device_MiB=props.total_memory/2**20)
     logging.info('Runtime inventory %s',json.dumps(report))
+
+
+def optimizer_budget(optimizer, ema, updates):
+    """Report update-dependent time scales and the actual AdamW shrink factor.
+
+    These are diagnostics, not automatic learning-rate or decay rescaling.
+    Averaging more graphs into one gradient is not more optimizer updates.
+    """
+    import json
+    groups=[]
+    for group in optimizer.param_groups:
+        beta1,beta2=group.get('betas',(0.,0.))
+        steps=[float(optimizer.state[p].get('step',0)) for p in group['params'] if p in optimizer.state]
+        rate=group['lr']*group.get('weight_decay',0.)
+        groups.append({'name':group.get('name','unnamed'), 'lr':group['lr'],
+            'parameter_update_range':[min(steps,default=0.),max(steps,default=0.)],
+            'moment_memory_epochs':[1./max(1.e-30,(1-beta)*updates) for beta in (beta1,beta2)],
+            'AdamW_decay_only_retention_per_epoch':(1.-rate)**updates if isinstance(optimizer,torch.optim.AdamW) else None})
+    report={'updates_per_epoch':updates,'groups':groups}
+    if ema is not None:
+        report['EMA_asymptotic_memory_epochs']=1./max(1.e-30,(1-float(ema.decay))*updates)
+    logging.info('Optimizer time scales %s',json.dumps(report,allow_nan=False))
 
 
 def _panel(loader, maximum):
@@ -152,8 +183,8 @@ def _ridge_report(train_x, train_y, valid_x, valid_y):
             "selection":"training inner split only; diagnostic readout NOT installed"}
 
 
-def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device, epoch):
-    """Bounded, optional deployment/gap/low-k/identifiability audit."""
+def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device, epoch, validation_metrics=None):
+    """Optional whole-split gap metrics and bounded physical response probes."""
     import json
     from contextlib import nullcontext
     from mace_scf.electrostatics.potential import evaluate_electronic
@@ -168,6 +199,25 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
     rng=torch.random.get_rng_state()
     cuda_rng=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     try:
+        if validation_metrics is not None:
+            # The same EMA model, 50-step observer and complete splits. Small
+            # panels missed the hydrated-slab tail and understated the gap.
+            from .train import evaluate
+            import time
+            start=time.perf_counter()
+            loader=torch_geometric.dataloader.DataLoader(train_loader.dataset,
+                batch_size=valid_loader.batch_size,shuffle=False,drop_last=False)
+            _, train_metrics=evaluate(model,wrapper,loss,ema,loader,device,split='training')
+            keys=('rmse_e_per_atom','rmse_f','rmse_mu_per_atom','rmse_fermi_level','rmse_rho',
+                  'rmse_esp','rmse_esp_vac','rmse_wf_abs','rmse_wf_rel')
+            report={'epoch':epoch,'training_graphs':len(loader.dataset),'validation_graphs':len(valid_loader.dataset),
+                'train':{k:train_metrics[k] for k in keys if k in train_metrics},
+                'validation':{k:validation_metrics[k] for k in keys if k in validation_metrics},
+                'weighted_training_objectives':train_metrics.get('weighted_loss_terms',{}),
+                'weighted_validation_objectives':validation_metrics.get('weighted_loss_terms',{}),
+                'seconds':time.perf_counter()-start,
+                'scope':'Whole splits at the same EMA parameters and deployment step count; read-only, native units.'}
+            logging.info('Full-split generalization %s',json.dumps(report,allow_nan=False))
         model.eval()
         model.requires_grad_(False)
         with ema.average_parameters() if ema is not None else nullcontext():

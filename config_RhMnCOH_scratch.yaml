@@ -1,4 +1,4 @@
-# v369: full-field SCF, exact device-batch accumulation and 50-step deployment.
+# v370: retain the full-field SCF and runtime kernels; recover optimizer updates.
 heads:
   default:
     arrays_keys:
@@ -34,7 +34,7 @@ electrostatic_pbc_method: mixed_periodic
 fixedpoint_update_config:
   type: CoupledResponse
   potential_widths: []
-batch_size: 16
+batch_size: 8
 valid_batch_size: 4
 lr: 0.003
 optimizer: adamw
@@ -54,7 +54,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_scratch_v369
+checkpoints_dir: checkpoints_RhMnCOH_scratch_v370
 compute_forces: true
 train_schedule:
   0:
@@ -83,7 +83,7 @@ train_schedule:
     lr: 0.001
     loss:
       energy_per_atom: 100
-      forces: 1000
+      forces: 500
       dipole: 10
       fourier_density: 10
     fixed_point_training_options:
@@ -102,7 +102,7 @@ train_schedule:
     lr: 0.001
     loss:
       energy_per_atom: 100
-      forces: 1000
+      forces: 500
       dipole: 10
       fourier_density: 10
     fixed_point_training_options:
