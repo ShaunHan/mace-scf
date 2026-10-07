@@ -418,7 +418,7 @@ def _evaluate(
                     pair[0] += float(numerator)
                     pair[1] += float(denominator)
                 continue
-            if key in ("fourier_density", "fourier_potential", "fermi_level", "workfunction"):
+            if key in ("fourier_density", "fourier_potential", "fermi_level"):
                 denominator = float((batch.weight*getattr(batch,key+"_weight")).sum())
             elif key == "vacuum_potential":
                 denominator = float(vacuum_observation_weight(batch).sum())
@@ -443,9 +443,9 @@ def _evaluate(
                 observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield' else key)
                 error = spectral_errors(batch,output,observed_key)
             elif key == "workfunction":
-                weight = batch.workfunction_weight*batch.weight
-                weight = weight*(batch.pbc.reshape(-1,3).sum(-1)==2)
-                difference = output[key]-batch.workfunction
+                target, weight = vacuum_reference_weights(batch, output['vacuum_potential'])
+                weight = weight*(batch.fermi_level_weight>0)
+                difference = output[key]-(target-batch.fermi_level)
                 use = weight>0
                 if bool((use & ~torch.isfinite(difference)).any()):
                     raise FloatingPointError('Nonfinite observed workfunction error')
@@ -656,7 +656,7 @@ def _evaluate(
             # per-batch correction or a shift installed in the deployed model.
             aux['wf_bias'] = float(first/weight)
             aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
-    aux['esp_vacuum_enabled'] = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
+    aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
     if validation_audit is not None:
@@ -677,12 +677,13 @@ def valid_err_log(
     if log_errors == "ElectrostaticRMSE" or "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
                   (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
-                   ('rmse_mu_per_atom','RMSE_dip','meA/atom'), ('rmse_rho','RMSE_rho','me/A^3'),
+                   ('rmse_mu_per_atom','RMSE_dip_per_atom','meA'), ('rmse_rho','RMSE_rho','me/A^3'),
                    ('rmse_fermi_level','RMSE_EF','meV')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
-        if 'rmse_esp' in eval_metrics:
+        if 'rmse_esp' in eval_metrics or 'rmse_esp_vac' in eval_metrics:
             pieces.append(('RMSE_ESP(tot/vac)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_vac')
-                           if eval_metrics['esp_vacuum_enabled'] else 'RMSE_ESP='+fmt('rmse_esp'))+' mV')
+                           if eval_metrics['esp_vacuum_enabled'] or 'rmse_esp_vac' in eval_metrics
+                           else 'RMSE_ESP='+fmt('rmse_esp'))+' mV')
         if 'rmse_wf_abs' in eval_metrics:
             pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
@@ -738,14 +739,14 @@ def valid_err_log(
     elif log_errors == "DipoleRMSE":
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_dip={error_mu:.2f} meA/atom"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_dip_per_atom={error_mu:.2f} meA"
         )
     elif log_errors == "EnergyDipoleRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip={error_mu:.2f} meA/atom"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip_per_atom={error_mu:.2f} meA"
         )
     elif log_errors == "DensityCoefficientsRMSE":
         error_dma = eval_metrics["rmse_dma"] * 1e3
@@ -764,7 +765,7 @@ def valid_err_log(
         error_dma = eval_metrics["rmse_dma"] * 1e3
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_DMA={error_dma:.1f} me, RMSE_dip={error_mu:.6f} meA/atom"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_DMA={error_dma:.1f} me, RMSE_dip_per_atom={error_mu:.6f} meA"
         )
     elif log_errors == "EnergyDensityDipoleRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
@@ -781,7 +782,7 @@ def valid_err_log(
             error_polarizability = eval_metrics["rmse_polarizability_per_atom"] * 1e3
             error_polarizability = f"{error_polarizability:.2f}"
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_DMA={error_dma:.1f} me, RMSE_dip={error_mu} meA/atom, RMSE_polarizability_per_atom={error_polarizability} me A^2 / V"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_DMA={error_dma:.1f} me, RMSE_dip_per_atom={error_mu} meA, RMSE_polarizability_per_atom={error_polarizability} me A^2 / V"
         )
     elif log_errors == "EnergyDipolePotentialsRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
@@ -793,5 +794,5 @@ def valid_err_log(
             error_mu = f"{error_mu:.2f}"
         error_esp = eval_metrics["rmse_esp"] * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip={error_mu} meA/atom, RMSE_ESP={error_esp:.1f} mV"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_dip_per_atom={error_mu} meA, RMSE_ESP={error_esp:.1f} mV"
         )

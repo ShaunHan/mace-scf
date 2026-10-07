@@ -325,8 +325,8 @@ class MACEFixedPointSCF(Calculator):
                 "external_field": external_field_key,
                 "fermi_level": fermi_level_key,
                 "total_charge": total_charge_key,
-                "vacuum_zfrac": "vacuum_zfrac",
-                "dipole_correction_zfrac": "dipole_correction_zfrac",
+                **{f"{prefix}_{axis}frac": f"{prefix}_{axis}frac"
+                   for prefix in ("vacuum", "dipole_correction") for axis in "xyz"},
             },
             arrays_keys={
                 "atomic_multipoles": atomic_multipoles_key,
@@ -587,7 +587,7 @@ class MACEFixedPointSCF(Calculator):
     def check_state(self, atoms, tol=1.e-15):
         changes = super().check_state(atoms, tol=tol)
         if self.atoms is not None:
-            for key in (self.total_charge_key, self.external_field_key, self.fermi_level_key, "vacuum_zfrac", "dipole_correction_zfrac", "counter_charge", "counter_charge_center"):
+            for key in (self.total_charge_key, self.external_field_key, self.fermi_level_key, *[f"{prefix}_{axis}frac" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"], "counter_charge", "counter_charge_center"):
                 if not np.array_equal(np.asarray(atoms.info.get(key)), np.asarray(self.atoms.info.get(key))):
                     changes.append(key)
         return changes

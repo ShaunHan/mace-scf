@@ -126,7 +126,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--train_schedule", required=True
     )
     parser.add_argument(
-        "--fixedpoint_update_config", type=str, default=None,
+        "--fixed_point_update_config", type=str, default=None,
     )
     parser.add_argument(
         "--field_readout_config", type=str, default=None,

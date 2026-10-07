@@ -55,11 +55,12 @@ def create_error_table(
     if log_wandb:
         import wandb
     table = PrettyTable()
+    has_wf_observations = False
 
     if table_type == "ElectrostaticRMSE":
-        vacuum_enabled = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
+        vacuum_enabled = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
         esp_title = 'RMSE_ESP(tot/vac) mV' if vacuum_enabled else 'RMSE_ESP mV'
-        table.field_names = ["split", "RMSE_E meV/atom", "RMSE_F meV/A", "RMSE_MU meA/atom", "RMSE_RHO me/A^3", "RMSE_EF meV", esp_title, "RMSE_WF(abs/rel) meV"]
+        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "RMSE_dip_per_atom meA", "RMSE_rho me/A^3", "RMSE_EF meV", esp_title, "RMSE_WF(abs/rel) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
@@ -148,6 +149,8 @@ def create_error_table(
                 name + "_final_rel_rmse_f": metrics["rel_rmse_f"],
             }
             wandb.log(wandb_log_dict)
+
+        has_wf_observations |= "rmse_wf_abs" in metrics
 
         # catch missing metrics
         all_metric_name = [
@@ -259,4 +262,6 @@ def create_error_table(
         for index,name in reversed(list(enumerate(table.field_names))):
             if index and all(row[index] in ('not found','not found/not found') for row in table.rows):
                 table.del_column(name)
+    if table_type == "ElectrostaticRMSE" and not has_wf_observations:
+        table.del_column("RMSE_WF(abs/rel) meV")
     return table

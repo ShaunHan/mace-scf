@@ -16,6 +16,7 @@ class ValidationAudit:
         self.rows = []
         self.species = {}
         self.density_width=float(density_width)
+        self.density_sums = np.zeros(3)
 
     @torch.no_grad()
     def update(self, batch, output):
@@ -23,16 +24,21 @@ class ValidationAudit:
         ef = output.get('fermi_level')
         vac = output.get('vacuum_potential')
         vacuum_target, weight = vacuum_reference_weights(batch, vac) if vac is not None else (None,None)
+        if 'fourier_farfield_density_dft' in output:
+            from mace_scf.electrostatics.loss import spectral_errors
+            weights = batch.weight*batch.fourier_density_weight
+            self.density_sums += [float((spectral_errors(batch,output,key)*weights).sum())
+                                 for key in ('fourier_density','fourier_farfield_density')]+[float(weights.sum())]
         for i in range(batch.num_graphs):
             start, stop = int(batch.ptr[i]), int(batch.ptr[i+1])
             attrs = batch.node_attrs[start:stop]
             composition = tuple(int(x) for x in attrs.sum(0))
             row = {'index':len(self.rows), 'atoms':stop-start,
                    'composition':composition, 'charge':float(batch.total_charge[i])}
-            if vac is not None and ef is not None and weight[i]>0:
+            if vac is not None and ef is not None and weight[i]>0 and batch.fermi_level_weight[i]>0:
                 row.update(weight=float(weight[i]), ef=float(ef[i]-batch.fermi_level[i]),
                            vac=float(vac[i]-vacuum_target[i]),
-                           wf=float(output['workfunction'][i]-batch.workfunction[i]))
+                           wf=float(output['workfunction'][i]-(vacuum_target[i]-batch.fermi_level[i])))
                 if 'vacuum_potential_dft' in output and batch.fourier_potential_weight[i]*batch.fourier_proto_potential_weight[i]>0:
                     row['vacuum_reference_gap'] = float(output['vacuum_potential_dft'][i]-vacuum_target[i])
             if output.get('forces') is not None and batch.forces_weight[i]*batch.weight[i]>0:
@@ -40,8 +46,9 @@ class ValidationAudit:
                 row['force_rmse']=float(square.mean().sqrt())
                 for z in range(attrs.shape[1]):
                     values=square[attrs[:,z]>0]
-                    previous=self.species.setdefault(str(z),[0.,0])
+                    previous=self.species.setdefault(str(z),[0.,0,0.])
                     previous[0]+=float(values.sum());previous[1]+=values.numel()
+                    previous[2]+=float(batch.forces[start:stop][attrs[:,z]>0].square().sum())
             if 'fourier_total_potential_dft' in output and batch.fourier_potential_weight[i]*batch.fourier_proto_potential_weight[i]>0:
                 delta=(output['fourier_total_potential'][i]-output['fourier_total_potential_dft'][i])/output['k_vectors_grid_shape'].prod()
                 k2=output['k_vectors'][i].square().sum(-1)
@@ -57,7 +64,16 @@ class ValidationAudit:
         rows=[r for r in self.rows if 'wf' in r]
         report={'graphs':len(self.rows), 'index_convention':'supplied loader order, zero based',
                 'force_rmse_by_element_column_eV_A':{z:(v[0]/v[1])**.5
+                    for z,v in self.species.items() if v[1]},
+                'force_target_rms_by_element_column_eV_A':{z:(v[2]/v[1])**.5
+                    for z,v in self.species.items() if v[1]},
+                'force_rmse_over_target_rms_by_element_column':{z:(v[0]/v[2])**.5 if v[2]>0 else None
                     for z,v in self.species.items() if v[1]}}
+        if self.density_sums[2]>0:
+            report['density_observers'] = {
+                'density_RMSE_e_A3':float(np.sqrt(self.density_sums[0]/self.density_sums[2])),
+                'farfield_RMSE_e_A3':float(np.sqrt(self.density_sums[1]/self.density_sums[2])),
+                'scope':'Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain.'}
         total=sum(r.get('potential_error_power_eV2',0.) for r in self.rows)
         if total>0:
             report['potential_error_power_fractions']={
@@ -80,7 +96,7 @@ class ValidationAudit:
             'covariance_contribution':float(-2*(weights@(center[:,0]*center[:,1])))}
         gaps=[r['vacuum_reference_gap'] for r in rows if 'vacuum_reference_gap' in r]
         if gaps:
-            report['spectral_vacuum_minus_EF_plus_WF_RMSE_eV']=float(np.sqrt(np.mean(np.square(gaps))))
+            report['spectral_minus_measured_vacuum_RMSE_eV']=float(np.sqrt(np.mean(np.square(gaps))))
         power=weights*error[:,2]**2
         order=np.argsort(-power)
         report['WF_squared_error_share_largest_10_percent']=float(power[order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(power.sum(),1.e-30))
@@ -138,6 +154,55 @@ def optimizer_budget(optimizer, ema, updates):
 def _panel(loader, maximum):
     indices = np.linspace(0, len(loader.dataset)-1, min(maximum,len(loader.dataset))).round().astype(int)
     return torch_geometric.dataloader.DataLoader([loader.dataset[int(i)] for i in np.unique(indices)], batch_size=1, shuffle=False)
+
+
+def objective_gradients(model, wrapper, loss, loader, device, epoch=0):
+    """Read-only parameter-gradient alignment on one deterministic training graph.
+
+    Report actual weighted gradients before clipping. No parameter, optimizer,
+    EMA, random state or .grad buffer is updated. This small panel can expose a
+    conflict; it cannot establish its prevalence across the training split.
+    """
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    if not parameters:
+        return {'skipped':'no trainable parameters'}
+    index = ((epoch//50)*max(1,len(loader.dataset)//4)) % len(loader.dataset)
+    batch = torch_geometric.Batch.from_data_list([loader.dataset[index]]).to(device)
+    with torch.enable_grad():
+        output = wrapper(model,batch.to_dict(),training=True)
+        gradients, report = {}, {}
+
+        def record(name, value):
+            raw = (torch.autograd.grad(value,parameters,retain_graph=True,allow_unused=True)
+                   if value.requires_grad else (None,)*len(parameters))
+            # Keep only one objective's gradients on the accelerator. Joining
+            # on CPU avoids a second model-sized GPU allocation for fine-tuning.
+            gradient = torch.cat([torch.zeros(p.numel(),dtype=p.dtype,device='cpu') if g is None else
+                                  g.detach().cpu().flatten() for p,g in zip(parameters,raw)])
+            gradients[name] = gradient
+            report[name] = {'weighted_loss':float(value.detach()),
+                            'gradient_norm':float(gradient.norm())}
+
+        for name,function in loss.loss_fns.items():
+            if loss.loss_weights[name]:
+                record(name,loss.loss_weights[name]*function(batch,output))
+        if 'reference_response' in output:
+            record('reference_conditioning',loss.reference_loss(batch,output)+output['energy'].sum()*0.)
+        if 'fourier_density' in gradients and 'fourier_farfield_density_dft' in output:
+            from mace_scf.electrostatics.loss import WeightedFourierDensity
+            reference = getattr(loss.loss_fns['fourier_density'],'reference','density')
+            other = 'density' if reference == 'farfield' else 'farfield'
+            value = loss.loss_weights['fourier_density']*WeightedFourierDensity(other)(batch,output)
+            record('density_observer_'+other,value)
+        alignment = {}
+        names = list(gradients)
+        for i,left in enumerate(names):
+            for right in names[i+1:]:
+                a,b = gradients[left],gradients[right]
+                denominator = a.norm()*b.norm()
+                alignment[left+' / '+right] = float(a@b/denominator) if denominator>0 else None
+    return {'training_index':index,'atoms':len(batch.positions),'terms':report,'cosines':alignment,
+            'scope':'One training graph, before clipping; diagnostic only.'}
 
 
 def _probe_features(model, data, output):
@@ -226,19 +291,37 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                 features=[]
                 targets=[]
                 low=[]
-                low_modes=[]
                 drifts=[]
                 charges=[]
                 force_squares=[]
                 species_errors={}
                 charge_responses=[]
                 reference_gaps=[]
+                conditional_rows=[]
+                conditional_stiffness=[]
+                conditional_failures=[]
                 for index,batch in enumerate(_panel(loader,32 if label=="train" else 16)):
                     batch=batch.to(device)
                     data=batch.to_dict()
-                    output=evaluate_electronic(model,data,steps=50,compute_force=True)
+                    try:
+                        output=evaluate_electronic(model,data,steps=50,compute_force=True,
+                            **({'reference_conditioning':True} if getattr(model.field_dependent_charges_map,'coupled',False) else {}))
+                    except RuntimeError as exc:
+                        if 'Reference-conditioned chemical-potential response is singular' not in str(exc):
+                            raise
+                        conditional_failures.append({'panel_index':index,'reason':str(exc)})
+                        output=evaluate_electronic(model,data,steps=50,compute_force=True)
                     output={key:value.detach() if torch.is_tensor(value) else value
                             for key,value in output.items()}
+                    reference = output.get('reference_response')
+                    if reference is not None:
+                        conditional_stiffness.append(float(reference['reference_charge_stiffness'][0]))
+                        row = {'charge_error_e':float(reference['reference_charge_error'][0])}
+                        if reference['reference_masks'].get('fermi_level',torch.zeros(1))[0]:
+                            row['EF_given_DFT_field_eV'] = float(reference['fermi_level'][0]-batch.fermi_level[0])
+                        if batch.vacuum_potential_weight[0]>0:
+                            row['vacuum_given_DFT_EF_eV'] = float(reference['vacuum_potential'][0]-batch.vacuum_potential[0])
+                        conditional_rows.append(row)
                     atom_error=(output["forces"].detach()-batch.forces).square()
                     observed=(batch.weight*batch.forces_weight)[batch.batch]>0
                     force_squares.append(atom_error[observed].reshape(-1).cpu())
@@ -278,27 +361,25 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                             if len(shifted)==2:
                                 charge_responses.append(((shifted[1]-shifted[0])/.02).cpu().tolist())
                     with torch.no_grad():
-                        if (float(batch.workfunction_weight[0])>0 and float(batch.fermi_level_weight[0])>0
+                        if (float(batch.vacuum_potential_weight[0])>0 and float(batch.fermi_level_weight[0])>0
                                 and int(batch.pbc.sum())==2):
-                            vacuum_target = batch.fermi_level[0]+batch.workfunction[0]
+                            vacuum_target = batch.vacuum_potential[0]
                             error=torch.stack((output['fermi_level'][0]-batch.fermi_level[0],
                                 output['vacuum_potential'][0]-vacuum_target,
-                                output['workfunction'][0]-batch.workfunction[0]))
+                                output['workfunction'][0]-(vacuum_target-batch.fermi_level[0])))
                             if 'vacuum_potential_dft' in output and float(batch.fourier_proto_potential_weight[0]*batch.fourier_potential_weight[0])>0:
                                 reference_gaps.append(float(output['vacuum_potential_dft'][0]-vacuum_target))
                             errors.append(error.cpu())
                             features.append(_probe_features(model,data,output).cpu())
-                            targets.append((-error[2]).cpu())
+                            targets.append((-error[0]).cpu())
                         if 'fourier_potential_dft' in output and float(batch.fourier_potential_weight[0])>0:
                             diff=(output['fourier_potential']-output['fourier_potential_dft'])/output['k_vectors_grid_shape'].prod()
                             k2=output['k_vectors'].square().sum(-1)
                             use=output['k_vectors_mask']&(k2>0)
                             use=use & output.get('fourier_potential_dft_mask',use)
-                            positive=k2[use]
-                            if positive.numel():
-                                shell=use&(k2<=4*positive.min())
-                                low.append([float(diff[shell].square().sum()),float(diff[use].square().sum())])
-                                low_modes.append([int(shell.sum()),int(use.sum())])
+                            power=torch.where(use,diff.square().sum(-1),0.)
+                            low.append([float((power*torch.exp(-float(model.coulomb_energy.density_smearing_width)**2*k2)).sum()),
+                                        float(power.sum())])
                 rows[label]={"graphs":len(charges),"charge_span":[min(charges),max(charges)],
                     "step_comparison":drifts,"dEF_dQ_and_dWF_dQ_eV_per_e":charge_responses,
                     "force_RMSE_by_atomic_number_eV_A":{z:float(torch.cat(v).mean().sqrt()) for z,v in species_errors.items()}}
@@ -319,15 +400,21 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                     residual_rows[label]=torch.stack(targets)
                 if reference_gaps:
                     gap=torch.tensor(reference_gaps)
-                    rows[label]['spectral_vacuum_minus_EF_plus_WF_RMSE_eV']=float(gap.square().mean().sqrt())
+                    rows[label]['spectral_minus_measured_vacuum_RMSE_eV']=float(gap.square().mean().sqrt())
                 if low:
                     low=torch.tensor(low).sum(0)
-                    rows[label]['low_k_potential_error_power_fraction']=float(low[0]/low[1].clamp_min(1.e-30))
-                    mode_counts=torch.tensor(low_modes).sum(0)
-                    rows[label]['low_k_mode_fraction']=float(mode_counts[0]/mode_counts[1])
-                    rows[label]['low_k_error_concentration']=float((low[0]/low[1].clamp_min(1.e-30))/(mode_counts[0]/mode_counts[1]))
+                    rows[label]['Gaussian_lowpass_potential_error_power_fraction']=float(low[0]/low[1].clamp_min(1.e-30))
+                if conditional_rows:
+                    names = set().union(*(row.keys() for row in conditional_rows))
+                    rows[label]['reference_conditioning'] = {
+                        name+'_RMSE':float(np.sqrt(np.mean([row[name]**2 for row in conditional_rows if name in row])))
+                        for name in names}
+                    rows[label]['reference_conditioning']['scope'] = 'Oracle conditional errors, not deployment metrics; charge error measures the departure from the prescribed fixed-Q ensemble.'
+                    rows[label]['reference_conditioning']['dmu_dQ_eV_per_e_range'] = [min(conditional_stiffness),max(conditional_stiffness)]
+                if conditional_failures:
+                    rows[label]['reference_conditioning_failures'] = conditional_failures
             if all(k in feature_rows for k in ('train','validation')):
-                rows['model_field_readout_probe']=_ridge_report(feature_rows['train'],residual_rows['train'],feature_rows['validation'],residual_rows['validation'])
+                rows['model_field_EF_readout_probe']=_ridge_report(feature_rows['train'],residual_rows['train'],feature_rows['validation'],residual_rows['validation'])
             rows['epoch']=epoch
             if all('WF_relative_RMSE_eV' in rows[k] for k in ('train','validation')):
                 train,valid=rows['train'],rows['validation']
@@ -342,6 +429,10 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
             groups=getattr(getattr(wrapper,'optimizer',None),'param_groups',[])
             rows['regularization']={'field_weight_decay':next((g['weight_decay'] for g in groups
                 if g.get('name')=='field_dependent_charges_map'),None)}
+            for parameter,flag in zip(model.parameters(),flags):
+                parameter.requires_grad_(flag)
+            rows['objective_gradients'] = objective_gradients(model,wrapper,loss,train_loader,device,epoch)
+            rows['objective_gradients']['parameter_state'] = 'EMA' if ema is not None else 'current model'
             rows['scope']='Deterministic panels, not whole-dataset metrics. Validation is development data, never used for fitting or selecting the probe.'
             logging.info("Electronic diagnostic %s",json.dumps(rows,allow_nan=False))
     finally:

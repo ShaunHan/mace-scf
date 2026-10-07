@@ -18,7 +18,7 @@ from tests.test_spectral_response import small_model, small_data
 
 
 def test_fused_angular_transport_has_the_same_first_and_second_derivatives():
-    from mace_scf.electrostatics.coupled import angular_transport, local_transport
+    from mace_scf.electrostatics.coupled import angular_transport
     torch.manual_seed(370)
     positions=torch.randn(5,3,dtype=torch.float64,requires_grad=True)
     edges=torch.tensor([[0,1,2,3,4,0,0],[1,2,0,4,3,1,0]])
@@ -26,14 +26,15 @@ def test_fused_angular_transport_has_the_same_first_and_second_derivatives():
     batch=torch.tensor([0,0,0,1,1]);slot=torch.tensor([0,1,2,0,1])
     kwargs=dict(positions=positions,edge_index=edges,shifts=shifts,batch=batch,slot=slot,
                 graphs=2,max_nodes=3,cutoff=6.,width=3.)
-    scalar=local_transport(**kwargs)
     sender,receiver=edges
     vector=positions[sender]-positions[receiver]-shifts
     square=vector.square().sum(-1)
     weight=torch.exp(-square/18.)*(1.-square/36.).clamp_min(0.).pow(3)
     index=(batch[receiver]*3+slot[receiver])*3+slot[sender]
     direction=positions.new_zeros(18,3).index_add(0,index,weight[:,None]*vector/3.).reshape(2,3,3,3)
-    denom=1.+positions.new_zeros(18).index_add(0,index,weight).reshape(2,3,3).sum(-1,keepdim=True)
+    raw=positions.new_zeros(18).index_add(0,index,weight).reshape(2,3,3)
+    denom=1.+raw.sum(-1,keepdim=True)
+    scalar=raw/denom
     expected=torch.cat((scalar[...,None],direction/denom[...,None]),-1)
     actual=angular_transport(**kwargs)
     torch.testing.assert_close(actual,expected,rtol=1.e-12,atol=1.e-12)
@@ -170,26 +171,35 @@ def test_electronic_reference_is_not_weight_decayed():
         assert decay[id(p)]==0.
 
 
-def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels():
+@pytest.mark.parametrize('conditioning',[False,True])
+def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels(conditioning):
     graphs=[]
     for i in range(3):
         atoms=Atoms('O'+'H'*(i+1), positions=[[3.,3.,4.]]+[[3.5+j*.3,3.,4.5] for j in range(i+1)], cell=[7.,7.,12.],pbc=[1,1,0])
         g=small_data(charge=.1*i,batched=False,atoms=atoms)
         g.weight=torch.tensor(float(i+1));g.forces_weight=torch.tensor(float(i!=1))
         g.fermi_level=torch.tensor(.2*i);g.fermi_level_weight=torch.tensor(float(i!=2))
-        g.workfunction=torch.tensor(.1*i);g.workfunction_weight=torch.tensor(float(i!=1))
+        g.vacuum_potential=torch.tensor(.3*i);g.vacuum_potential_weight=torch.tensor(float(i!=1))
         g.fourier_potential_weight=torch.tensor(float(i!=1));graphs.append(g)
     loss=WeightedLoss({'energy_per_atom':100,'forces':500,'dipole':10,'fermi_level':100,
-                       'fourier_potential':{'weight':100,'vacuum_weight':1}})
+                       'fourier_potential':100,'vacuum_potential':100})
     full=torch_geometric.Batch.from_data_list(graphs)
     theta=torch.tensor(.2,requires_grad=True)
     def prediction(batch):
         n=batch.num_graphs;z=theta*torch.ones(n)
-        return {'energy':z,'forces':theta*torch.ones_like(batch.forces),'dipole':z[:,None].expand(-1,3),
+        result = {'energy':z,'forces':theta*torch.ones_like(batch.forces),'dipole':z[:,None].expand(-1,3),
                 'fermi_level':z,'vacuum_potential':2*z,'fourier_potential':z[:,None,None].expand(-1,3,2),
                 'fourier_potential_dft':torch.zeros(n,3,2),'k_vectors_mask':torch.ones(n,3,dtype=torch.bool),
                 'k_vectors':torch.tensor([[[0.,0.,0.],[0.,0.,1.],[0.,0.,-1.]]]).expand(n,-1,-1),
                 'k_vectors_grid_shape':torch.tensor([1,1,3])}
+        if conditioning:
+            reference = dict(result)
+            reference['vacuum_potential'] = 3*z
+            reference['fermi_level'] = z*.5
+            reference['reference_masks'] = {key:batch.total_charge>.05 for key in
+                                           ('fermi_level','vacuum_potential','fourier_potential')}
+            result['reference_response'] = reference
+        return result
     reference=loss(full,prediction(full));grad=torch.autograd.grad(reference,theta)[0]
     for parts in ((graphs[:1],graphs[1:]),([graphs[0]],[graphs[1]],[graphs[2]])):
         value=0.;gradient=0.
@@ -293,7 +303,7 @@ def test_rotation_and_heterogeneous_batch_invariance():
 
 def test_labels_do_not_enter_the_scf_map():
     model=coupled_model();data=small_data();other=deepcopy(data)
-    other['fermi_level'].fill_(12345.);other['workfunction'].fill_(-10000.)
+    other['fermi_level'].fill_(12345.);other['vacuum_potential'].fill_(-10000.)
     a=evaluate_coupled(model,data,steps=12);b=evaluate_coupled(model,other,steps=12)
     for key in ('energy','forces','workfunction','fermi_level','density_coefficients','fourier_potential'):
         torch.testing.assert_close(a[key],b[key],rtol=0.,atol=0.)
@@ -343,7 +353,7 @@ def observations():
         fourier_potential_weight=torch.tensor([1.,1.,0.]),
         fourier_density_weight=torch.ones(3),fourier_proto_potential_weight=torch.ones(3),
         fermi_level=torch.tensor([1.,3.,7.]),fermi_level_weight=torch.tensor([1.,0.,1.]),
-        workfunction=torch.tensor([2.,4.,5.]),workfunction_weight=torch.ones(3),
+        vacuum_potential=torch.tensor([3.,7.,12.]),vacuum_potential_weight=torch.tensor([1.,0.,0.]),
         pbc=torch.tensor([[1,1,0],[1,1,0],[1,1,1]],dtype=torch.bool))
     torch.manual_seed(10)
     real=torch.randn(3,3,3,3)
@@ -362,7 +372,7 @@ def test_parseval_and_vacuum_loss_gradients():
     ref,pred,real=observations()
     mse=(real-real.mean((-3,-2,-1),keepdim=True)).square().mean((-3,-2,-1))
     torch.testing.assert_close(spectral_errors(ref,pred,'fourier_potential')[:2],mse[:2])
-    loss=WeightedFourierPotential(vacuum_weight=10)(ref,pred)
+    loss=WeightedLoss({'fourier_potential':1,'vacuum_potential':10})(ref,pred)
     torch.testing.assert_close(loss,(mse[0]+2*mse[1])/3+10.)
     loss.backward()
     torch.testing.assert_close(pred['vacuum_potential'].grad,torch.tensor([20.,0.,0.]))
@@ -371,12 +381,13 @@ def test_parseval_and_vacuum_loss_gradients():
 
 def test_masked_labels_and_invalid_observed_labels():
     ref,pred,real=observations()
-    baseline=WeightedFourierPotential(1)(ref,pred)
+    objective=WeightedLoss({'fourier_potential':1,'vacuum_potential':1})
+    baseline=objective(ref,pred)
     with torch.no_grad():pred['fourier_potential'][2].fill_(float('nan'))
-    ref.fermi_level[1]=float('nan')
-    torch.testing.assert_close(WeightedFourierPotential(1)(ref,pred),baseline)
-    ref.fermi_level[0]=float('nan')
-    with pytest.raises(FloatingPointError):WeightedFourierPotential(1)(ref,pred)
+    ref.vacuum_potential[1]=float('nan')
+    torch.testing.assert_close(objective(ref,pred),baseline)
+    ref.vacuum_potential[0]=float('nan')
+    with pytest.raises(FloatingPointError):objective(ref,pred)
 
 
 def test_validation_weighted_global_wf_and_batch_partition():
@@ -384,7 +395,7 @@ def test_validation_weighted_global_wf_and_batch_partition():
     graphs=[]
     for i in range(1,4):
         g=small_data(charge=float(i),batched=False)
-        g.weight=torch.tensor(float(i));g.workfunction=torch.tensor(0.);g.workfunction_weight=torch.tensor(1.)
+        g.weight=torch.tensor(float(i));g.vacuum_potential=torch.tensor(0.);g.vacuum_potential_weight=torch.tensor(1.)
         g.fermi_level=torch.tensor(0.);g.fermi_level_weight=torch.tensor(1.)
         g.fourier_potential_weight=torch.tensor(float(i<3))
         graphs.append(g)
@@ -399,7 +410,7 @@ def test_validation_weighted_global_wf_and_batch_partition():
     values=[]
     for batch_size in (1,2,3):
         loader=torch_geometric.dataloader.DataLoader(graphs,batch_size=batch_size,shuffle=False)
-        loss,metric=evaluate(torch.nn.Linear(1,1),wrapper,WeightedLoss({'fourier_potential':{'weight':100,'vacuum_weight':1}}),None,loader,'cpu')
+        loss,metric=evaluate(torch.nn.Linear(1,1),wrapper,WeightedLoss({'fourier_potential':100,'vacuum_potential':100}),None,loader,'cpu')
         values.append((loss,metric))
         assert metric['rmse_wf_abs']==pytest.approx(24.**.5)
         assert metric['rmse_wf_rel']==pytest.approx((24.-(28./6)**2)**.5)

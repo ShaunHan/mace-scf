@@ -11,6 +11,7 @@ TRAINING_OPTION_KEYS = {
     "scf",
     "linear_solve",
     "fixedpoint_scf_stability",
+    "reference_conditioning",
 }
 REQUIRED_TRAINING_SCF_KEYS = {"num_scf_steps"}
 
@@ -98,6 +99,9 @@ def validate_fixed_point_training_options(
     mode = raw["mode"]
     if mode not in FIXED_POINT_MODES:
         raise ValueError(f"mode must be one of {FIXED_POINT_MODES}, got {mode!r}")
+    reference_conditioning = raw.get('reference_conditioning', 'none')
+    if reference_conditioning not in ('none', 'fermi_level', 'electronic'):
+        raise ValueError('reference_conditioning must be none, fermi_level or electronic')
 
     fixedpoint_scf_stability = (
         "fixedpoint_scf_stability" in loss if loss is not None else False
@@ -113,6 +117,7 @@ def validate_fixed_point_training_options(
             scf=None,
             linear_solve=raw.get("linear_solve", "inverse"),
             fixedpoint_scf_stability=fixedpoint_scf_stability,
+            reference_conditioning=reference_conditioning,
         )
 
     if "scf" not in raw:
@@ -134,6 +139,7 @@ def validate_fixed_point_training_options(
         scf=scf_options,
         linear_solve=raw.get("linear_solve", "inverse"),
         fixedpoint_scf_stability=fixedpoint_scf_stability,
+        reference_conditioning=reference_conditioning,
     )
 
 

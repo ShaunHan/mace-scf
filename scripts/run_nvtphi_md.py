@@ -19,12 +19,12 @@ from mace_scf.md import NVTPhiLangevin
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0.model"
 TARGET_POTENTIAL = 4.50
-VOLTAGE_MODE = "relative"  # "relative" works with either WF training gauge
+VOLTAGE_MODE = "relative"  # initial-structure reference for the derived potential
 REFERENCE_POTENTIAL = 4.50  # physical potential assigned to the initial structure
 
-VACUUM_ZFRAC = 0.75
-DIPOLE_CORRECTION_ZFRAC = 0.50
-COUNTER_CHARGE_CENTER_ZFRAC = 0.35
+# Change both suffixes to xfrac or yfrac for a different open cell axis.
+PLANE_FRACTIONS = {"vacuum_zfrac": 0.75, "dipole_correction_zfrac": 0.50}
+COUNTER_CHARGE_CENTER_FRACTION = 0.35
 INITIAL_COUNTER_CHARGE = 0.0
 GAUSSIAN_WIDTH = 1.0
 
@@ -51,8 +51,10 @@ def scalar(value) -> float:
     return float(np.asarray(value).reshape(-1)[0])
 
 
-def cartesian_from_zfrac(atoms, zfrac: float) -> np.ndarray:
-    return np.array([0.5, 0.5, zfrac], dtype=float) @ atoms.cell.array
+def cartesian_from_fraction(atoms, fraction: float, axis: int) -> np.ndarray:
+    fractional = np.full(3, 0.5)
+    fractional[axis] = fraction
+    return fractional @ atoms.cell.array
 
 
 def main() -> None:
@@ -63,15 +65,23 @@ def main() -> None:
 
     rng = np.random.default_rng(SEED)
     atoms = read(ATOMS_FILE, index=-1)
-    atoms.set_pbc((True, True, False))
+    axes = [i for i, letter in enumerate("xyz")
+            if set(PLANE_FRACTIONS) == {f"vacuum_{letter}frac", f"dipole_correction_{letter}frac"}]
+    if len(axes) != 1:
+        raise ValueError("Choose one vacuum plane and one dipole-correction plane on the same cell axis")
+    axis = axes[0]
+    atoms.pbc = True
+    atoms.pbc[axis] = False
+    for prefix in ("vacuum", "dipole_correction"):
+        for letter in "xyz":
+            atoms.info.pop(f"{prefix}_{letter}frac", None)
+    atoms.info.update(PLANE_FRACTIONS)
     atoms.info.update(
         counter_charge=float(INITIAL_COUNTER_CHARGE),
         total_charge=-float(INITIAL_COUNTER_CHARGE),
-        counter_charge_center=cartesian_from_zfrac(
-            atoms, COUNTER_CHARGE_CENTER_ZFRAC
+        counter_charge_center=cartesian_from_fraction(
+            atoms, COUNTER_CHARGE_CENTER_FRACTION, axis
         ),
-        vacuum_zfrac=float(VACUUM_ZFRAC),
-        dipole_correction_zfrac=float(DIPOLE_CORRECTION_ZFRAC),
         external_field=np.zeros(3, dtype=float),
     )
 

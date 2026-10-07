@@ -1,4 +1,4 @@
-# v370: retain the full-field SCF and runtime kernels; recover optimizer updates.
+# v371: independent physical observations; reference-free 50-step validation.
 heads:
   default:
     arrays_keys:
@@ -31,9 +31,9 @@ kspace_cutoff_factor: 1.0
 include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
-fixedpoint_update_config:
+fixed_point_update_config:
   type: CoupledResponse
-  potential_widths: []
+  potential_widths: '[]'
 batch_size: 4
 valid_batch_size: 4
 lr: 0.001
@@ -54,7 +54,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_finetune_v370
+checkpoints_dir: checkpoints_RhMnCOH_finetune_v371
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:

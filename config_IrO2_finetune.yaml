@@ -1,4 +1,4 @@
-# v370: retain the full-field SCF and runtime kernels; recover optimizer updates.
+# v371: independent physical observations; reference-free 50-step validation.
 heads:
   default:
     arrays_keys:
@@ -15,7 +15,7 @@ heads:
       fourier_proto_potential: vasp_proto_phi_fftn_shifted_1.5
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
-      workfunction: vasp_workfunction
+      vacuum_potential: vacuum_potential
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -37,11 +37,9 @@ kspace_cutoff_factor: 1.0
 include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
-fixedpoint_update_config:
+fixed_point_update_config:
   type: CoupledResponse
-  potential_widths:
-  - 1.5
-  - 3.0
+  potential_widths: '[1.5, 3.0]'
 batch_size: 4
 valid_batch_size: 4
 lr: 0.001
@@ -62,7 +60,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_finetune_v370
+checkpoints_dir: checkpoints_IrO2_finetune_v371
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
@@ -78,9 +76,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-      fourier_potential:
-        weight: 100
-        vacuum_weight: 1
+      fourier_potential: 100
+      vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
@@ -104,9 +101,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-      fourier_potential:
-        weight: 100
-        vacuum_weight: 1
+      fourier_potential: 100
+      vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
@@ -129,9 +125,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-      fourier_potential:
-        weight: 100
-        vacuum_weight: 1
+      fourier_potential: 100
+      vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
@@ -154,9 +149,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-      fourier_potential:
-        weight: 100
-        vacuum_weight: 1
+      fourier_potential: 100
+      vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf

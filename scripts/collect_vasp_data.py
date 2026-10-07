@@ -363,27 +363,26 @@ def add_density_targets(atoms, shifted_rho_fft, sigmas, total_charge):
         atoms.info[f"vasp_rho_fftn_shifted_{sigma}"] = split_complex_fft(smoothed_fft).astype(np.float32)
 
 
-def sample_planar_fft(fft_grid, zfrac, axis=2):
-    """Evaluate the continuous planar Fourier series at a fractional coordinate."""
-    fft_grid = np.asarray(fft_grid)
-    if fft_grid.ndim != 3:
-        raise ValueError("sample_planar_fft expects a 3-D Fourier grid")
-    axis = int(axis)
-    if axis not in (0, 1, 2):
-        raise ValueError(f"axis must be 0, 1, or 2, got {axis}")
-    selector = [0, 0, 0]
-    selector[axis] = slice(None)
-    line = fft_grid[tuple(selector)]
-    integer_mode = np.fft.fftfreq(fft_grid.shape[axis]) * fft_grid.shape[axis]
-    phase = np.exp(2j * np.pi * integer_mode * (float(zfrac) % 1.0))
-    return float(np.real(np.sum(line * phase) / np.prod(fft_grid.shape)))
+def open_axis_from_info(info):
+    """One selected fractional plane fixes the slab cell axis."""
+    selected = [(prefix, axis, info[f"{prefix}_{letter}frac"])
+                for prefix in ("vacuum", "dipole_correction") for axis, letter in enumerate("xyz")
+                if f"{prefix}_{letter}frac" in info]
+    for prefix in ("vacuum", "dipole_correction"):
+        if sum(item[0] == prefix for item in selected) > 1:
+            raise ValueError(f"Specify one {prefix} fractional plane")
+    axes = {axis for _, axis, _ in selected}
+    if "open_axis" in info:
+        axes.add(int(info["open_axis"]))
+    if len(axes) > 1 or any(axis not in (0, 1, 2) for axis in axes):
+        raise ValueError("Plane coordinates and open_axis must refer to the same cell axis")
+    if any(not np.isfinite(float(v)) or not 0. <= float(v) < 1. for _, _, v in selected):
+        raise ValueError("Fractional plane coordinates must be finite and in [0, 1)")
+    return next(iter(axes), 2)
 
 
-def add_potential_targets(atoms, shifted_phi_fft, sigmas, key_prefix="vasp_phi", zfrac=None):
+def add_potential_targets(atoms, shifted_phi_fft, sigmas, key_prefix="vasp_phi"):
     """Store one Gaussian-resolved target per requested width."""
-    plane_values = {}
-    open_axes = np.flatnonzero(~np.asarray(atoms.pbc, dtype=bool))
-    axis = int(open_axes[0]) if len(open_axes) == 1 else 2
     for sigma in sigmas:
         sigma = float(sigma)
         shape = tuple(max_n_cut(atoms, sigma=sigma, max_l=1))
@@ -391,45 +390,45 @@ def add_potential_targets(atoms, shifted_phi_fft, sigmas, key_prefix="vasp_phi",
         coefficients = project_hermitian_fft(coefficients*gaussian_kernel(shape, sigma, atoms.cell.array))
         coefficients[0, 0, 0] = 0.
         atoms.info[f"{key_prefix}_fftn_shifted_{sigma}"] = split_complex_fft(coefficients).astype(np.float32)
-        if zfrac is not None:
-            plane_values[sigma] = sample_planar_fft(coefficients, zfrac, axis=axis)
-    return plane_values
 
 
-def compute_workfunction(atoms, outdir, oc, potential_grid=None):
+def compute_vacuum_potential(atoms, outdir, potential_grid=None):
     if potential_grid is None:
         potential_grid = np.asarray(Locpot.from_file(str(outdir / "LOCPOT")).data["total"], dtype=float)
 
     open_axes = np.flatnonzero(~np.asarray(atoms.pbc, dtype=bool))
     if open_axes.size != 1:
         raise ValueError(
-            f"Work-function collection requires one open axis, got pbc={atoms.pbc}"
+            f"Vacuum-potential collection requires one open axis, got pbc={atoms.pbc}"
         )
     open_axis = int(open_axes[0])
     incar = Incar.from_file(str(outdir / "INCAR"))
     dipole_center = np.asarray(
         incar.get("DIPOL", [0.0, 0.0, 0.0]), dtype=float
     )
-    correction_zfrac = float((dipole_center[open_axis] + 0.5) % 1.0)
-    requested_zfrac = atoms.info.get("vacuum_zfrac")
-    if requested_zfrac is not None and np.isfinite(float(requested_zfrac)):
-        zfrac_vac = float(requested_zfrac) % 1.0
+    correction_fraction = float((dipole_center[open_axis] + 0.5) % 1.0)
+    supplied_branch = atoms.info.get(f"dipole_correction_{'xyz'[open_axis]}frac")
+    if supplied_branch is not None and not np.isclose(float(supplied_branch), correction_fraction, rtol=0., atol=1.e-8):
+        raise ValueError("Declared dipole-correction plane disagrees with VASP DIPOL")
+    requested_fraction = atoms.info.get(f"vacuum_{'xyz'[open_axis]}frac")
+    if requested_fraction is not None and np.isfinite(float(requested_fraction)):
+        vacuum_fraction = float(requested_fraction) % 1.0
     else:
         scaled = atoms.get_scaled_positions(wrap=False)
         z_wrapped = np.mod(scaled[:, open_axis], 1.0)
-        distance_from_atoms = np.mod(correction_zfrac - z_wrapped, 1.0)
+        distance_from_atoms = np.mod(correction_fraction - z_wrapped, 1.0)
         positive = distance_from_atoms[distance_from_atoms > 1.0e-8]
         if positive.size == 0:
             raise ValueError("Cannot locate a vacuum interval before the DIPOL plane.")
-        zfrac_vac = float(
-            (correction_zfrac - 0.5 * float(np.min(positive))) % 1.0
+        vacuum_fraction = float(
+            (correction_fraction - 0.5 * float(np.min(positive))) % 1.0
         )
 
     planar_potential = potential_grid.mean(
         axis=tuple(axis for axis in range(3) if axis != open_axis)
     )
     nz = planar_potential.shape[0]
-    z_grid = (float(zfrac_vac) % 1.0) * nz
+    z_grid = (float(vacuum_fraction) % 1.0) * nz
     iz0 = int(np.floor(z_grid)) % nz
     iz1 = (iz0 + 1) % nz
     weight = z_grid - np.floor(z_grid)
@@ -448,8 +447,8 @@ def compute_workfunction(atoms, outdir, oc, potential_grid=None):
         2.0 * dz
     )
     return (
-        float(vacuum_potential - oc.efermi),
-        float(zfrac_vac),
+        float(vacuum_potential - np.mean(potential_grid)),
+        float(vacuum_fraction),
         float(slope),
     )
 
@@ -476,7 +475,7 @@ def get_external_field(outdir, atoms):
         if abs(value) > 1.e-12:
             raise ValueError("Periodic bulk EFIELD is not supported")
         return value, np.zeros(3)
-    axis = int(atoms.info.get("open_axis", 2))
+    axis = open_axis_from_info(atoms.info)
     if axis not in (0, 1, 2) or int(incar.get("IDIPOL", 0)) != axis + 1:
         raise ValueError("IDIPOL must select the slab open axis")
     cell = np.asarray(atoms.cell)
@@ -554,7 +553,7 @@ def read_potential_pair(outdir, atoms, pair=None):
         if np.max(distance[rows, cols], initial=0.) > 1.e-3:
             raise ValueError("Trajectory positions differ from the paired potential grids")
     if pair is None:
-        validate_potential_runs(*paths, atoms.info["config_type"], int(atoms.info.get("open_axis", 2)))
+        validate_potential_runs(*paths, atoms.info["config_type"], open_axis_from_info(atoms.info))
     raw = [np.asarray(grid.data["total"], dtype=float) for grid in grids]
     deformation, proto, mean, proto_mean = align_electrostatic_gauge(*raw)
     metadata = dict(potential_reference=POTENTIAL_REFERENCE, scf_mean=mean,
@@ -605,7 +604,7 @@ def scalar_labels(outdir, atoms):
 def check_pair(outdir, atoms):
     charge = atoms.info.get("total_charge", -float(atoms.info.get("excess_electrons", 0.)))
     return validate_raw_pair(outdir, proto_locpot_path_for_outdir(outdir).parent,
-                             atoms.info["config_type"], int(atoms.info.get("open_axis", 2)), charge)
+                             atoms.info["config_type"], open_axis_from_info(atoms.info), charge)
 
 
 def current_cache(path, signature):
@@ -631,8 +630,6 @@ def extract_hdf_job(job):
     if not all((outdir / name).is_file() for name in ("AECCAR1", "AECCAR2")):
         return None, f"missing AECCAR1/2, skipping {outdir}"
     atoms = read(str(trajectory))
-    if "workfunction_zfrac" in atoms.info:
-        raise ValueError("Rename trajectory metadata workfunction_zfrac to vacuum_zfrac")
     _, forces, _, _ = scalar_labels(outdir, atoms)
     fmax = float(np.sqrt((forces**2).sum(axis=1).max()))
     if fmax > FMAX_TOL:
@@ -668,7 +665,7 @@ def combine_job(outdir):
     source_info = dict(atoms.info)
     energy, forces, dipole, oc = scalar_labels(outdir, atoms)
     config_type = source_info["config_type"]
-    open_axis = int(source_info.get("open_axis", 2))
+    open_axis = open_axis_from_info(source_info)
     atoms.pbc = True
     if config_type == "slab":
         atoms.pbc[open_axis] = False
@@ -690,29 +687,24 @@ def combine_job(outdir):
     atoms.arrays["vasp_forces"] = forces
     atoms.info = {
         "config_type": config_type,
-        "open_axis": int(source_info.get("open_axis", 2)),
+        "open_axis": open_axis_from_info(source_info),
         "vasp_free_energy": energy,
         "vasp_efermi": align_electronic_level(oc.efermi, phi_attrs["scf_mean"]),
-        "macevolt_fermi_raw": float(oc.efermi),
-        "macevolt_scf_potential_mean": float(phi_attrs["scf_mean"]),
         "external_field": np.asarray(ext_field, dtype=float),
         "total_charge": float(total_charge),
         "dft_group_id": outdir.parent.name,
-        "macevolt_potential_reference": POTENTIAL_REFERENCE,
-        "macevolt_density_convention": "signed_charge_deformation",
-        "macevolt_potcar_match": int(phi_attrs.get("potcar_match", -1)),
-        "macevolt_pair_schema": PAIR_SCHEMA,
-        "macevolt_raw_signature": signature,
-        "macevolt_potential_kind": "ionic_plus_hartree",
-        "macevolt_actual_total_charge": float(phi_attrs["actual_total_charge"]),
+        "potential_reference": POTENTIAL_REFERENCE,
+        "density_convention": "signed_charge_deformation",
+        "potcar_match": int(phi_attrs.get("potcar_match", -1)),
+        "potential_kind": "ionic_plus_hartree",
     }
-    if "proto_mean" in proto_attrs:
-        atoms.info["macevolt_proto_potential_mean"] = float(proto_attrs["proto_mean"])
-    if "vacuum_zfrac" in source_info:
-        atoms.info["vacuum_zfrac"] = float(source_info["vacuum_zfrac"])
+    for prefix in ("vacuum", "dipole_correction"):
+        key = f"{prefix}_{'xyz'[open_axis]}frac"
+        if key in source_info:
+            atoms.info[key] = float(source_info[key])
 
     add_density_targets(atoms, rho_fft, density_sigmas, float(total_charge))
-    atoms.info["macevolt_density_smearing_width"] = float(density_sigmas[0])
+    atoms.info["density_smearing_width"] = float(density_sigmas[0])
     atoms.info["potential_smearing_width"] = float(potential_sigmas[0])
     slab = config_type == "slab"
     dipole_weight = (_component_weight(source_info, "config_dipole_weight", np.eye(3)[open_axis])
@@ -720,27 +712,16 @@ def combine_job(outdir):
     atoms.info.update(
         vasp_dipole=(-np.asarray(dipole) if slab else np.asarray(dipole)).flatten(),
         config_dipole_weight=dipole_weight,
-        config_potential_weight=_component_weight(
-            source_info, "config_potential_weight", dipole_weight if slab else np.ones(3),
-            require_nonzero=True),
-        config_workfunction_weight=float(slab), config_fermi_level_weight=float(slab),
+        config_vacuum_potential_weight=float(slab), config_fermi_level_weight=float(slab),
     )
     if slab:
-        workfunction, zfrac, slope = compute_workfunction(atoms, outdir, oc)
+        vacuum, fraction, _ = compute_vacuum_potential(atoms, outdir)
         center = read_incar(outdir / "INCAR")["DIPOL"]
-        atoms.info.update(vasp_workfunction=workfunction, vacuum_zfrac=zfrac,
-                          dipole_correction_zfrac=float((center[open_axis] + .5) % 1.),
-                          macevolt_workfunction_plane_slope=slope)
-    else:
-        atoms.info.update(vasp_workfunction=0., vacuum_zfrac=0., dipole_correction_zfrac=.5)
-    planes = []
+        atoms.info.update(vacuum_potential=vacuum)
+        atoms.info[f"vacuum_{'xyz'[open_axis]}frac"] = fraction
+        atoms.info[f"dipole_correction_{'xyz'[open_axis]}frac"] = float((center[open_axis] + .5) % 1.)
     for field, prefix in ((phi_fft, "vasp_phi"), (proto_phi_fft, "vasp_proto_phi")):
-        planes.append(add_potential_targets(atoms, field, potential_sigmas, prefix,
-                      atoms.info["vacuum_zfrac"] if slab else None))
-    if slab:
-        sigma = float(potential_sigmas[0])
-        atoms.info["macevolt_two_field_closure_error"] = float(
-            planes[0][sigma] + planes[1][sigma] - atoms.info["vasp_efermi"] - workfunction)
+        add_potential_targets(atoms, field, potential_sigmas, prefix)
 
     return atoms, f"processed {outdir}"
 
@@ -846,13 +827,11 @@ def preflight(limit=None, poisson_check=False):
     for outdir in selected:
         try:
             atoms = read(str(outdir / f"{SYSTEM_NAME}_vasp_sp.traj"))
-            if "workfunction_zfrac" in atoms.info:
-                raise ValueError("Rename trajectory metadata workfunction_zfrac to vacuum_zfrac")
             report = check_pair(outdir, atoms)
             _, forces, _, _ = scalar_labels(outdir, atoms)
             _, _, metadata, (scf, proto) = read_potential_pair(outdir, atoms, report)
             get_external_field(outdir, atoms)
-            axis = int(atoms.info.get("open_axis", 2))
+            axis = open_axis_from_info(atoms.info)
             first, second = (read_chg_total(outdir / name) for name in ("AECCAR1", "AECCAR2"))
             if first.shape != second.shape:
                 raise ValueError("AECCAR grids differ")

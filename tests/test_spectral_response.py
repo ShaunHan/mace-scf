@@ -108,7 +108,7 @@ def small_model(widths=(1.5, 3.)):
         atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5,
         field_feature_max_l=1, field_feature_widths=[1.5, 3.],
         kspace_cutoff_factor=1., include_electrostatic_self_interaction=True,
-        fixedpoint_update_config={'type': VariationalResponse, 'potential_widths': widths},
+        fixed_point_update_config={'type': VariationalResponse, 'potential_widths': widths},
         field_readout_config={'type': StrictQuadraticFieldEnergyReadout})
     model.lr_source_maps.requires_grad_(False)
     model.local_electron_energy.requires_grad_(False)
@@ -202,7 +202,7 @@ def test_no_reference_label_leakage():
 def test_energy_potential_are_adjoint_on_the_actual_slab_grid():
     model=small_model()
     data=small_data()
-    data['dipole_correction_zfrac']=torch.tensor([.73])
+    data['dipole_correction_fraction']=torch.tensor([.73])
     geom=SpectralGeometry(model,data,data['positions'])
     state=torch.randn_like(geom.constraint)*.1
     _,deformation,_=geom.potentials(state)

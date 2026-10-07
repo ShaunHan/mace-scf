@@ -28,6 +28,24 @@ import numpy as np
 
 _ATOMIC_DATA_PARAMETERS = inspect.signature(AtomicData.__init__).parameters
 
+def plane_fraction(properties, prefix, pbc):
+    """Read one fractional cell-axis plane, consistent with slab periodicity."""
+    specified = [(i, properties[f"{prefix}_{axis}frac"]) for i, axis in enumerate("xyz")
+                 if properties.get(f"{prefix}_{axis}frac") is not None]
+    if len(specified) > 1:
+        raise ValueError(f"Specify only one of {prefix}_xfrac, {prefix}_yfrac, {prefix}_zfrac")
+    if not specified:
+        return .5
+    axis, value = specified[0]
+    value = float(value)
+    if not np.isfinite(value) or not 0. <= value < 1.:
+        raise ValueError(f"{prefix}_{'xyz'[axis]}frac must be finite and in [0, 1)")
+    open_axes = np.flatnonzero(~np.asarray(pbc, dtype=bool))
+    if len(open_axes) == 1 and axis != open_axes[0]:
+        raise ValueError(f"{prefix}_{'xyz'[axis]}frac conflicts with the nonperiodic cell axis")
+    return value
+
+
 def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
     # convert command line style property_key arguments into a keyspec
     infos = [
@@ -43,12 +61,10 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "fourier_density_key",
         "fourier_potential_key",
         "fourier_proto_potential_key",
-        "workfunction_key",
-        "vacuum_zfrac_key",
-        "dipole_correction_zfrac_key",
+        "vacuum_potential_key",
+        *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
         "potcar_match_key",
-        "workfunction_weight_key",
-        "potential_weight_key",
+        "vacuum_potential_weight_key",
     ]
     arrays = [
         "forces_key",
@@ -87,14 +103,13 @@ class ExtAtomicData(AtomicData):
     fourier_potential: torch.Tensor
     fourier_potential_shape: torch.Tensor
     fourier_potential_weight: torch.Tensor
-    potential_weight: torch.Tensor
     fourier_proto_potential: torch.Tensor
     fourier_proto_potential_shape: torch.Tensor
     fourier_proto_potential_weight: torch.Tensor
-    workfunction: torch.Tensor
-    workfunction_weight: torch.Tensor
-    vacuum_zfrac: torch.Tensor
-    dipole_correction_zfrac: torch.Tensor
+    vacuum_potential: torch.Tensor
+    vacuum_potential_weight: torch.Tensor
+    vacuum_fraction: torch.Tensor
+    dipole_correction_fraction: torch.Tensor
     potcar_match: torch.Tensor
 
     def __init__(
@@ -146,25 +161,13 @@ class ExtAtomicData(AtomicData):
         fourier_potential = kwargs.pop("fourier_potential", None)
         fourier_potential_shape = kwargs.pop("fourier_potential_shape", None)
         fourier_potential_weight = kwargs.pop("fourier_potential_weight", None)
-        potential_weight = kwargs.pop("potential_weight", None)
-        if potential_weight is not None:
-            potential_weight = torch.as_tensor(potential_weight)
-            if potential_weight.numel() != 3:
-                raise ValueError(
-                    "potential_weight must contain exactly three components; "
-                    f"got shape {tuple(potential_weight.shape)}"
-                )
-            # Upstream MACE treats every one-dimensional extra property as a
-            # per-atom column and promotes (3,) to (3, 1).  This quantity is a
-            # graph-level Cartesian selector, so canonicalize either form.
-            potential_weight = potential_weight.reshape(3)
         fourier_proto_potential = kwargs.pop("fourier_proto_potential", None)
         fourier_proto_potential_shape = kwargs.pop("fourier_proto_potential_shape", None)
         fourier_proto_potential_weight = kwargs.pop("fourier_proto_potential_weight", None)
-        workfunction = kwargs.pop("workfunction", None)
-        workfunction_weight = kwargs.pop("workfunction_weight", None)
-        vacuum_zfrac = kwargs.pop("vacuum_zfrac", None)
-        dipole_correction_zfrac = kwargs.pop("dipole_correction_zfrac", None)
+        vacuum_potential = kwargs.pop("vacuum_potential", None)
+        vacuum_potential_weight = kwargs.pop("vacuum_potential_weight", None)
+        vacuum_fraction = kwargs.pop("vacuum_fraction", None)
+        dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
         potcar_match = kwargs.pop("potcar_match", None)
         # MACE-develop added required, optional-valued magnetic targets.
         for key in ("magforces_weight", "magmom", "magforces"):
@@ -189,19 +192,11 @@ class ExtAtomicData(AtomicData):
         # assert polarizability is None or polarizability.shape == torch.Size([1,3,3])
         # assert polarizability_weight is None or len(polarizability_weight.shape) == 0
         assert cluster_loss_weight is None or len(cluster_loss_weight.shape) == 0
-        assert workfunction is None or workfunction.ndim == 0
-        assert workfunction_weight is None or workfunction_weight.ndim == 0
-        assert vacuum_zfrac is None or vacuum_zfrac.ndim == 0
-        assert dipole_correction_zfrac is None or dipole_correction_zfrac.ndim == 0
+        assert vacuum_potential is None or vacuum_potential.ndim == 0
+        assert vacuum_potential_weight is None or vacuum_potential_weight.ndim == 0
+        assert vacuum_fraction is None or vacuum_fraction.ndim == 0
+        assert dipole_correction_fraction is None or dipole_correction_fraction.ndim == 0
         assert potcar_match is None or potcar_match.ndim == 0
-        if potential_weight is not None:
-            if not torch.all(torch.isfinite(potential_weight)) or torch.any(
-                potential_weight < 0
-            ):
-                raise ValueError(
-                    "potential_weight must be finite and nonnegative; got "
-                    f"{potential_weight.tolist()}"
-                )
 
         # Aggregate data
         data = {
@@ -228,14 +223,13 @@ class ExtAtomicData(AtomicData):
             "fourier_potential": fourier_potential,
             "fourier_potential_shape": fourier_potential_shape,
             "fourier_potential_weight": fourier_potential_weight,
-            "potential_weight": potential_weight,
             "fourier_proto_potential": fourier_proto_potential,
             "fourier_proto_potential_shape": fourier_proto_potential_shape,
             "fourier_proto_potential_weight": fourier_proto_potential_weight,
-            "workfunction": workfunction,
-            "workfunction_weight": workfunction_weight,
-            "vacuum_zfrac": vacuum_zfrac,
-            "dipole_correction_zfrac": dipole_correction_zfrac,
+            "vacuum_potential": vacuum_potential,
+            "vacuum_potential_weight": vacuum_potential_weight,
+            "vacuum_fraction": vacuum_fraction,
+            "dipole_correction_fraction": dipole_correction_fraction,
             "potcar_match": potcar_match,
         }
         for key, value in data.items():
@@ -250,12 +244,8 @@ class ExtAtomicData(AtomicData):
         heads: Optional[list] = None,
         atomic_multipoles_max_l: int = 0,
     ) -> "ExtAtomicData":
-        # Call the base class explicitly.  ``super().from_config`` preserves
-        # the subclass binding of the classmethod, so recent MACE versions try
-        # to construct ExtAtomicData while passing through all extra
-        # properties.  Their generic one-dimensional-property rule promotes
-        # the graph-level potential selector from (3,) to (3, 1), before this
-        # method has a chance to canonicalize it.
+        # Canonicalize extra graph properties below, after constructing the
+        # ordinary MACE data. This also supports its empty de-batching protocol.
         atomic_data = AtomicData.from_config(
             config, z_table, cutoff, heads=heads
         )
@@ -357,12 +347,7 @@ class ExtAtomicData(AtomicData):
                 "config_fermi_level_weight"
             )
         if fermi_level_weight_value is None:
-            fermi_level_weight_value = config.properties.get(
-                "config_workfunction_weight",
-                1.0 if config.properties.get("fermi_level") is not None else 0.0,
-            )
-            if config.properties.get("fermi_level") is None:
-                fermi_level_weight_value = 0.0
+            fermi_level_weight_value = float(config.properties.get("fermi_level") is not None)
         fermi_level_weight = torch.tensor(
             fermi_level_weight_value, dtype=torch.get_default_dtype()
         )
@@ -451,34 +436,6 @@ class ExtAtomicData(AtomicData):
             ),
             dtype=torch.get_default_dtype(),
         )
-        potential_weight_value = config.properties.get("potential_weight")
-        if potential_weight_value is None:
-            potential_weight_value = config.properties.get(
-                "config_potential_weight"
-            )
-        if potential_weight_value is None:
-            # Observation selection is independent of electrostatic boundary conditions.
-            potential_weight_value = np.ones(3, dtype=float)
-        potential_weight = torch.as_tensor(
-            potential_weight_value, dtype=torch.get_default_dtype()
-        ).reshape(-1)
-        if potential_weight.shape != torch.Size([3]):
-            raise ValueError(
-                "config_potential_weight must be a three-component vector, got "
-                f"shape {tuple(potential_weight.shape)}"
-            )
-        if not torch.all(torch.isfinite(potential_weight)) or torch.any(
-            potential_weight < 0.0
-        ):
-            raise ValueError(
-                "config_potential_weight must be finite and nonnegative, got "
-                f"{potential_weight.tolist()}"
-            )
-        if has_fourier_potential and not torch.any(potential_weight > 0.0):
-            raise ValueError(
-                "A Fourier-potential target requires at least one positive "
-                "config_potential_weight component"
-            )
         fourier_proto_potential_weight = torch.tensor(
             config.property_weights.get(
                 "fourier_proto_potential",
@@ -486,36 +443,26 @@ class ExtAtomicData(AtomicData):
             ),
             dtype=torch.get_default_dtype(),
         )
-        workfunction_value = config.properties.get("workfunction")
-        workfunction = torch.tensor(
-            0.0 if workfunction_value is None else workfunction_value,
+        vacuum_potential_value = config.properties.get("vacuum_potential")
+        vacuum_potential = torch.tensor(
+            0.0 if vacuum_potential_value is None else vacuum_potential_value,
             dtype=torch.get_default_dtype(),
         )
-        workfunction_weight_value = config.property_weights.get("workfunction")
-        if workfunction_weight_value is None:
-            workfunction_weight_value = config.properties.get("workfunction_weight")
-        if workfunction_weight_value is None:
-            workfunction_weight_value = config.properties.get(
-                "config_workfunction_weight",
-                1.0 if workfunction_value is not None else 0.0,
+        vacuum_potential_weight_value = config.property_weights.get("vacuum_potential")
+        if vacuum_potential_weight_value is None:
+            vacuum_potential_weight_value = config.properties.get("vacuum_potential_weight")
+        if vacuum_potential_weight_value is None:
+            vacuum_potential_weight_value = config.properties.get(
+                "config_vacuum_potential_weight",
+                1.0 if vacuum_potential_value is not None else 0.0,
             )
-        workfunction_weight = torch.tensor(
-            workfunction_weight_value, dtype=torch.get_default_dtype()
+        vacuum_potential_weight = torch.tensor(
+            vacuum_potential_weight_value, dtype=torch.get_default_dtype()
         )
-        vacuum_zfrac_value = config.properties.get("vacuum_zfrac")
-        vacuum_zfrac = torch.tensor(
-            0.5 if vacuum_zfrac_value is None else vacuum_zfrac_value,
-            dtype=torch.get_default_dtype(),
-        )
-        dipole_correction_zfrac_value = config.properties.get(
-            "dipole_correction_zfrac"
-        )
-        dipole_correction_zfrac = torch.tensor(
-            0.5
-            if dipole_correction_zfrac_value is None
-            else dipole_correction_zfrac_value,
-            dtype=torch.get_default_dtype(),
-        )
+        vacuum_fraction = torch.tensor(
+            plane_fraction(config.properties, "vacuum", pbc), dtype=torch.get_default_dtype())
+        dipole_correction_fraction = torch.tensor(
+            plane_fraction(config.properties, "dipole_correction", pbc), dtype=torch.get_default_dtype())
         potcar_match_value = config.properties.get("potcar_match")
         potcar_match = torch.tensor(
             -1.0 if potcar_match_value is None else potcar_match_value,
@@ -526,7 +473,7 @@ class ExtAtomicData(AtomicData):
             ("fourier_density", fourier_density_weight),
             ("fourier_potential", fourier_potential_weight),
             ("fourier_proto_potential", fourier_proto_potential_weight),
-            ("workfunction", workfunction_weight),
+            ("vacuum_potential", vacuum_potential_weight),
         ):
             if not torch.isfinite(property_weight) or property_weight.item() < 0.0:
                 raise ValueError(
@@ -540,34 +487,21 @@ class ExtAtomicData(AtomicData):
             raise ValueError(
                 "Positive fermi_level weight requires a fermi_level target"
             )
-        if torch.all(pbc) and workfunction_weight.item() != 0.0:
-            raise ValueError("Fully periodic configurations must have zero workfunction weight")
-        if workfunction_weight.item() > 0.0:
-            if workfunction_value is None:
+        if torch.all(pbc) and vacuum_potential_weight.item() != 0.0:
+            raise ValueError("Fully periodic configurations must have zero vacuum_potential weight")
+        if vacuum_potential_weight.item() > 0.0:
+            if vacuum_potential_value is None:
                 raise ValueError(
-                    "Positive workfunction weight requires a workfunction target"
-                )
-            if not torch.isfinite(vacuum_zfrac):
-                raise ValueError("Positive workfunction weight requires a finite vacuum_zfrac")
-            if not 0.0 <= float(vacuum_zfrac) < 1.0:
-                raise ValueError(
-                    f"vacuum_zfrac must be in [0, 1), got {float(vacuum_zfrac)}"
-                )
-            if not torch.isfinite(dipole_correction_zfrac) or not (
-                0.0 <= float(dipole_correction_zfrac) < 1.0
-            ):
-                raise ValueError(
-                    "Positive workfunction weight requires "
-                    "dipole_correction_zfrac in [0, 1)"
+                    "Positive vacuum_potential weight requires a vacuum_potential target"
                 )
             open_axes = torch.nonzero(~pbc.to(torch.bool), as_tuple=False).reshape(-1)
             if open_axes.numel() != 1:
                 raise ValueError(
-                    "Positive workfunction weight requires exactly one nonperiodic axis; "
+                    "Positive vacuum_potential weight requires exactly one nonperiodic axis; "
                     f"got pbc={pbc.tolist()}"
                 )
-            if workfunction_value is None or not torch.isfinite(workfunction):
-                raise ValueError("Positive workfunction weight requires a finite workfunction target")
+            if not torch.isfinite(vacuum_potential):
+                raise ValueError("Positive vacuum_potential weight requires a finite vacuum_potential target")
         return cls(
             edge_index=atomic_data.edge_index,
             positions=atomic_data.positions,
@@ -613,13 +547,12 @@ class ExtAtomicData(AtomicData):
             fourier_potential=fourier_potential,
             fourier_potential_shape=fourier_potential_shape,
             fourier_potential_weight=fourier_potential_weight,
-            potential_weight=potential_weight,
             fourier_proto_potential=fourier_proto_potential,
             fourier_proto_potential_shape=fourier_proto_potential_shape,
             fourier_proto_potential_weight=fourier_proto_potential_weight,
-            workfunction=workfunction,
-            workfunction_weight=workfunction_weight,
-            vacuum_zfrac=vacuum_zfrac,
-            dipole_correction_zfrac=dipole_correction_zfrac,
+            vacuum_potential=vacuum_potential,
+            vacuum_potential_weight=vacuum_potential_weight,
+            vacuum_fraction=vacuum_fraction,
+            dipole_correction_fraction=dipole_correction_fraction,
             potcar_match=potcar_match,
         )

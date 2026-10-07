@@ -253,7 +253,7 @@ def _label_mean(error, weights):
     return (safe.square()*weight).sum()/weight.sum().clamp_min(1.e-30)
 
 
-def spectral_errors(ref, pred, key, full_spectrum=True):
+def spectral_errors(ref, pred, key):
     """Per-graph Parseval MSE in physical real-space units."""
     weight_key = ('fourier_density' if key == 'fourier_farfield_density' else
                   'fourier_potential' if key == 'fourier_total_potential' else key)
@@ -275,49 +275,33 @@ def spectral_errors(ref, pred, key, full_spectrum=True):
     active = active & (weights > 0)[:, None]
     if bool((active[...,None] & ~torch.isfinite(difference)).any()):
         raise FloatingPointError('Nonfinite observed Fourier label or prediction: '+key)
-    mode_weight = (pred.get("potential_mode_weight", active.to(difference))
-                   if key == "fourier_potential" and not full_spectrum else active.to(difference))
     difference = torch.where(active[..., None], difference, 0.)
     size = pred["k_vectors_grid_shape"].prod().to(difference)
-    return (difference.square().sum(-1)*mode_weight).sum(-1)/size.square()
+    return (difference.square().sum(-1)*active).sum(-1)/size.square()
 
 
-def weighted_fourier_density(ref, pred):
-    # Density is expressed in millielectrons/Angstrom^3 to keep weights legible.
-    weight = ref.weight*ref.fourier_density_weight
-    square = spectral_errors(ref, pred, "fourier_density")/1.e-6
-    return (square*weight).sum()/weight.sum().clamp_min(1.e-30)
-
-
-def weighted_fourier_potential(ref, pred):
-    weight = ref.weight*ref.fourier_potential_weight
-    square = spectral_errors(ref, pred, "fourier_potential")
-    return (square*weight).sum()/weight.sum().clamp_min(1.e-30)
+def vacuum_observation_weight(ref):
+    """Independent measured vacuum labels on two-periodic slabs."""
+    slab = ref.pbc.reshape(-1, 3).bool().sum(-1) == 2
+    return ref.weight*ref.vacuum_potential_weight*slab
 
 
 def vacuum_reference_weights(ref, reference):
-    """v366 same-gauge vacuum target EF_DFT + WF_DFT, from labels only."""
-    zero = reference.reshape(-1).new_zeros(reference.numel())
-    ef, wf = getattr(ref, 'fermi_level', None), getattr(ref, 'workfunction', None)
-    if ef is None or wf is None:
-        return zero, zero
-    ef, wf = ef.reshape(-1).to(reference), wf.reshape(-1).to(reference)
-    ew = getattr(ref, 'fermi_level_weight', torch.ones_like(ef)).reshape(-1)
-    ww = getattr(ref, 'workfunction_weight', torch.ones_like(wf)).reshape(-1)
-    weight = ref.weight.reshape(-1)*ww
-    active = (ew>0)&(weight>0)
-    active &= ref.pbc.reshape(-1,3).bool().sum(-1) == 2
-    if bool((active & ~(torch.isfinite(ef)&torch.isfinite(wf)&torch.isfinite(ew)&torch.isfinite(weight))).any()):
-        raise FloatingPointError('Nonfinite positively weighted EF/WF vacuum reference')
-    return torch.where(active, ef+wf, 0.), torch.where(active, weight, 0.)
+    """Return the independently stored same-gauge vacuum observation."""
+    target = ref.vacuum_potential.reshape(-1).to(reference)
+    weight = vacuum_observation_weight(ref).reshape(-1).to(reference)
+    observed = weight > 0
+    if bool((observed & ~(torch.isfinite(target) & torch.isfinite(weight))).any()):
+        raise FloatingPointError('Nonfinite observed vacuum potential')
+    return torch.where(observed, target, 0.), torch.where(observed, weight, 0.)
 
 
 class WeightedFourierDensity(torch.nn.Module):
     """Parseval error of the original or explicitly smoothed density observer."""
-    def __init__(self, metric='l2', reference='density'):
+    def __init__(self, reference='density'):
         super().__init__()
-        if metric != 'l2' or reference not in ('density', 'multipoles', 'farfield'):
-            raise ValueError('fourier_density supports metric=l2 and reference=density, multipoles or farfield')
+        if reference not in ('density', 'farfield'):
+            raise ValueError('fourier_density reference must be density or farfield')
         self.reference = reference
 
     def extra_repr(self):
@@ -331,70 +315,29 @@ class WeightedFourierDensity(torch.nn.Module):
 
 
 class WeightedFourierPotential(torch.nn.Module):
-    """Real-space potential MSE plus optional same-gauge vacuum MSE.
-
-    The Fourier representation evaluates Parseval's identity. The vacuum term
-    uses EF_DFT + WF_DFT; it never differentiates predicted EF or a WF residual.
-    Spatial and vacuum observations have separate availability/normalization.
-    """
-    def __init__(self, vacuum_weight=0., full_spectrum=True):
-        super().__init__()
-        import math
-        if (isinstance(vacuum_weight, bool) or not isinstance(vacuum_weight, (float,int))
-                or not math.isfinite(vacuum_weight) or vacuum_weight < 0):
-            raise ValueError('fourier_potential.vacuum_weight must be finite and nonnegative')
-        if not isinstance(full_spectrum, bool):
-            raise TypeError('fourier_potential.full_spectrum must be bool')
-        self.vacuum_weight, self.full_spectrum = float(vacuum_weight), full_spectrum
-
-    def extra_repr(self):
-        return f'vacuum_weight={self.vacuum_weight:g}, full_spectrum={self.full_spectrum}'
-
+    """Parseval MSE on the complete observed, retained potential spectrum."""
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
-        square = spectral_errors(ref, pred, 'fourier_potential', self.full_spectrum)
-        parts = {'spatial': ((square*weights).sum(), weights.sum())}
-        if self.vacuum_weight:
-            value = pred['vacuum_potential'].reshape(-1)
-            target, weights = vacuum_reference_weights(ref, value)
-            if bool(((weights>0)&~torch.isfinite(value)).any()):
-                raise FloatingPointError('Nonfinite prediction on an observed vacuum label')
-            error = torch.where(weights>0, value-target, 0.)
-            parts['vacuum'] = (self.vacuum_weight*(weights*error.square()).sum(), weights.sum())
-        return parts
+        square = spectral_errors(ref, pred, 'fourier_potential')
+        return {'spatial': ((square*weights).sum(), weights.sum())}
 
     def forward(self, ref, pred):
-        return sum(numerator/denominator.clamp_min(1.e-30)
-                   for numerator,denominator in self.statistics(ref,pred).values())
+        numerator, denominator = self.statistics(ref, pred)['spatial']
+        return numerator/denominator.clamp_min(1.e-30)
 
 
 def weighted_fermi_level(ref, pred):
     return _label_mean(pred["fermi_level"]-ref.fermi_level, ref.weight*ref.fermi_level_weight)
 
 
-def weighted_workfunction(ref, pred):
-    return _label_mean(pred["workfunction"]-ref.workfunction, ref.weight*ref.workfunction_weight)
-
-
-def vacuum_observation_weight(ref):
-    """Only two-periodic slabs have a vacuum plane observation."""
-    slab = ref.pbc.reshape(-1, 3).sum(-1) == 2
-    return ref.weight*ref.fourier_potential_weight*ref.fourier_proto_potential_weight*slab
-
-
 def weighted_vacuum_potential(ref, pred):
-    weight = vacuum_observation_weight(ref)
-    if "vacuum_potential_dft" not in pred:
-        if bool((weight>0).any()):
-            raise ValueError("Vacuum supervision requires both deformation and proto spectra")
-        return pred["energy"].sum()*0.
-    return _label_mean(pred["vacuum_potential"]-pred["vacuum_potential_dft"], weight)
+    target, weight = vacuum_reference_weights(ref, pred['vacuum_potential'])
+    return _label_mean(pred['vacuum_potential']-target, weight)
 
 
 _LOSS_FUNCTIONS = {
     "fourier_density": WeightedFourierDensity,
     "fourier_potential": WeightedFourierPotential,
-    "workfunction": weighted_workfunction,
     "vacuum_potential": weighted_vacuum_potential,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
@@ -450,7 +393,7 @@ class WeightedLoss(torch.nn.Module):
         """
         result={}
         atom_means={'forces','atomic_multipoles','esps','field_features'}
-        label_means={'fourier_density','fermi_level','workfunction'}
+        label_means={'fourier_density','fermi_level'}
         unsupported={'fixedpoint_scf_stability','fermi_level_gradient','final_terms_fixedpoint_scf_stability'}
         for name,function in self.loss_fns.items():
             if not self.loss_weights[name]:continue
@@ -458,9 +401,6 @@ class WeightedLoss(torch.nn.Module):
                 raise ValueError(f'Graph accumulation is not defined for trajectory loss {name}')
             if isinstance(function,WeightedFourierPotential):
                 result[(name,'spatial')]=(ref.weight*ref.fourier_potential_weight).sum()
-                if function.vacuum_weight:
-                    _,weight=vacuum_reference_weights(ref,ref.total_charge)
-                    result[(name,'vacuum')]=weight.sum()
             elif name in label_means:
                 result[(name,'')]=(ref.weight*getattr(ref,name+'_weight')).sum()
             elif name=='vacuum_potential':
@@ -498,6 +438,30 @@ class WeightedLoss(torch.nn.Module):
             loss += loss_component
         if "loss_weight_modifier" in pred:
             ref.weight = data_weight
+        return loss+self.reference_loss(ref,pred,normalizers)
+
+    def reference_loss(self, ref, pred, normalizers=None):
+        """Auxiliary electronic supervision; absent from deployment evaluation."""
+        loss = 0.
+        reference = pred.get('reference_response')
+        if reference is not None:
+            from types import SimpleNamespace
+            # The auxiliary uses the existing electronic weights. Missing
+            # teachers contribute zero under the SAME full-batch denominator,
+            # including when an optimizer batch is split for device memory.
+            for name, mask in reference['reference_masks'].items():
+                if not self.loss_weights.get(name,0):
+                    continue
+                masked = SimpleNamespace(**ref.to_dict())
+                masked.weight = ref.weight*mask.to(ref.weight)
+                if name == 'vacuum_potential':
+                    count, base = vacuum_observation_weight(masked).sum(), vacuum_observation_weight(ref).sum()
+                else:
+                    label_weight = getattr(ref,name+'_weight')
+                    count, base = (masked.weight*label_weight).sum(), (ref.weight*label_weight).sum()
+                if normalizers is not None:
+                    base = normalizers[(name,'spatial' if name=='fourier_potential' else '')].to(base)
+                loss += self.loss_weights[name]*self.loss_fns[name](masked,reference)*count/base.clamp_min(1.e-30)
         return loss
 
     def __repr__(self):
@@ -505,6 +469,6 @@ class WeightedLoss(torch.nn.Module):
         for name in self.loss_fns:
             string += f"{name}_weight={self.loss_weights[name]}, "
             function = self.loss_fns[name]
-            if isinstance(function, (WeightedFourierDensity, WeightedFourierPotential)):
+            if isinstance(function, WeightedFourierDensity):
                 string += f'{name} options: {function.extra_repr()}, '
         return string + ")"

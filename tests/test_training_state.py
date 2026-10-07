@@ -22,7 +22,7 @@ def test_log_uses_requested_density_and_dipole_names(caplog):
     metrics={'rmse_rho':.001,'rmse_mu_per_atom':.002,'rmse_esp':.1,'rmse_esp_vac':.2,
              'esp_vacuum_enabled':True,'rmse_wf_abs':.15,'rmse_wf_rel':.14}
     with caplog.at_level(logging.INFO):valid_err_log(1.,metrics,Logger(),'ElectrostaticRMSE',5)
-    assert 'RMSE_dip=2.0000 meA/atom' in caplog.text
+    assert 'RMSE_dip_per_atom=2.0000 meA' in caplog.text
     assert 'RMSE_rho=1.0000 me/A^3' in caplog.text
     assert 'RMSE_WF(abs/rel)=150.0000/140.0000 meV' in caplog.text
     assert 'RMSE_MU' not in caplog.text and 'RMSE_RHO' not in caplog.text
@@ -330,7 +330,8 @@ def test_yaml_false_is_not_true_for_amsgrad(tmp_path):
 def test_bulk_does_not_dilute_vacuum_observation():
     from types import SimpleNamespace
     from mace_scf.electrostatics.loss import weighted_vacuum_potential
-    ref = SimpleNamespace(weight=torch.ones(2), fourier_potential_weight=torch.ones(2),
+    ref = SimpleNamespace(weight=torch.ones(2), vacuum_potential=torch.tensor([1.,0.]),
+                          vacuum_potential_weight=torch.ones(2), fourier_potential_weight=torch.ones(2),
                           fourier_proto_potential_weight=torch.ones(2),
                           pbc=torch.tensor([[True, True, False], [True, True, True]]))
     pred = {'vacuum_potential': torch.tensor([2., 0.]),

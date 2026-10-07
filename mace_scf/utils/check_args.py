@@ -21,7 +21,7 @@ def check_config_conflicts(args: argparse.Namespace):
     compute_and_fill_irreps(args)
     check_train_test_files(args)
     check_unsupported_training_options(args)
-    fill_fixedpoint_update_config(args)
+    fill_fixed_point_update_config(args)
     fill_field_readout_config(args)
 
     if args.model == "FixedPoint":
@@ -62,6 +62,11 @@ def check_and_fix_heads(args: argparse.Namespace):
     for key, value in vars(args).items():
         if key[-4:] == "_key":
             assert value is None, "keys can only be specified in the configfile dictionaries"
+
+    for prefix in ("vacuum", "dipole_correction"):
+        for axis in "xyz":
+            key = f"{prefix}_{axis}frac"
+            thedict["info_keys"].setdefault(key, key)
 
     # patch for annoying stuff:
     if "stress" not in thedict["info_keys"]:
@@ -178,16 +183,19 @@ def check_unsupported_training_options(args):
         )
 
 
-def fill_fixedpoint_update_config(args):
-    if args.fixedpoint_update_config is None:
-        args.fixedpoint_update_config = {
+def fill_fixed_point_update_config(args):
+    if args.fixed_point_update_config is None:
+        args.fixed_point_update_config = {
             "type": "OneBodyVariableUpdate",
             "potential_embedding_cls": "BiasedLinearPotentialEmbedding",
             "nonlinearity_cls": "NoNonLinearity",
         }
     else:
-        args.fixedpoint_update_config = ast.literal_eval(args.fixedpoint_update_config)
-        assert "type" in args.fixedpoint_update_config
+        args.fixed_point_update_config = ast.literal_eval(args.fixed_point_update_config)
+        assert "type" in args.fixed_point_update_config
+
+    if isinstance(args.fixed_point_update_config.get("potential_widths"), str):
+        args.fixed_point_update_config["potential_widths"] = ast.literal_eval(args.fixed_point_update_config["potential_widths"])
 
     cls_variables = [
         "type",
@@ -197,9 +205,9 @@ def fill_fixedpoint_update_config(args):
         "interaction_cls",
         "nonlinearity_cls",
     ]
-    for key, value in args.fixedpoint_update_config.items():
+    for key, value in args.fixed_point_update_config.items():
         if key in cls_variables:
-            args.fixedpoint_update_config[key] = getattr(field_blocks, value)
+            args.fixed_point_update_config[key] = getattr(field_blocks, value)
 
 
 def fill_field_readout_config(args):

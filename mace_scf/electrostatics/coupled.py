@@ -18,39 +18,6 @@ from e3nn import o3
 
 from .potential import SpectralGeometry, initialize_response, attach_observations
 
-def local_transport(positions, edge_index, shifts, batch, slot, graphs, max_nodes,
-                    cutoff, width):
-    """T_ij=w_ij/(1+sum_j w_ij), with positive C2-cutoff Gaussian weights.
-
-    Repeated periodic images contribute by addition. No nearest-image assumption,
-    new edges, cross-graph mixing, or learnable attention weights are introduced.
-    ``T @ u - T.sum(-1)*u`` is the local difference used by the response. The
-    extra 1 fixes the isolated-atom limit and bounds the row sum strictly below 1.
-    """
-    if cutoff <= 0 or width <= 0:
-        raise ValueError('current transport cutoff and width must be positive')
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError('current edge_index must have shape [2, edges]')
-    sender, receiver = edge_index
-    if shifts is None:
-        if sender.numel():
-            raise ValueError('current transport requires the Cartesian image shifts of the MACE graph')
-        shifts = positions.new_zeros((0, 3))
-    if shifts.shape != (sender.numel(), 3):
-        raise ValueError('current Cartesian edge shifts must have shape [edges, 3]')
-    if sender.numel() and bool((batch[sender] != batch[receiver]).any()):
-        raise ValueError('current electronic transport cannot connect different graphs')
-    vector = positions[receiver] - positions[sender] + shifts.to(positions)
-    square = vector.square().sum(-1)
-    # Use r^2, not sqrt(r^2), so zero-length periodic self edges have finite
-    # derivatives too. (1-r^2/R^2)^3_+ is C2 at the cutoff for force training.
-    envelope = (1. - square / float(cutoff)**2).clamp_min(0.).pow(3)
-    weights = torch.exp(-.5 * square / float(width)**2) * envelope
-    indices = ((batch[receiver] * max_nodes + slot[receiver]) * max_nodes + slot[sender])
-    matrix = positions.new_zeros(graphs * max_nodes * max_nodes).index_add(0, indices, weights)
-    matrix = matrix.reshape(graphs, max_nodes, max_nodes)
-    return matrix / (1. + matrix.sum(-1, keepdim=True))
-
 def transport_difference(matrix, values):
     """Neighbor-minus-center differences, for either scalar or vector channels."""
     original = values.shape
@@ -61,8 +28,10 @@ def angular_transport(positions, edge_index, shifts, batch, slot, graphs, max_no
                       cutoff, width):
     """l=0 and l=1 transport on the SAME existing graph, no learned attention.
 
-    Channel 0 is exactly local_transport. Channels 1:4 contain T_ij*r_ij/width,
-    with r_ij pointing from receiving atom i to neighbor/image j. Solid l=1
+    Channel 0 is T_ij=w_ij/(1+sum_j w_ij). Repeated periodic images add;
+    the extra 1 fixes the isolated-atom limit and bounds the row sum below 1.
+    Channels 1:4 contain T_ij*r_ij/width, with r_ij pointing from receiving
+    atom i to neighbor/image j. Solid l=1
     harmonics avoid the non-differentiable unit direction at a coincident edge.
     The same smooth cutoff supplies second derivatives for force training.
     """
@@ -1111,10 +1080,95 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     state = screen_moments(state, proposal, reference, kernel, mask, factors, materialized=not functional)
     return g, state, (*fixed, *parameters), update, evaluate
 
+def reference_predictions(model, data, g, fixed, state, response, spectral, output,
+                          materialized=True, condition_density=True):
+    """Complementary constitutive observations; never a deployment trajectory.
+
+    At measured mu, solve the charge/dipole response exactly while keeping the
+    current nonlinear coefficients fixed. At measured total potential, evaluate
+    the same chemical-level map. No atomic DFT partition or Poisson inversion of
+    the measured density is used. The ordinary fixed-Q prediction is untouched.
+    """
+    r = model.field_dependent_charges_map
+    chemical, vector, attrs, p0, mask, target, neighbors, reference, kernel = fixed[:9]
+    factors = fixed[9:13]
+    observed = (data['fermi_level_weight'].reshape(-1)>0) & (data['weight'].reshape(-1)>0)
+    if not bool(observed.any()):
+        return None
+    if bool((observed & ~torch.isfinite(data['fermi_level'].reshape(-1))).any()):
+        raise FloatingPointError('Nonfinite observed Fermi level for reference conditioning')
+    result = {key:value for key,value in output.items()
+              if key.endswith('_dft') or key.endswith('_dft_mask') or
+              key in ('energy','k_vectors','k_vectors_mask','k_vectors_grid_shape')}
+    masks = {}
+    if condition_density:
+        potential, field = spectral[-2:]
+        # With the nonlinear chemical levels/sources fixed, this is an affine
+        # response. One existing constrained solve gives its exact fixed-Q state.
+        seed = torch.cat((state[..., :4],response[0][..., 4:]),-1)
+        seed_v, seed_e = sample_spectrum(total_spectrum(seed,g.tensors,g.kernels,r.density_width),g.tensors)
+        delta_v = seed_v[..., 0]-potential[..., 0]
+        softness = reference[..., -1]*mask
+        charge = response[0][..., 0]+softness*(delta_v-(response[2]*delta_v).sum(-1,keepdim=True))
+        dipole = response[0][..., 1:4]-reference[..., -3:-2]*r.density_width*(seed_e[..., 0,:]-field[..., 0,:])
+        raw = torch.cat((charge[..., None],dipole,response[0][..., 4:]),-1)
+        solved = screen_moments(seed,raw,reference,kernel,mask,factors,materialized=materialized)
+        solved_v, _ = sample_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),g.tensors)
+        mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset
+        # The last bordered-inverse column is dq/dQ. Its last entry, divided by
+        # sum(s), is dmu/dQ for this frozen-coefficient response. Use the exact
+        # change of ensemble, retaining every operator/parameter derivative.
+        matrix, root, lu, pivots = factors
+        if materialized:
+            column = matrix[..., -1]
+        else:
+            right = matrix.new_zeros((*matrix.shape[:-1],1)); right[:, -1,0] = 1.
+            column = solve_factored_system(matrix,lu,pivots,right)[..., 0]
+        s, present, _ = moment_coordinates(reference,mask)
+        stiffness = column[:, -1]/(s*present).sum(-1)
+        if bool((observed & (~torch.isfinite(stiffness) | (stiffness.abs()<=torch.finfo(stiffness.dtype).tiny))).any()):
+            raise RuntimeError('Reference-conditioned chemical-potential response is singular')
+        label = torch.where(observed,data['fermi_level'].reshape(-1),mu)
+        delta_charge = (label-mu)/torch.where(observed,stiffness,torch.ones_like(stiffness))
+        direction = (root*column[:, :-1]).reshape(*mask.shape,4)
+        solved = torch.cat((solved[..., :4]+direction*delta_charge[:, None,None],solved[..., 4:]),-1)
+        total, carrier, regular, _, bare = evaluate_coefficients(solved,g.tensors,g.kernels,r.density_width,include_carrier=True)
+        total, carrier, regular, bare = (g.expand_spectrum(x) for x in (total,carrier,regular,bare))
+        net_charge = solved[..., 0].sum(-1)
+        density = bare/torch.where(g.coulomb>0,-g.coulomb,1.)[..., None]
+        density = density+torch.stack(((g.k2==0)*(net_charge/g.volume)[:, None],torch.zeros_like(g.k2)),-1)
+        smoothing = torch.exp(-.5*(float(r.receiver_widths.max())**2-r.density_width**2)*g.k2)
+        result.update(fourier_density=density*g.ngrid,
+                      fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
+                      fourier_potential=(carrier+regular)*g.ngrid,
+                      vacuum_potential=g.plane(torch.view_as_complex(total.contiguous())),
+                      total_charge=net_charge, reference_charge_error=net_charge-target,
+                      reference_charge_stiffness=stiffness)
+        masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
+    # Only complete retained DFT fields are valid inputs. A missing spectrum
+    # is not a measured zero field; those graphs receive no conditional EF loss.
+    if 'fourier_total_potential_dft' in output:
+        complete = (~g.mask | (g.k2==0) | output['fourier_total_potential_dft_mask']).all(-1)
+        use = observed & complete & (data['fourier_potential_weight']>0) & (data['fourier_proto_potential_weight']>0)
+        measured = output['fourier_total_potential_dft']/g.ngrid
+        rows = torch.arange(len(g.counts),device=state.device)[:, None]
+        selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
+        selected = torch.where(use[:, None,None],selected,spectral[0])
+        values, gradients = sample_spectrum(selected,g.tensors)
+        conditional = r(state,chemical,vector,attrs,values,gradients,p0,mask,target,neighbors,
+                        include_energy=False,reference_offset=reference)
+        result['fermi_level'] = conditional[1]+model.fermi_level_offset
+        masks['fermi_level'] = use
+    result['reference_masks'] = masks
+    return result
+
+
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                      constant_charge=True, compute_stress=False, mode=None, mixing=None,
-                     tolerance=1.e-7):
+                     tolerance=1.e-7, reference_conditioning=False):
     """Return the selected finite trajectory or a verified constitutive root."""
+    if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
+        raise ValueError('Unknown reference-conditioning observation')
     with torch.set_grad_enabled(training or compute_force or compute_stress or torch.is_grad_enabled()):
         r = model.field_dependent_charges_map
         mode = r.deployment_mode if mode is None else mode
@@ -1223,6 +1277,13 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if 'fourier_density_dft' in output:
             output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
             output['fourier_farfield_density_dft_mask'] = output['fourier_density_dft_mask']
+        if reference_conditioning not in (False, 'none'):
+            with torch.set_grad_enabled(training):
+                reference = reference_predictions(model,data,g,args,state,response,spectral,output,
+                                                  materialized=mode!='implicit',
+                                                  condition_density=reference_conditioning!='fermi_level')
+            if reference is not None:
+                output['reference_response'] = reference
         return output
 
 @torch.no_grad()
@@ -1292,9 +1353,7 @@ def initialize_reference(model, loader, device, options, loss_config):
     def weight(name):
         value = loss_config.get(name, {})
         return float(value.get('weight', 0.)) if isinstance(value,dict) else float(value)
-    potential_options = loss_config.get('fourier_potential', {})
-    vacuum_weight = float(potential_options.get('vacuum_weight', 0.)) if isinstance(potential_options, dict) else 0.
-    scales = original.new_tensor([weight('fourier_potential'), weight('fermi_level'), weight('fourier_potential')*vacuum_weight])
+    scales = original.new_tensor([weight('fourier_potential'), weight('fermi_level'), weight('vacuum_potential')])
     grams = original.new_zeros((3,size,size)); right = original.new_zeros((3,size)); counts = original.new_zeros(3)
     modes = model.training
     flags = [p.requires_grad for p in model.parameters()]

@@ -166,7 +166,7 @@ def build_model(
                 add_local_electron_energy=args.include_local_electron_energy,
                 quadrupole_feature_corrections=args.quadrupole_feature_corrections,
                 return_electrostatic_potentials=args.return_electrostatic_potentials,
-                fixedpoint_update_config=args.fixedpoint_update_config,
+                fixed_point_update_config=args.fixed_point_update_config,
                 field_readout_config=args.field_readout_config,
                 field_feature_norms=args.field_feature_norms,
                 field_norm_factor=args.field_norm_factor,

@@ -179,9 +179,9 @@ class SpectralGeometry:
         self.external = data.get("external_field", positions.new_zeros((len(self.counts), 3))).reshape(-1, 3)
         if bool(((~self.slab) & (self.external.abs().sum(-1)>0)).any()):
             raise ValueError("A homogeneous field needs an explicit open direction")
-        branch = data.get("dipole_correction_zfrac", positions.new_full((len(self.counts),), .5)).reshape(-1)
+        branch = data.get("dipole_correction_fraction", positions.new_full((len(self.counts),), .5)).reshape(-1)
         self.branch = torch.where(torch.isfinite(branch), branch, .5).remainder(1.)
-        zfrac = data.get("vacuum_zfrac", positions.new_full((len(self.counts),), .5)).reshape(-1)
+        zfrac = data.get("vacuum_fraction", positions.new_full((len(self.counts),), .5)).reshape(-1)
         self.zfrac = torch.where(torch.isfinite(zfrac), zfrac, .5).remainder(1.)
         self.axial = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
         self.axial = self.axial & active & self.slab[:, None]
@@ -585,9 +585,6 @@ def attach_observations(data, geom, output):
             output[key+"_dft_mask"] = target_mode_mask(data[key+"_shape"], geom.modes)
     phi = output.get("fourier_potential_dft")
     proto = output.get("fourier_proto_potential_dft")
-    if phi is not None:
-        output["potential_mode_weight"] = potential_mode_weights(geom.wave, geom.cell, geom.pbc,
-            data.get("potential_weight", geom.wave.new_ones((len(output["energy"]), 3))).reshape(-1, 3), geom.mask)
     if phi is not None and proto is not None:
         output["fourier_total_potential_dft"] = phi+proto
         output["fourier_total_potential_dft_mask"] = output["fourier_potential_dft_mask"] & output["fourier_proto_potential_dft_mask"]
@@ -649,57 +646,6 @@ def initialize_response(model, loader, device):
         error = (square-2*solution@rhs+solution@(gram@solution)).clamp_min(0)
         logging.info("Frozen training-only proto fit: spectral component RMS %.6g eV, observations %d", float((error/observations).sqrt()), observations)
     logging.info("Electronic response %s: %d coarse + %d regular coefficients per atom; deployment uses %d steps", type(response).__name__, response.coarse_dim, response.state_irreps.dim-response.coarse_dim, int(response.deployment_steps))
-def potential_mode_weights(
-    k_vectors: torch.Tensor,
-    cell: torch.Tensor,
-    pbc: Optional[torch.Tensor],
-    component_weights: torch.Tensor,
-    mask: torch.Tensor,
-) -> torch.Tensor:
-    """Lift ``config_potential_weight`` to reciprocal-space observables.
-
-    The three components select potential observables, never boundary
-    conditions.  One or two active components select the union of the
-    corresponding one-dimensional reciprocal lines (planar-average profiles),
-    while three active components select the complete retained 3-D spectrum.
-    PBC enters the electrostatic solver elsewhere and does not override this
-    user-supplied observation mask.
-    """
-    del pbc
-    num_graphs = k_vectors.shape[0]
-    weights = component_weights.reshape(num_graphs, 3).to(k_vectors)
-    lattice_modes = torch.einsum(
-        "bki,bji->bkj", k_vectors, cell.reshape(num_graphs, 3, 3)
-    ) / (2.0 * pi)
-    active_axis = lattice_modes.abs() > 1.0e-6
-    active_count = active_axis.sum(dim=-1)
-    selected = weights > 0.0
-    selected_count = selected.sum(dim=-1)
-    weight_sum = weights.sum(dim=-1, keepdim=True).clamp_min(
-        torch.finfo(weights.dtype).eps
-    )
-
-    # Axial-profile mode: exactly one reciprocal lattice component is nonzero.
-    axial_lines = active_axis & (active_count == 1).unsqueeze(-1)
-    axial_norm = weights * selected_count.clamp_min(1).to(weights)[:, None] / weight_sum
-    axial_weight = torch.sum(
-        axial_lines.to(weights) * axial_norm[:, None, :], dim=-1
-    )
-
-    # Full-3D mode: all three components active.  Directional non-unit weights
-    # smoothly reweight mixed modes; [1,1,1] reduces exactly to one.
-    mode_square = lattice_modes.square()
-    full_norm = weights * 3.0 / weight_sum
-    full_weight = torch.sum(mode_square * full_norm[:, None, :], dim=-1) / (
-        mode_square.sum(dim=-1).clamp_min(torch.finfo(weights.dtype).eps)
-    )
-    output = torch.where(
-        (selected_count == 3)[:, None], full_weight, axial_weight
-    )
-    output = torch.where((selected_count > 0)[:, None], output, torch.zeros_like(output))
-    return output * mask.to(output)
-
-
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:
     """Decode one stored three-dimensional FFT shape per graph."""
     values = values.reshape(-1)

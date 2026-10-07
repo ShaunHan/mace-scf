@@ -76,7 +76,7 @@ class FixedPointCore(torch.nn.Module):
         pbc_handling: str = "mixed_periodic",
         fermi_level_offset: float = 0.0,
         *,
-        fixedpoint_update_config: Dict[str, Any],
+        fixed_point_update_config: Dict[str, Any],
         field_readout_config: Dict[str, Any],
         use_linear_local_charges: bool = False,
     ):
@@ -129,7 +129,7 @@ class FixedPointCore(torch.nn.Module):
                 f"FixedPoint only supports a single head, got heads={heads}"
             )
         self.heads = heads
-        fixedpoint_update_config = dict(fixedpoint_update_config)
+        fixed_point_update_config = dict(fixed_point_update_config)
         field_readout_config = dict(field_readout_config)
 
         # Embedding
@@ -289,7 +289,7 @@ class FixedPointCore(torch.nn.Module):
                 )
 
         # Field-dependent charge update block
-        lr_source_cls = fixedpoint_update_config.pop("type")
+        lr_source_cls = fixed_point_update_config.pop("type")
         max_ell_field_update = 2
         field_update_sh_irreps = o3.Irreps.spherical_harmonics(max_ell_field_update)
         self.from_ell_max_field_update = (max_ell_field_update + 1) ** 2
@@ -312,7 +312,7 @@ class FixedPointCore(torch.nn.Module):
             **({"density_width": atomic_multipoles_smearing_width, "field_widths": field_feature_widths,
                 "include_local_energy": add_local_electron_energy}
                if getattr(lr_source_cls, "coupled", False) else {}),
-            **fixedpoint_update_config,
+            **fixed_point_update_config,
         )
         if getattr(lr_source_cls, 'coupled', False):
             self.register_buffer('readout_feature_units', torch.ones(num_interactions, hidden_irreps.dim))
