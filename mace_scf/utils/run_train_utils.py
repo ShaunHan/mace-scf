@@ -333,13 +333,22 @@ def get_param_options(model, args):
                 "weight_decay": args.local_charges_weight_decay,
             }
         )
-        param_options["params"].append(
-            {
-                "name": "field_dependent_charges_map",
-                "params": model.field_dependent_charges_map.parameters(),
-                "weight_decay": args.field_block_weight_decay,
-            }
-        )
+        response=model.field_dependent_charges_map
+        if getattr(response,'coupled',False):
+            # Penalize learned response maps, not the physical species levels,
+            # potential reference amplitudes or additive affine coordinates.
+            # Decaying a chemical reference towards numerical zero is a
+            # gauge-dependent prior, rather than a smoothness regularizer.
+            matrices, references = [], []
+            for name,parameter in response.named_parameters():
+                (matrices if name.endswith('weight') and parameter.ndim>=2 else references).append(parameter)
+            param_options['params'].extend([
+                {'name':'field_dependent_charges_map','params':matrices,'weight_decay':args.field_block_weight_decay},
+                {'name':'electronic_references','params':references,'weight_decay':0.}])
+        else:
+            param_options["params"].append(
+                {"name": "field_dependent_charges_map", "params": response.parameters(),
+                 "weight_decay": args.field_block_weight_decay})
         param_options["params"].append(
             {
                 "name": "local_electron_energy",

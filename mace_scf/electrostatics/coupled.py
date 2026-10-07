@@ -115,10 +115,13 @@ def sample_spectrum(total, geometry):
     cosine, sine, wave, _, _, _, receiver, *_ = geometry
     re = total[..., 0, None] * receiver
     im = total[..., 1, None] * receiver
-    value = torch.bmm(cosine.transpose(1, 2), re) - torch.bmm(sine.transpose(1, 2), im)
     re_k = (re[..., None] * wave[:, :, None]).flatten(-2)
     im_k = (im[..., None] * wave[:, :, None]).flatten(-2)
-    gradient = torch.bmm(sine.transpose(1, 2), re_k) + torch.bmm(cosine.transpose(1, 2), im_k)
+    # Two contractions share the phase transpose and its backward graph for
+    # scalar and vector observations. This is the same Fourier projection.
+    sampled = (torch.bmm(cosine.transpose(1, 2), torch.cat((re, im_k), -1))
+               + torch.bmm(sine.transpose(1, 2), torch.cat((-im, re_k), -1)))
+    value, gradient = sampled.split((re.shape[-1], re_k.shape[-1]), -1)
     return value, gradient.reshape(*value.shape, 3)
 
 def charge_closure(reference_charge, levels, softness, target, mask):
@@ -240,8 +243,10 @@ class AtomicPotentialResponse(nn.Module):
             raise ValueError('The common response requires its periodic local transport operator')
         # The full receiver coordinates carry the electrochemical drive;
         # local radial contrasts and angular/neighbor variation remain present.
-        ds=transport_difference(neighborhood[...,0],v)
-        dv=transport_difference(neighborhood[...,0],e)
+        # Scalar and vector channels use one linear transport and one adjoint.
+        transported=transport_difference(neighborhood[...,0],torch.cat((v,e.flatten(-2)),-1))
+        ds,dv=transported.split((v.shape[-1],e.shape[-2]*3),-1)
+        dv=dv.reshape_as(e)
         div,grad=angular_differences(neighborhood,v,e)
         e,dv,grad=vector_asinh(e),vector_asinh(dv),vector_asinh(grad)
         scalar=chemical+self.state_scalar(torch.asinh(v))
@@ -290,14 +295,23 @@ class AtomicPotentialResponse(nn.Module):
         return torch.cat((scalar, torch.asinh(polar.square().sum(-1)),
                           torch.asinh((vector * polar).sum(-1))), -1)
 
-    def _constitutive_outputs(self,invariants,vector,embedded,return_hidden=False):
+    def _constitutive_outputs(self,invariants,vector,embedded,return_hidden=False,include_dipole=True):
         u1 = self.shared[0](invariants)
         u2 = self.shared[2](self.shared[1](u1))
         hidden = self.shared[3](u2)
         scalars=self.scalar_out(hidden)
-        basis=torch.cat((vector,embedded),-2)
-        gate=self.vector_out(hidden).reshape(*hidden.shape[:-1],1+self.source_channels,self.vector_basis_size)
-        polar=torch.einsum('bnov,bnvc->bnoc',gate,basis)/math.sqrt(self.vector_basis_size)
+        channels=self.source_channels+int(include_dipole)
+        if channels:
+            basis=torch.cat((vector,embedded),-2)
+            # The geometry dipole is prepared once in reference_offset. Only
+            # local-potential vector amplitudes use this readout in recurrence;
+            # density-only models therefore need no recurrent vector readout.
+            start=0 if include_dipole else self.vector_basis_size
+            gate=F.linear(hidden,self.vector_out.weight[start:],self.vector_out.bias[start:])
+            gate=gate.reshape(*hidden.shape[:-1],channels,self.vector_basis_size)
+            polar=torch.einsum('bnov,bnvc->bnoc',gate,basis)/math.sqrt(self.vector_basis_size)
+        else:
+            polar=hidden.new_zeros((*hidden.shape[:-1],0,3))
         result = (scalars, polar)
         if return_hidden:
             result += (hidden,)
@@ -366,7 +380,7 @@ class AtomicPotentialResponse(nn.Module):
         offset,electronic_reference=reference_offset[...,:-extra],reference_offset[...,-2:]
         inv,embedded=self._invariants(state,chemical,vector,potential,field,mask,neighborhood,
                                      electronic_reference,target)
-        computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True)
+        computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True,include_dipole=False)
         scalars, polar = computed[:2]
         chemical_level=attrs@self.species_level+scalars[...,0]
         chemical_level = chemical_level + p0[..., 0]
@@ -384,7 +398,7 @@ class AtomicPotentialResponse(nn.Module):
             levels = chemical_level+potential[...,0]
         induced=-reference_offset[...,-3:-2]*self.density_width*field[...,0,:]
         proposal=torch.cat((q[...,None],p0[...,1:4]/self.density_width+induced,
-                            scalars[...,2:],polar[...,1:,:].flatten(-2)),-1)*mask[...,None]
+                            scalars[...,2:],polar.flatten(-2)),-1)*mask[...,None]
         proposal=(proposal+offset)*mask[...,None]
         if include_energy and self.energy_readout is not None:
             zeros=torch.zeros_like(potential)
@@ -588,7 +602,7 @@ def factor_moments(reference, kernel, mask):
     softness,present,constraint=moment_coordinates(reference,mask)
     return prepare_charge_factorization(softness,kernel,present,constraint)
 
-def screen_moments(current, proposal, reference, kernel, mask, factors):
+def screen_moments(current, proposal, reference, kernel, mask, factors, *, materialized=False):
     """Apply the already validated geometry's constrained moment solve."""
     matrix, root, lu, pivots = factors
     present = mask[..., None].expand(-1, -1, 4).flatten(-2)
@@ -597,7 +611,7 @@ def screen_moments(current, proposal, reference, kernel, mask, factors):
     rhs = residual/torch.where(present.bool(), root, torch.ones_like(root))
     charge_residual = residual.reshape(*mask.shape, 4)[..., 0].sum(-1, keepdim=True)
     right = torch.cat((rhs, charge_residual), -1)[..., None]
-    solved = solve_factored_system(matrix, lu, pivots, right)
+    solved = matrix @ right if materialized else solve_factored_system(matrix, lu, pivots, right)
     value = ((old+root*solved[:, :-1, 0])*present).reshape(*mask.shape, 4)
     # Remove charge roundoff only; the raw law already enforces fixed Q.
     charge = value[..., 0]+mask*((proposal[..., 0]-value[..., 0]).sum(-1)/mask.sum(-1))[:, None]
@@ -1033,6 +1047,16 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     state = torch.cat((state[..., :1], state[..., 1:4]+reference[..., 1:4], source), -1)
     kernel = moment_kernel(g.tensors, g.kernels, mask, r.density_width)
     factors = factor_moments(reference, kernel, mask)
+    if not functional:
+        # The same constrained matrix acts at EVERY finite update. Materialize
+        # its action once, with the checked LU and exact inverse derivative.
+        # This aggregates operator gradients before the expensive solve rather
+        # than repeating LU solves/checks in every force-loss backward branch.
+        # All coordinate, softness and higher derivatives remain attached.
+        matrix, root, lu, pivots = factors
+        identity = torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device).expand_as(matrix)
+        inverse = solve_factored_system(matrix, lu, pivots, identity)
+        factors = (inverse, root, lu, pivots)
     parameters = tuple(r.parameters())
     names = tuple(name for name,_ in r.named_parameters())
     # All geometry, reference and parameter dependencies are explicit for the
@@ -1053,14 +1077,15 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
                    'observe_chemical_level': observe}
         result = (functional_call(r, dict(zip(names, args[count:])), inputs, options, strict=False)
                   if functional else r(*inputs, **options))
-        proposal = screen_moments(z, result[0], ref, moment, present, factor) if screened else result[0]
+        proposal = screen_moments(z, result[0], ref, moment, present, factor,
+                                  materialized=not functional) if screened else result[0]
         return (proposal, *result[1:]), (*spectral, potential, field)
 
     def update(z, *args):
         return evaluate(z, *args, observe=False)[0][0]
 
     update.raw = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]
-    update.convergence_residual = lambda z, *args: update.raw(z, *args)-z
+    update.convergence_residual = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]-z
     # Exact screened geometry-reference seed from v366. The nonlinear response
     # then updates density AND potential; this is not an inference-time fit.
     spectra = evaluate_coefficients(state, g.tensors, g.kernels, r.density_width)
@@ -1069,7 +1094,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     q = charge_closure(torch.zeros_like(p0[..., 0]), chi+values[..., 0], soft, target, mask)[0]
     dipole = state[..., 1:4]-reference[..., -3:-2]*r.density_width*gradient[..., 0, :]
     proposal = torch.cat((q[..., None], dipole, state[..., 4:]), -1)
-    state = screen_moments(state, proposal, reference, kernel, mask, factors)
+    state = screen_moments(state, proposal, reference, kernel, mask, factors, materialized=not functional)
     return g, state, (*fixed, *parameters), update, evaluate
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
@@ -1170,7 +1195,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             'fourier_effective_density':effective*g.ngrid,
             'fourier_potential':(lr+sr)*g.ngrid, 'fourier_total_potential':total*g.ngrid,
             'fourier_local_potential':regular*g.ngrid, 'fourier_carrier_potential':carrier*g.ngrid,
-            'k_vectors_mask':g.mask, 'k_vectors':g.wave,
+            'k_vectors_mask':g.mask, 'k_vectors':g.wave, 'planar_mode_mask':g.axial,
             'k_vectors_grid_shape':torch.tensor(g.shape, device=positions.device),
             'scf_residual':residual, 'scf_steps':positions.new_full((len(mu),),float(info[0])),
             'electrostatic_energy':electronic, 'electron_energy':local_electronic,
@@ -1227,7 +1252,8 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.scalar_field_scale.copy_((1.+ps/max(count,1.e-30)).sqrt())
     r.vector_field_scale.copy_((1.+fs/max(count,1.e-30)).sqrt())
     r.field_scales_initialized.fill_(True)
-    logging.info('Restored v366 nonlinear total-field response: screened moment seed, %d local potential channels, receiver widths %s', r.source_channels, r.receiver_widths.tolist())
+    logging.info('Coupled total-field response: screened moment seed, %d local potential channels, Gaussian receiver widths %s',
+                 r.source_channels, r.receiver_widths.tolist())
 
 @torch.no_grad()
 def initialize_reference(model, loader, device, options, loss_config):

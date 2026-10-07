@@ -115,6 +115,13 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     best = getattr(checkpoint_handler, "best_loss", float("inf"))
     stalled = 0
     best_epoch = None
+    try:
+        from mace_scf.utils.diagnostics import runtime_inventory
+    except ModuleNotFoundError as exc:
+        if exc.name != 'mace_scf.utils.diagnostics':
+            raise
+    else:
+        runtime_inventory(model, optimizer, device, getattr(train_loader,'batch_size',None))
     for epoch in range(start_epoch, end_epoch+1):
         epoch_start = time.perf_counter()
         cuda_device = torch.device(device).type == 'cuda'
@@ -147,6 +154,9 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                          train_seconds, time.perf_counter()-validation_start, len(norms),
                          train_seconds/max(1,len(norms)), peak_mib,
                          'CuEq' if getattr(model,'backbone_layout','mul_ir') == 'ir_mul' else 'e3nn')
+            if hasattr(optimizer, '_device_batch_size'):
+                logging.info('Batching: optimizer graphs=%s, device graphs<=%d; one clipping/Adam/EMA update per optimizer batch',
+                             train_loader.batch_size, optimizer._device_batch_size)
             if log_wandb:
                 import wandb
                 wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
@@ -193,18 +203,62 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     """One atomic optimizer update, differentiating model parameters only."""
     start = time.time()
     model.train()
-    optimizer.zero_grad(set_to_none=True)
-    batch = batch.to(device)
-    output = model_eval_wrapper(model, batch.to_dict(), training=True)
-    loss = loss_fn(pred=output, ref=batch)
-    if not bool(torch.isfinite(loss.detach())):
-        raise FloatingPointError("Nonfinite loss; no optimizer/EMA update performed")
     parameters = [p for group in optimizer.param_groups for p in group["params"] if p.requires_grad]
-    torch.autograd.backward(loss, inputs=parameters)
+    # One optimizer batch can use several device batches. Split only after an
+    # actual allocation OOM, and remember the successful graph count. The
+    # optimizer, clipping and EMA still update exactly once for the whole batch.
+    coupled=getattr(getattr(model,'field_dependent_charges_map',None),'coupled',False)
+    adaptive=(coupled and torch.device(device).type=='cuda'
+              and getattr(loss_fn,'supports_graph_accumulation',False))
+    graphs=batch.to_data_list() if adaptive else None
+    capacity=getattr(optimizer,'_device_batch_size',len(graphs)) if adaptive else batch.num_graphs
+    limit=min(len(graphs),capacity) if adaptive else capacity
+    normalizers=loss_fn.normalizers(batch) if adaptive else None
+
+    def backward_batch():
+        from mace.tools.torch_geometric import Batch
+        total=None
+        pieces=(Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit)) if adaptive else (batch,)
+        for piece in pieces:
+            piece=piece.to(device)
+            output=model_eval_wrapper(model,piece.to_dict(),training=True)
+            loss=loss_fn(pred=output,ref=piece,**({'normalizers':normalizers} if adaptive else {}))
+            if not bool(torch.isfinite(loss.detach())):
+                raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
+            torch.autograd.backward(loss,inputs=parameters)
+            total=loss.detach() if total is None else total+loss.detach()
+            del output,loss,piece
+        return total
+
+    def attempt():
+        # Returning out of the exception scope releases the failed autograd
+        # frames before empty_cache; do not retain the OOM traceback or retry
+        # illegal-access/device-assert/linear-algebra/numerical failures.
+        try:
+            return backward_batch()
+        except torch.cuda.OutOfMemoryError:
+            if not adaptive or limit==1:
+                raise
+            return None
+
+    rng=(torch.random.get_rng_state(),torch.cuda.get_rng_state(device)) if adaptive else None
+    while True:
+        optimizer.zero_grad(set_to_none=True)
+        loss=attempt()
+        if loss is not None:break
+        optimizer.zero_grad(set_to_none=True)
+        import gc
+        gc.collect();torch.cuda.empty_cache()
+        torch.random.set_rng_state(rng[0]);torch.cuda.set_rng_state(rng[1],device)
+        limit=max(1,limit//2)
+        capacity=limit
+        logging.warning('Allocation OOM: retrying the unchanged optimizer batch with at most %d graphs per device batch; no optimizer/EMA update occurred',limit)
+    if adaptive:optimizer._device_batch_size=capacity
     norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
                                          error_if_nonfinite=True)
     metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": float(norm),
-               "grad_clip_applied": max_grad_norm is not None and float(norm)>max_grad_norm}
+               "grad_clip_applied": max_grad_norm is not None and float(norm)>max_grad_norm,
+               "device_batch_size":limit}
     optimizer.step()
     if ema is not None:
         ema.update()
@@ -230,6 +284,47 @@ def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device):
         model.train(was_training)
 
 
+def _evaluation_batches(model, wrapper, data_loader, device, ema):
+    """Evaluate all graphs, reducing only the device batch on allocation OOM."""
+    from mace.tools.torch_geometric import Batch
+    adaptive=(torch.device(device).type=='cuda' and
+              getattr(getattr(model,'field_dependent_charges_map',None),'coupled',False))
+
+    def attempt(piece):
+        try:
+            piece=piece.to(device)
+            output=wrapper(model,piece.to_dict(),training=False,ema=ema)
+            return piece, output
+        except torch.cuda.OutOfMemoryError:
+            if not adaptive or piece.num_graphs==1:
+                raise
+            if hasattr(model,'batch_positions'):
+                del model.batch_positions
+            return None
+
+    capacity=getattr(wrapper,'_evaluation_device_batch_size',None)
+    for batch in data_loader:
+        if not adaptive:
+            yield attempt(batch)
+            continue
+        graphs=batch.to_data_list()
+        if capacity is None:capacity=len(graphs)
+        index=0
+        while index<len(graphs):
+            count=min(capacity,len(graphs)-index)
+            result=attempt(Batch.from_data_list(graphs[index:index+count]))
+            if result is None:
+                import gc
+                gc.collect();torch.cuda.empty_cache()
+                capacity=max(1,count//2)
+                logging.warning('Validation allocation OOM: reducing device batch to %d graphs; every graph is still evaluated',capacity)
+                continue
+            yield result
+            del result
+            index+=count
+        wrapper._evaluation_device_batch_size=capacity
+
+
 def _evaluate(
     model: torch.nn.Module,
     model_eval_wrapper,
@@ -238,8 +333,6 @@ def _evaluate(
     data_loader: DataLoader,
     device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
-    num_configs = 0
-    total_loss = 0.0
     E_computed = False
     delta_es_list = []
     delta_es_per_atom_list = []
@@ -267,23 +360,22 @@ def _evaluate(
     total_charge_computed = False
     delta_total_charge_list = []
     delta_fermi_level_list = []
-    batch = None  # for pylint
 
     voltage_errors = {"workfunction": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
     scf_residuals = []
     objective_sums = {}
     wf_moments = []
+    try:
+        from mace_scf.utils.diagnostics import ValidationAudit
+    except ModuleNotFoundError as exc:
+        if exc.name != 'mace_scf.utils.diagnostics':
+            raise
+        validation_audit = None
+    else:
+        validation_audit = ValidationAudit(getattr(getattr(model,'field_dependent_charges_map',None),'density_width',1.5))
 
     start_time = time.time()
-    for batch in data_loader:
-        batch = batch.to(device)
-        batch_dict = batch.to_dict()
-        output = model_eval_wrapper(
-            model,
-            batch_dict,
-            training=False,
-            ema=ema,
-        )
+    for batch, output in _evaluation_batches(model,model_eval_wrapper,data_loader,device,ema):
 
         if hasattr(model, "batch_positions"):
             del model.batch_positions
@@ -294,9 +386,11 @@ def _evaluate(
         
         batch = batch.cpu()
         output = tensor_dict_to_device(output, device=torch.device("cpu"))
+        if validation_audit is not None:
+            validation_audit.update(batch, output)
 
-        loss = loss_fn(pred=output, ref=batch)
-        total_loss += to_numpy(loss).item()*batch.num_graphs
+        # Accumulate each objective once using its full-split denominator;
+        # an additional per-batch WeightedLoss evaluation would be discarded.
         for key, function in loss_fn.loss_fns.items():
             if loss_fn.loss_weights[key] == 0:
                 continue
@@ -312,14 +406,13 @@ def _evaluate(
                 denominator = float((batch.weight*getattr(batch,key+"_weight")).sum())
             elif key == "vacuum_potential":
                 denominator = float(vacuum_observation_weight(batch).sum())
-            elif key == "forces":
-                denominator = float(batch.forces.numel())
+            elif key in ("forces", "atomic_multipoles", "esps", "field_features"):
+                denominator = float(len(batch.positions))
             else:
                 denominator = float(batch.num_graphs)
             pair = objective_sums.setdefault((key,''), [0.,0.])
             pair[0] += float(function(batch,output))*denominator
             pair[1] += denominator
-        num_configs += batch.num_graphs
 
         from mace_scf.electrostatics.loss import spectral_errors
         for key in voltage_errors:
@@ -548,6 +641,11 @@ def _evaluate(
     aux['esp_vacuum_enabled'] = bool(getattr(loss_fn.loss_fns.get('fourier_potential'), 'vacuum_weight', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
+    if validation_audit is not None:
+        import json
+        report=validation_audit.summary()
+        report['atomic_numbers']=model.atomic_numbers.tolist() if hasattr(model,'atomic_numbers') else None
+        logging.info('Full validation audit %s',json.dumps(report,allow_nan=False))
     return avg_loss, aux
 
 

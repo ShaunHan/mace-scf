@@ -1,3 +1,4 @@
+# v369: full-field SCF, exact device-batch accumulation and 50-step deployment.
 heads:
   default:
     arrays_keys:
@@ -33,8 +34,8 @@ electrostatic_pbc_method: mixed_periodic
 fixedpoint_update_config:
   type: CoupledResponse
   potential_widths: []
-batch_size: 1
-valid_batch_size: 1
+batch_size: 16
+valid_batch_size: 4
 lr: 0.001
 optimizer: adamw
 scheduler: none
@@ -53,7 +54,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_finetune_v368
+checkpoints_dir: checkpoints_RhMnCOH_finetune_v369
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
@@ -84,7 +85,7 @@ train_schedule:
     lr: 0.001
     loss:
       energy_per_atom: 100
-      forces: 500
+      forces: 1000
       dipole: 10
       fourier_density: 10
     fixed_point_training_options:
@@ -103,7 +104,7 @@ train_schedule:
     lr: 0.001
     loss:
       energy_per_atom: 100
-      forces: 500
+      forces: 1000
       dipole: 10
       fourier_density: 10
     fixed_point_training_options:
@@ -122,7 +123,7 @@ train_schedule:
     lr: 0.001
     loss:
       energy_per_atom: 100
-      forces: 500
+      forces: 1000
       dipole: 10
       fourier_density: 10
     fixed_point_training_options:

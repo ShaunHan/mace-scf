@@ -5,6 +5,105 @@ import torch
 from mace.tools import torch_geometric
 
 
+class ValidationAudit:
+    """Whole-split error tails from existing validation outputs, without reruns.
+
+    Panels are useful for expensive derivatives, but cannot establish a
+    generalization gap or exclude rare failure cohorts. All indices below
+    refer to the validation loader order, not a fitted or filtered split.
+    """
+    def __init__(self, density_width=1.5):
+        self.rows = []
+        self.species = {}
+        self.density_width=float(density_width)
+
+    @torch.no_grad()
+    def update(self, batch, output):
+        from mace_scf.electrostatics.loss import vacuum_reference_weights
+        ef = output.get('fermi_level')
+        vac = output.get('vacuum_potential')
+        vacuum_target, weight = vacuum_reference_weights(batch, vac) if vac is not None else (None,None)
+        for i in range(batch.num_graphs):
+            start, stop = int(batch.ptr[i]), int(batch.ptr[i+1])
+            attrs = batch.node_attrs[start:stop]
+            composition = tuple(int(x) for x in attrs.sum(0))
+            row = {'index':len(self.rows), 'atoms':stop-start,
+                   'composition':composition, 'charge':float(batch.total_charge[i])}
+            if vac is not None and ef is not None and weight[i]>0:
+                row.update(weight=float(weight[i]), ef=float(ef[i]-batch.fermi_level[i]),
+                           vac=float(vac[i]-vacuum_target[i]),
+                           wf=float(output['workfunction'][i]-batch.workfunction[i]))
+            if output.get('forces') is not None and batch.forces_weight[i]*batch.weight[i]>0:
+                square=(output['forces'][start:stop]-batch.forces[start:stop]).square()
+                row['force_rmse']=float(square.mean().sqrt())
+                for z in range(attrs.shape[1]):
+                    values=square[attrs[:,z]>0]
+                    previous=self.species.setdefault(str(z),[0.,0])
+                    previous[0]+=float(values.sum());previous[1]+=values.numel()
+            if 'fourier_total_potential_dft' in output and batch.fourier_potential_weight[i]*batch.fourier_proto_potential_weight[i]>0:
+                delta=(output['fourier_total_potential'][i]-output['fourier_total_potential_dft'][i])/output['k_vectors_grid_shape'].prod()
+                k2=output['k_vectors'][i].square().sum(-1)
+                use=output['k_vectors_mask'][i] & output['fourier_total_potential_dft_mask'][i] & (k2>0)
+                power=torch.where(use,delta.square().sum(-1),0.)
+                row['potential_error_power_eV2']=float(power.sum())
+                row['gaussian_lowpass_error_power_eV2']=float((power*torch.exp(-self.density_width**2*k2)).sum())
+                if 'planar_mode_mask' in output:
+                    row['planar_error_power_eV2']=float((power*output['planar_mode_mask'][i]).sum())
+            self.rows.append(row)
+
+    def summary(self):
+        rows=[r for r in self.rows if 'wf' in r]
+        report={'graphs':len(self.rows), 'index_convention':'validation loader order, zero based',
+                'force_rmse_by_element_column_eV_A':{z:(v[0]/v[1])**.5
+                    for z,v in self.species.items() if v[1]}}
+        total=sum(r.get('potential_error_power_eV2',0.) for r in self.rows)
+        if total>0:
+            report['potential_error_power_fractions']={
+                'normal_reciprocal_line':sum(r.get('planar_error_power_eV2',0.) for r in self.rows)/total,
+                'Gaussian_lowpass':sum(r.get('gaussian_lowpass_error_power_eV2',0.) for r in self.rows)/total,
+                'Gaussian_width_A':self.density_width}
+        if not rows:
+            forces=sorted((r for r in self.rows if 'force_rmse' in r),key=lambda r:r['force_rmse'],reverse=True)
+            report['largest_force_errors']=forces[:8]
+            return report
+        error=np.array([[r['ef'],r['vac'],r['wf']] for r in rows])
+        weights=np.array([r['weight'] for r in rows]);weights/=weights.sum()
+        mean=weights@error;center=error-mean
+        report.update(observed_EF_vac_WF=len(rows), EF_vac_WF_rmse_eV=np.sqrt(weights@error**2).tolist(),
+                      EF_vac_WF_bias_eV=mean.tolist(),EF_vac_covariance_eV2=float(weights@(center[:,0]*center[:,1])),
+                      WF_absolute_error_quantiles_eV=dict(zip(('median','p90','p99','max'),np.quantile(abs(error[:,2]),[.5,.9,.99,1.]).tolist())))
+        power=weights*error[:,2]**2
+        order=np.argsort(-power)
+        report['WF_squared_error_share_largest_10_percent']=float(power[order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(power.sum(),1.e-30))
+        report['largest_WF_errors']=[rows[int(i)] for i in order[:8]]
+        groups={}
+        for row in rows:groups.setdefault(str(row['composition']),[]).append(row)
+        report['composition_cohorts']=sorted(({'element_counts':k,'graphs':len(v),
+                'wf_rmse_eV':float(np.sqrt(np.average([r['wf']**2 for r in v],weights=[r['weight'] for r in v])))}
+                for k,v in groups.items()),key=lambda r:r['wf_rmse_eV'],reverse=True)[:12]
+        report['scope']='Full validation split; diagnostic only, no reference-dependent correction is installed.'
+        return report
+
+
+def runtime_inventory(model, optimizer, device, batch_size):
+    """Separate model width, optimizer storage and CUDA memory at stage start."""
+    import json
+    parameter_bytes=sum(p.numel()*p.element_size() for p in model.parameters())
+    optimizer_bytes=sum(v.numel()*v.element_size() for state in optimizer.state.values()
+                        for v in state.values() if torch.is_tensor(v))
+    report={'parameters':sum(p.numel() for p in model.parameters()),
+            'parameter_MiB':parameter_bytes/2**20,'optimizer_MiB':optimizer_bytes/2**20,
+            'batch_size':batch_size,'layout':getattr(model,'backbone_layout','mul_ir'),
+            'blocks':{name:sum(p.numel() for p in child.parameters()) for name,child in model.named_children()},
+            'optimizer_groups':[{'name':g.get('name','unnamed'),'lr':g['lr'],
+                'weight_decay':g.get('weight_decay',0.),
+                'parameters':sum(p.numel() for p in g['params'])} for g in optimizer.param_groups]}
+    if torch.device(device).type=='cuda':
+        props=torch.cuda.get_device_properties(device)
+        report.update(gpu=props.name,device_MiB=props.total_memory/2**20)
+    logging.info('Runtime inventory %s',json.dumps(report))
+
+
 def _panel(loader, maximum):
     indices = np.linspace(0, len(loader.dataset)-1, min(maximum,len(loader.dataset))).round().astype(int)
     return torch_geometric.dataloader.DataLoader([loader.dataset[int(i)] for i in np.unique(indices)], batch_size=1, shuffle=False)

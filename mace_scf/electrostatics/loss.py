@@ -441,16 +441,60 @@ class WeightedLoss(torch.nn.Module):
             else:
                 self.loss_fns[name] = function
         
-    def forward(self, ref: Batch, pred: TensorDict) -> torch.Tensor:
+    def normalizers(self, ref: Batch):
+        """Full-batch denominators for exact graph-wise gradient accumulation.
+
+        Native means include unobserved zero-weight entries; electronic label
+        means instead divide by observed weight. Keep that distinction when
+        fitting a large optimizer batch in smaller device batches.
+        """
+        result={}
+        atom_means={'forces','atomic_multipoles','esps','field_features'}
+        label_means={'fourier_density','fermi_level','workfunction'}
+        unsupported={'fixedpoint_scf_stability','fermi_level_gradient','final_terms_fixedpoint_scf_stability'}
+        for name,function in self.loss_fns.items():
+            if not self.loss_weights[name]:continue
+            if name in unsupported:
+                raise ValueError(f'Graph accumulation is not defined for trajectory loss {name}')
+            if isinstance(function,WeightedFourierPotential):
+                result[(name,'spatial')]=(ref.weight*ref.fourier_potential_weight).sum()
+                if function.vacuum_weight:
+                    _,weight=vacuum_reference_weights(ref,ref.total_charge)
+                    result[(name,'vacuum')]=weight.sum()
+            elif name in label_means:
+                result[(name,'')]=(ref.weight*getattr(ref,name+'_weight')).sum()
+            elif name=='vacuum_potential':
+                result[(name,'')]=vacuum_observation_weight(ref).sum()
+            else:
+                result[(name,'')]=ref.weight.new_tensor(len(ref.positions) if name in atom_means else ref.num_graphs)
+        return result
+
+    @property
+    def supports_graph_accumulation(self):
+        trajectory={'fixedpoint_scf_stability','fermi_level_gradient','final_terms_fixedpoint_scf_stability'}
+        return not any(self.loss_weights.get(name,0) for name in trajectory)
+
+    def forward(self, ref: Batch, pred: TensorDict, normalizers=None) -> torch.Tensor:
         loss = 0.
+        local_normalizers=self.normalizers(ref) if normalizers is not None else None
         # set weights to discount non-converged scf
         if "loss_weight_modifier" in pred:
+            if normalizers is not None:
+                raise ValueError('Prediction-dependent convergence weights require an unsplit batch')
             data_weight = torch.clone(ref.weight)
             ref.weight = ref.weight * pred["loss_weight_modifier"]
         for name, func in self.loss_fns.items():
             if self.loss_weights[name] == 0:
                 continue
-            loss_component = self.loss_weights[name] * func(ref, pred)
+            if normalizers is not None and isinstance(func,WeightedFourierPotential):
+                value=sum(numerator/normalizers[(name,part)].to(numerator).clamp_min(1.e-30)
+                          for part,(numerator,_) in func.statistics(ref,pred).items())
+            elif normalizers is not None:
+                local=local_normalizers[(name,'')]
+                value=func(ref,pred)*local/normalizers[(name,'')].to(local).clamp_min(1.e-30)
+            else:
+                value=func(ref,pred)
+            loss_component = self.loss_weights[name] * value
             loss += loss_component
         if "loss_weight_modifier" in pred:
             ref.weight = data_weight
