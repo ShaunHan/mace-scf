@@ -1,7 +1,8 @@
-"""Collect training labels directly from VASP outputs."""
+"""Collect training labels directly from VASP outputs. Edit the settings below."""
 from pathlib import Path
 import multiprocessing as mp
 
+import h5py
 import numpy as np
 from ase.io import read, write
 from pymatgen.io.vasp import Chgcar, Locpot, Outcar
@@ -9,14 +10,19 @@ from pymatgen.io.vasp import Chgcar, Locpot, Outcar
 
 BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
 PROTO_BASE_PATH = BASE_PATH.with_name("dft_proto")
+CHUNK_SIZE = 5
 N_PROCS = 64
+REUSE_HDF = False
+K_CUTOFF = 18.0
+FOURIER_CUTOFF_FACTOR = 1.25
 DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 6.0
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
-UNCONVERGED_IDS = [279, 1668]
+SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
+HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
@@ -24,11 +30,11 @@ OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 
 
 def get_output_dirs():
-    paths = sorted(BASE_PATH.glob("vasp_*/output_*"), key=lambda p: (
-        int(p.parent.name.split("_")[1]), int(p.name.split("_")[1])))
-    return [p for p in paths if p.is_dir() and
-            int(p.parent.name.split("_")[1]) + int(p.name.split("_")[1])
-            not in UNCONVERGED_IDS]
+    folders = sorted((p for p in BASE_PATH.glob("vasp_*") if p.is_dir()),
+                     key=lambda p: int(p.name.split("_")[1]))
+    return [folder / f"output_{i}" for folder in folders for i in range(CHUNK_SIZE)
+            if int(folder.name.split("_")[1]) + i not in SKIP_IDS
+            and (folder / f"output_{i}").is_dir()]
 
 
 def read_grid(path, atoms, reader):
@@ -50,18 +56,71 @@ def hermitian(coefficients):
     return 0.5 * (coefficients + coefficients[partner].conj())
 
 
-def add_fourier_targets(atoms, grid, sigmas, prefix, charge=None):
+def truncate_fft(coefficients, shape):
+    if np.any(np.asarray(shape) > coefficients.shape):
+        raise ValueError(f"Requested FFT shape {tuple(shape)} exceeds {coefficients.shape}")
+    axes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
+    indices = np.ix_(*[k % n for k, n in zip(axes, coefficients.shape)])
+    return hermitian(coefficients[indices] * np.prod(shape) / coefficients.size)
+
+
+def fourier_data(outdir, atoms, parameters, axis):
+    """Cache unsmoothed Fourier grids; widths and vacuum sampling remain editable."""
+    names = ["fourier_density"] if DENSITY_SIGMAS else []
+    if POTENTIAL_SIGMAS:
+        names += ["fourier_potential", "proto_fourier_potential"]
+        if axis is not None:
+            names += ["planar_potential"]
+    if not names:
+        return {}
+    path = outdir / HDF_NAME
+    if REUSE_HDF and path.is_file():
+        with h5py.File(path, "r") as handle:
+            if handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle):
+                raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
+            return {name: handle[name][...] for name in names}
+
+    shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int)
+    data = {}
+    if DENSITY_SIGMAS:
+        density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
+        final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
+        if density.shape != final_density.shape:
+            raise ValueError(f"AECCAR grid mismatch: {outdir}")
+        density -= final_density
+        density /= atoms.get_volume()  # Signed deformation charge, in e/Angstrom^3.
+        data["fourier_density"] = truncate_fft(np.fft.fftn(density), shape)
+        del density, final_density
+    if POTENTIAL_SIGMAS:
+        if not parameters["lvhar"]:
+            raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
+        potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
+        proto_dir = PROTO_BASE_PATH / outdir.relative_to(BASE_PATH)
+        proto = read_grid(proto_dir / "LOCPOT", atoms, Locpot)
+        if potential.shape != proto.shape:
+            raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
+        if axis is not None:
+            data["planar_potential"] = potential.mean(axis=tuple(i for i in range(3) if i != axis))
+        potential -= proto  # No mean subtraction; retain the potential zero mode.
+        data["fourier_potential"] = truncate_fft(np.fft.fftn(potential), shape)
+        data["proto_fourier_potential"] = truncate_fft(np.fft.fftn(proto), shape)
+    temporary = path.with_suffix(".tmp")
+    with h5py.File(temporary, "w") as handle:
+        handle.attrs["k_cutoff"] = K_CUTOFF
+        for name, values in data.items():
+            handle.create_dataset(name, data=values)
+    temporary.replace(path)
+    return data
+
+
+def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     """Keep the existing Gaussian widths, FFT normalization and target names."""
-    coefficients = np.fft.fftn(grid)
     reciprocal = 2 * np.pi * np.linalg.inv(atoms.cell.array).T
     for sigma in sigmas:
-        cutoff = 1.25 * 0.75 * 3.0 * 2**0.3 / float(sigma)
+        cutoff = FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / float(sigma)
         shape = 2 * np.ceil(cutoff * atoms.cell.lengths() / (2 * np.pi)).astype(int)
-        if np.any(shape > grid.shape):
-            raise ValueError(f"VASP grid {grid.shape} is too small for sigma={sigma}")
+        target = truncate_fft(coefficients, shape)
         axes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
-        indices = np.ix_(*[k % n for k, n in zip(axes, grid.shape)])
-        target = hermitian(coefficients[indices] * np.prod(shape) / grid.size)
         wavevectors = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1) @ reciprocal
         target *= np.exp(-0.5 * float(sigma)**2 * np.sum(wavevectors**2, axis=-1))
         if charge is not None:
@@ -71,7 +130,7 @@ def add_fourier_targets(atoms, grid, sigmas, prefix, charge=None):
             [target.real, target.imag]).astype(np.float32)
 
 
-def add_vacuum_target(atoms, potential, axis, correction):
+def add_vacuum_target(atoms, planar, axis, correction):
     key = f"vacuum_{'xyz'[axis]}frac"
     if VACUUM_PLANE and set(VACUUM_PLANE) != {key}:
         raise ValueError(f"For this VASP IDIPOL, specify only {key}")
@@ -82,7 +141,6 @@ def add_vacuum_target(atoms, potential, axis, correction):
         fraction = (correction - 0.5 * np.min(distances[distances > 1e-8])) % 1.0
     if not np.isfinite(fraction) or not 0 <= fraction < 1:
         raise ValueError("Vacuum fraction must be in [0, 1)")
-    planar = potential.mean(axis=tuple(i for i in range(3) if i != axis))
     coordinate = fraction * len(planar)
     index = int(np.floor(coordinate))
     weight = coordinate - index
@@ -139,32 +197,17 @@ def collect_job(outdir):
         "config_fermi_level_weight": float(slab),
         "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
     }
+    data = fourier_data(outdir, atoms, parameters, axis)
     if DENSITY_SIGMAS:
-        density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
-        final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
-        if density.shape != final_density.shape:
-            raise ValueError(f"AECCAR grid mismatch: {outdir}")
-        density -= final_density
-        density /= atoms.get_volume()  # Signed deformation charge, in e/Angstrom^3.
-        add_fourier_targets(atoms, density, DENSITY_SIGMAS, "vasp_rho", charge)
-        del density, final_density
-
+        add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
     if POTENTIAL_SIGMAS:
-        if not parameters["lvhar"]:
-            raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
-        potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
-        proto_dir = PROTO_BASE_PATH / outdir.relative_to(BASE_PATH)
-        proto = read_grid(proto_dir / "LOCPOT", atoms, Locpot)
-        if potential.shape != proto.shape:
-            raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
         if slab:
             if np.all(np.asarray(parameters["dipol"]) == -100):
                 raise ValueError(f"Specify DIPOL in VASP to locate its correction plane: {outdir}")
             correction = float((parameters["dipol"][axis] + 0.5) % 1.0)
-            add_vacuum_target(atoms, potential, axis, correction)
-        potential -= proto  # No mean subtraction; retain the potential zero mode.
-        add_fourier_targets(atoms, potential, POTENTIAL_SIGMAS, "vasp_phi")
-        add_fourier_targets(atoms, proto, POTENTIAL_SIGMAS, "vasp_proto_phi")
+            add_vacuum_target(atoms, data["planar_potential"], axis, correction)
+        add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
+        add_fourier_targets(atoms, data["proto_fourier_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 
