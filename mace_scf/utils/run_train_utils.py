@@ -248,6 +248,10 @@ def build_model(
             initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
         else:
             initialize(model, train_loader, args.device)
+            from mace_scf.electrostatics.potential import initialize_vacuum_reference
+            vacuum_options = args.train_schedule[0]['loss'].get('vacuum_potential', {})
+            initialize_vacuum_reference(model, train_loader, args.device,
+                relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True)
         condition_energy(model, train_loader, args.device)
     if getattr(args, 'enable_cueq', False) and not native_cueq:
         from .foundation import accelerate_backbone

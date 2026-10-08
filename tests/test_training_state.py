@@ -20,11 +20,15 @@ def test_log_uses_requested_density_and_dipole_names(caplog):
     class Logger:
         def log(self,metrics):pass
     metrics={'rmse_rho':.001,'rmse_mu_per_atom':.002,'rmse_esp':.1,'rmse_esp_vac':.2,
+             'rmse_esp_vac_rel':.1,'rmse_fermi_level':.2,'rmse_fermi_level_rel':.05,
              'esp_vacuum_enabled':True,'rmse_wf_abs':.15,'rmse_wf_rel':.14}
     with caplog.at_level(logging.INFO):valid_err_log(1.,metrics,Logger(),'ElectrostaticRMSE',5)
     assert 'RMSE_dip_per_atom=2.0000 meA' in caplog.text
     assert 'RMSE_rho=1.0000 me/A^3' in caplog.text
     assert 'RMSE_WF(abs/rel)=150.0000/140.0000 meV' in caplog.text
+    assert 'RMSE_EF(abs/rel)=200.0000/50.0000 meV' in caplog.text
+    assert 'RMSE_ESPvac(abs/rel)=200.0000/100.0000 mV' in caplog.text
+    assert 'RMSE_ESP=100.0000 mV' in caplog.text
     assert 'RMSE_MU' not in caplog.text and 'RMSE_RHO' not in caplog.text
 
 
@@ -120,7 +124,9 @@ def test_allocation_retry_preserves_update_and_discards_partial_gradients(monkey
     expected_next=torch.rand(())
     torch.random.set_rng_state(expected_rng)
     _,metrics=take_step(model,wrapper,loss,batch.clone(),optimizer,ema,.5,'cuda')
-    assert calls==[4,2,2,1,1,1,1]
+    # Four scalar-only predictions precede the four gradient microbatches;
+    # that prepass restores the RNG and never steps the optimizer/EMA.
+    assert calls==[4,2,2,1,1,1,1,1,1,1,1]
     assert metrics['device_batch_size']==1
     assert ema.num_updates==reference_ema.num_updates==1
     torch.testing.assert_close(torch.rand(()),expected_next,atol=0.,rtol=0.)
@@ -329,14 +335,77 @@ def test_yaml_false_is_not_true_for_amsgrad(tmp_path):
 
 def test_bulk_does_not_dilute_vacuum_observation():
     from types import SimpleNamespace
-    from mace_scf.electrostatics.loss import weighted_vacuum_potential
+    from mace_scf.electrostatics.loss import WeightedVacuumPotential
     ref = SimpleNamespace(weight=torch.ones(2), vacuum_potential=torch.tensor([1.,0.]),
                           vacuum_potential_weight=torch.ones(2), fourier_potential_weight=torch.ones(2),
                           fourier_proto_potential_weight=torch.ones(2),
                           pbc=torch.tensor([[True, True, False], [True, True, True]]))
     pred = {'vacuum_potential': torch.tensor([2., 0.]),
             'vacuum_potential_dft': torch.tensor([1., 0.])}
-    torch.testing.assert_close(weighted_vacuum_potential(ref, pred), torch.tensor(1.))
+    torch.testing.assert_close(WeightedVacuumPotential(relative=False)(ref, pred), torch.tensor(1.))
+
+
+def test_relative_scalar_losses_are_weighted_pair_differences():
+    from types import SimpleNamespace
+    from mace_scf.electrostatics.loss import WeightedLoss
+    ref = SimpleNamespace(weight=torch.tensor([1.,2.,3.,1.]),
+        fermi_level=torch.tensor([2.,4.,8.,float('nan')]), fermi_level_weight=torch.tensor([1.,1.,1.,0.]))
+    prediction = torch.tensor([3.,3.,11.,float('nan')], requires_grad=True)
+    loss = WeightedLoss({'fermi_level':10})
+    value = loss(ref, {'fermi_level':prediction})
+    w = ref.weight[:3]; e = prediction[:3]-ref.fermi_level[:3]
+    pair = ((e[:,None]-e[None,:]).square()*w[:,None]*w[None,:]).sum()/(2*(w.sum().square()-w.square().sum()))
+    torch.testing.assert_close(value, 10*pair)
+    shifted = prediction+7.
+    torch.testing.assert_close(loss(ref, {'fermi_level':shifted}), value)
+    grad, = torch.autograd.grad(value, prediction)
+    torch.testing.assert_close(grad.sum(), torch.zeros(()), atol=1.e-12, rtol=0.)
+    assert grad[-1] == 0
+    absolute = WeightedLoss({'fermi_level':{'weight':10,'relative':False}})
+    torch.testing.assert_close(absolute(ref, {'fermi_level':prediction}), 10*(e.square()*w).sum()/w.sum())
+    with pytest.raises(TypeError, match='boolean'):
+        WeightedLoss({'fermi_level':{'weight':1,'relative':'False'}})
+
+
+def test_relative_scalar_microbatches_preserve_loss_and_gradient():
+    from types import SimpleNamespace
+    from mace_scf.electrostatics.loss import WeightedLoss
+    def reference(indices):
+        return SimpleNamespace(weight=torch.tensor([1.,2.,1.])[indices],
+            fermi_level=torch.tensor([1.,2.,-1.])[indices],
+            fermi_level_weight=torch.tensor([1.,0.,1.])[indices])
+    loss = WeightedLoss({'fermi_level':{'weight':100}})
+    theta = torch.tensor([2.,1.,2.], requires_grad=True)
+    full = reference(slice(None))
+    value = loss(full, {'fermi_level':theta})
+    gradient, = torch.autograd.grad(value, theta)
+    norms = loss.normalizers(full)
+    moments = loss.relative_moments(full, {'fermi_level':theta})
+    norms.update({key: m[1]/m[0].clamp_min(1.e-30) for key,m in moments.items()})
+    partial = sum(loss(reference(slice(i,i+1)), {'fermi_level':theta[i:i+1]}, normalizers=norms) for i in range(3))
+    part_grad, = torch.autograd.grad(partial,theta)
+    torch.testing.assert_close(partial,value)
+    torch.testing.assert_close(part_grad,gradient)
+    assert partial > 0
+    singleton = loss(reference(slice(0,1)), {'fermi_level':theta[:1]})
+    assert singleton == 0
+    with pytest.raises(ValueError, match='whole optimizer-batch mean'):
+        loss(reference(slice(0,1)), {'fermi_level':theta[:1]}, normalizers=loss.normalizers(full))
+
+
+def test_relative_readout_audit_selects_fluctuations_without_validation_fitting():
+    from mace_scf.utils.diagnostics import _ridge_report
+    t=torch.linspace(-1.,1.,32,dtype=torch.float64)
+    v=torch.linspace(-.9,.9,11,dtype=torch.float64)
+    x=torch.stack((torch.ones_like(t),t,t.square()),-1)
+    z=torch.stack((torch.ones_like(v),v,v.square()),-1)
+    before=_ridge_report(x,2*t,z,2*v,relative=True)
+    after=_ridge_report(x,2*t+8.,z,2*v-12.,relative=True)
+    assert before['selected_ridge']==after['selected_ridge']
+    for name in ('training_before','training_after','development_before','development_after'):
+        assert before[name]==pytest.approx(after[name],abs=1.e-12)
+    assert before['development_after']<before['development_before']
+    assert after['development_absolute_after']>10.
 
 
 def test_saved_solver_policy_and_original_v367_state_dict():

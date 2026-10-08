@@ -95,6 +95,42 @@ def test_finite_trajectory_rotation_invariance():
     torch.testing.assert_close(before['forces']@rotation.T, after['forces'], atol=1.e-9, rtol=1.e-9)
 
 
+@pytest.mark.parametrize('relative', [True, False])
+def test_atomic_vacuum_reference_fit_without_proto(relative):
+    from mace_scf.electrostatics.potential import initialize_vacuum_reference
+    model=small_model()
+    reference=torch.tensor([100.,-35.])
+    graphs=[]
+    for i,(hydrogens,height) in enumerate(((1,12.),(2,12.),(1,15.),(3,18.))):
+        atoms=Atoms('O'+'H'*hydrogens,positions=[[3.,3.,4.]]+[[3.4+j*.3,3.,4.5] for j in range(hydrogens)],
+                    cell=[7,7,height],pbc=[1,1,0])
+        graph=small_data(atoms=atoms,batched=False)
+        geometry=SpectralGeometry(model,torch_geometric.Batch.from_data_list([graph]).to_dict(),graph.positions)
+        shape=torch.tensor(geometry.shape)
+        # Odd shifted Fourier grids, with every retained axial mode observed.
+        graph.fourier_potential=torch.zeros(int(shape.prod()),2)
+        graph.fourier_potential_shape=shape
+        graph.fourier_potential_weight=torch.tensor(1.)
+        graph.fourier_proto_potential_weight=torch.tensor(0.)
+        graph.vacuum_potential_weight=torch.tensor(1.)
+        graph.vacuum_potential=(graph.node_attrs.sum(0)@reference)/torch.linalg.det(graph.cell).abs()
+        if relative: graph.vacuum_potential += 7.
+        graphs.append(graph)
+    loader=torch_geometric.dataloader.DataLoader(graphs,batch_size=2)
+    initialize_vacuum_reference(model,loader,'cpu',relative=relative)
+    torch.testing.assert_close(model.field_dependent_charges_map.vacuum_reference_integrals,reference,atol=1.e-8,rtol=1.e-8)
+
+
+def test_variational_reference_preserves_charge_conjugacy():
+    model=small_model()
+    model.field_dependent_charges_map.vacuum_reference_integrals.copy_(torch.tensor([100.,-35.]))
+    result=evaluate_variational(model,small_data(),steps=12,mode='unroll_scf')
+    eps=1.e-5
+    a=evaluate_variational(model,small_data(.1-eps),steps=12,mode='unroll_scf')['energy']
+    b=evaluate_variational(model,small_data(.1+eps),steps=12,mode='unroll_scf')['energy']
+    torch.testing.assert_close(-(b-a)/(2*eps),result['fermi_level'],atol=2.e-7,rtol=2.e-5)
+
+
 def small_model(widths=(1.5, 3.)):
     torch.set_default_dtype(torch.float64)
     torch.manual_seed(7)

@@ -1,4 +1,4 @@
-# v371: independent physical observations; reference-free 50-step validation.
+# v372: offset-free scalar objectives; reference-free 50-step validation.
 heads:
   default:
     arrays_keys:
@@ -60,7 +60,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch_v371
+checkpoints_dir: checkpoints_IrO2_scratch_v372
 compute_forces: true
 train_schedule:
   0:
@@ -76,8 +76,12 @@ train_schedule:
         weight: 10
         reference: farfield
       fourier_potential: 100
-      vacuum_potential: 100
-      fermi_level: 100
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -100,8 +104,12 @@ train_schedule:
         weight: 10
         reference: farfield
       fourier_potential: 100
-      vacuum_potential: 100
-      fermi_level: 100
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -124,8 +132,12 @@ train_schedule:
         weight: 10
         reference: farfield
       fourier_potential: 100
-      vacuum_potential: 100
-      fermi_level: 100
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:

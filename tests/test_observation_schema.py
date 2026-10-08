@@ -14,7 +14,7 @@ from mace.tools import AtomicNumberTable
 from mace_scf.data import ExtAtomicData
 from mace_scf.data.new_atomic_data import plane_fraction
 from mace_scf.electrostatics.coupled import evaluate_coupled
-from mace_scf.electrostatics.loss import WeightedLoss, weighted_vacuum_potential
+from mace_scf.electrostatics.loss import WeightedLoss, WeightedVacuumPotential
 from tests.test_coupled_response import coupled_model
 from tests.test_spectral_response import small_data
 
@@ -103,7 +103,7 @@ def test_independent_vacuum_loss_does_not_require_fermi_or_spectral_labels():
                           vacuum_potential_weight=torch.tensor([1.,0.]),
                           weight=torch.ones(2), pbc=torch.tensor([[1,1,0],[1,1,1]]))
     value = torch.tensor([3.,7.], requires_grad=True)
-    loss = weighted_vacuum_potential(ref, {'vacuum_potential':value})
+    loss = WeightedVacuumPotential(relative=False)(ref, {'vacuum_potential':value})
     torch.testing.assert_close(loss, torch.tensor(1.))
     torch.testing.assert_close(torch.autograd.grad(loss,value)[0],torch.tensor([2.,0.]))
     with pytest.raises(ValueError, match='not recognised'):
@@ -187,7 +187,7 @@ def test_vacuum_only_main_log(caplog):
     with caplog.at_level(logging.INFO):
         valid_err_log(1.,{'rmse_esp_vac':.1,'esp_vacuum_enabled':True},
                       SimpleNamespace(log=lambda _: None),'ElectrostaticRMSE',0)
-    assert 'RMSE_ESP(tot/vac)=n/a/100.0000 mV' in caplog.text
+    assert 'RMSE_ESPvac(abs/rel)=100.0000/n/a mV' in caplog.text
     assert 'RMSE_WF' not in caplog.text
 
 
@@ -206,15 +206,52 @@ def test_cold_reference_initialization_uses_independent_vacuum_label():
     batch = torch_geometric.Batch.from_data_list([graph])
     before = evaluate_coupled(model,batch.to_dict(),steps=12,compute_force=False)
     graph.vacuum_potential = before['vacuum_potential'][0].detach()+.1
-    objective = WeightedLoss({'vacuum_potential':100.})
+    objective = WeightedLoss({'vacuum_potential':{'weight':100.,'relative':False}})
     batch = torch_geometric.Batch.from_data_list([graph])
     initial = float(objective(batch,before).detach())
     flags = [p.requires_grad for p in model.parameters()]
     options = FixedPointTrainingOptions(mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=12))
-    initialize_reference(model,[batch],'cpu',options,{'vacuum_potential':100.})
+    initialize_reference(model,[batch],'cpu',options,{'vacuum_potential':{'weight':100.,'relative':False}})
     after = evaluate_coupled(model,batch.to_dict(),steps=12,compute_force=False)
     assert float(objective(batch,after).detach()) < initial*.01
     assert flags == [p.requires_grad for p in model.parameters()]
+
+
+def test_relative_cold_fit_is_invariant_to_label_offsets():
+    from mace.tools import torch_geometric
+    from mace_scf.electrostatics.coupled import CoupledResponse, initialize_reference
+    from mace_scf.electrostatics.fixed_point_state import FixedPointTrainingOptions, FixedPointSCFOptions
+    model=coupled_model()
+    model.field_dependent_charges_map=CoupledResponse(
+        node_feats_irreps='4x0e+4x1o',charges_irreps='0e+1o',num_elements=2,potential_widths=[1.5,3.])
+    original=deepcopy(model)
+    with torch.no_grad():
+        model.field_dependent_charges_map.species_level.copy_(torch.tensor([.2,-.4]))
+        model.field_dependent_charges_map.species_source.copy_(torch.tensor([[.3,-.1],[.1,.2]]))
+    graphs=[]
+    for i,n in enumerate((1,2,3,2)):
+        atoms=Atoms('O'+'H'*n,positions=[[3,3,4]]+[[3.4+.3*j,3,4.5] for j in range(n)],
+                    cell=[7,7,12+2*i],pbc=[1,1,0])
+        g=small_data(charge=.1*i,atoms=atoms,batched=False)
+        pred=evaluate_coupled(model,torch_geometric.Batch.from_data_list([g]).to_dict(),steps=12,compute_force=False)
+        for key in ('fermi_level','vacuum_potential'):
+            setattr(g,key,pred[key][0].detach())
+            setattr(g,key+'_weight',torch.tensor(1.))
+        graphs.append(g)
+    options=FixedPointTrainingOptions(mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=12))
+    predictions=[]
+    for offset in (0.,10.):
+        candidate=deepcopy(original)
+        shifted=deepcopy(graphs)
+        for g in shifted:
+            g.fermi_level+=offset;g.vacuum_potential-=2*offset
+        # Deliberately fit through singleton loader batches: centering is
+        # over the entire calibration set, never independently per piece.
+        loader=torch_geometric.dataloader.DataLoader(shifted,batch_size=1)
+        initialize_reference(candidate,loader,'cpu',options,{'fermi_level':100,'vacuum_potential':100})
+        output=evaluate_coupled(candidate,torch_geometric.Batch.from_data_list(graphs).to_dict(),steps=12,compute_force=False)
+        predictions.append(torch.stack((output['fermi_level'],output['vacuum_potential']),-1).detach())
+    torch.testing.assert_close(predictions[0],predictions[1],atol=2.e-7,rtol=2.e-7)
 
 
 def reference_data(model):
@@ -247,7 +284,8 @@ def test_conditional_loss_has_finite_gradients_without_changing_free_predictions
     torch.testing.assert_close(after['total_charge'],data['total_charge'])
     assert after['reference_response']['reference_charge_error'].abs().max()>0
     ref = SimpleNamespace(**data,to_dict=lambda:data)
-    objective = WeightedLoss({'fermi_level':100,'vacuum_potential':100,'fourier_potential':100,
+    objective = WeightedLoss({'fermi_level':{'weight':100,'relative':False},
+                              'vacuum_potential':{'weight':100,'relative':False},'fourier_potential':100,
                               'fourier_density':{'weight':10,'reference':'farfield'}})
     value = objective(ref,after)+after['forces'].square().sum()
     value.backward()

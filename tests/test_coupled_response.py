@@ -111,6 +111,70 @@ def test_common_level_cannot_feed_charge_roundoff():
     assert not torch.equal(before['fermi_level'],after['fermi_level'])
 
 
+@pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
+def test_relative_replay_matches_full_force_training_gradient(mode):
+    from mace_scf.utils.train import _relative_batch_centers
+    from mace_scf.utils.model_training_wrappers import FixedPointWrapper
+    from mace_scf.electrostatics.fixed_point_state import FixedPointTrainingOptions, FixedPointSCFOptions
+    model = coupled_model()
+    graphs = [small_data(charge=q,batched=False) for q in (.1,-.2)]
+    for i,g in enumerate(graphs):
+        g.fermi_level = torch.tensor(.3*i)
+        g.fermi_level_weight = torch.tensor(1.)
+        g.vacuum_potential = torch.tensor(.4*i)
+        g.vacuum_potential_weight = torch.tensor(1.)
+    wrapper = FixedPointWrapper(None, {'forces':True}, FixedPointTrainingOptions(
+        mode=mode,scf=FixedPointSCFOptions(num_scf_steps=50 if mode == 'implicit' else 3,
+                                        scf_tolerance=1.e-11,mixing_parameter=.5)))
+    loss = WeightedLoss({'forces':500,'fermi_level':100,'vacuum_potential':100})
+    full = torch_geometric.Batch.from_data_list(graphs)
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    value = loss(full, wrapper(model, full.to_dict(), training=True))
+    gradients = torch.autograd.grad(value, parameters, allow_unused=True)
+    normalizers = loss.normalizers(full)
+    rng = torch.random.get_rng_state()
+    flags = [p.requires_grad for p in model.parameters()]
+    pieces = [torch_geometric.Batch.from_data_list([g]) for g in graphs]
+    normalizers.update(_relative_batch_centers(model,wrapper,loss,pieces,'cpu'))
+    assert wrapper.output_args['forces']
+    assert [p.requires_grad for p in model.parameters()] == flags
+    torch.testing.assert_close(torch.random.get_rng_state(),rng,rtol=0.,atol=0.)
+    total = 0.
+    model.zero_grad(set_to_none=True)
+    for graph in graphs:
+        piece = torch_geometric.Batch.from_data_list([graph])
+        local = loss(piece,wrapper(model,piece.to_dict(),training=True),normalizers=normalizers)
+        total += local.detach()
+        torch.autograd.backward(local,inputs=parameters)
+    torch.testing.assert_close(total,value,atol=1.e-10,rtol=1.e-10)
+    for p,g in zip(parameters,gradients):
+        if g is None:
+            assert p.grad is None
+        else:
+            torch.testing.assert_close(p.grad,g,atol=1.e-9,rtol=1.e-8)
+
+
+def test_optional_proto_reference_is_one_shared_gauge_and_serializes(tmp_path):
+    model = coupled_model()
+    before = evaluate_coupled(model, small_data(), steps=3)
+    r = model.field_dependent_charges_map
+    with torch.no_grad(): r.vacuum_reference_integrals.copy_(torch.tensor([50.,-20.]))
+    after = evaluate_coupled(model, small_data(), steps=3)
+    shift = (2*50.-20.)/(7*7*12)
+    for key in ('fermi_level','vacuum_potential'):
+        torch.testing.assert_close(after[key]-before[key],torch.tensor([shift]))
+    for key in ('workfunction','forces','density_coefficients','fourier_potential'):
+        torch.testing.assert_close(after[key],before[key],atol=1.e-12,rtol=1.e-12)
+    path=tmp_path/'reference.model';torch.save(model,path)
+    saved=torch.load(path,weights_only=False)
+    restored=evaluate_coupled(saved,small_data(),steps=3)
+    torch.testing.assert_close(restored['vacuum_potential'],after['vacuum_potential'])
+    # A full observed proto spectrum always takes precedence; no double count.
+    r.proto_fitted.fill_(True)
+    actual=evaluate_coupled(model,small_data(),steps=3)
+    torch.testing.assert_close(actual['vacuum_potential'],before['vacuum_potential'])
+
+
 def test_field_only_probes_respect_no_grad_after_force_evaluation():
     model=coupled_model();data=small_data()
     reference=evaluate_coupled(model,data,steps=12)
@@ -172,7 +236,8 @@ def test_electronic_reference_is_not_weight_decayed():
 
 
 @pytest.mark.parametrize('conditioning',[False,True])
-def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels(conditioning):
+@pytest.mark.parametrize('relative',[False,True])
+def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels(conditioning, relative):
     graphs=[]
     for i in range(3):
         atoms=Atoms('O'+'H'*(i+1), positions=[[3.,3.,4.]]+[[3.5+j*.3,3.,4.5] for j in range(i+1)], cell=[7.,7.,12.],pbc=[1,1,0])
@@ -181,8 +246,9 @@ def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels(
         g.fermi_level=torch.tensor(.2*i);g.fermi_level_weight=torch.tensor(float(i!=2))
         g.vacuum_potential=torch.tensor(.3*i);g.vacuum_potential_weight=torch.tensor(float(i!=1))
         g.fourier_potential_weight=torch.tensor(float(i!=1));graphs.append(g)
-    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'dipole':10,'fermi_level':100,
-                       'fourier_potential':100,'vacuum_potential':100})
+    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'dipole':10,
+                       'fermi_level':{'weight':100,'relative':relative},
+                       'fourier_potential':100,'vacuum_potential':{'weight':100,'relative':relative}})
     full=torch_geometric.Batch.from_data_list(graphs)
     theta=torch.tensor(.2,requires_grad=True)
     def prediction(batch):
@@ -201,11 +267,14 @@ def test_loss_accumulation_has_identical_value_and_gradient_with_missing_labels(
             result['reference_response'] = reference
         return result
     reference=loss(full,prediction(full));grad=torch.autograd.grad(reference,theta)[0]
+    normalizers=loss.normalizers(full)
+    for key, moments in loss.relative_moments(full,prediction(full)).items():
+        normalizers[key]=moments[1]/moments[0].clamp_min(1.e-30)
     for parts in ((graphs[:1],graphs[1:]),([graphs[0]],[graphs[1]],[graphs[2]])):
         value=0.;gradient=0.
         for part in parts:
             batch=torch_geometric.Batch.from_data_list(part)
-            item=loss(batch,prediction(batch),normalizers=loss.normalizers(full))
+            item=loss(batch,prediction(batch),normalizers=normalizers)
             value+=item.detach();gradient+=torch.autograd.grad(item,theta)[0]
         torch.testing.assert_close(value,reference)
         torch.testing.assert_close(gradient,grad)
@@ -277,7 +346,7 @@ def test_rotation_and_heterogeneous_batch_invariance():
     # also be invariant to the device partition, including different FFT grids.
     for graph in (first,second):
         graph.energy_weight=torch.tensor(1.);graph.forces_weight=torch.tensor(1.)
-    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'fermi_level':100})
+    loss=WeightedLoss({'energy_per_atom':100,'forces':500,'fermi_level':{'weight':100,'relative':False}})
     full=torch_geometric.Batch.from_data_list([first,second])
     parameters=tuple(p for p in model.parameters() if p.requires_grad)
     out=evaluate_coupled(model,full.to_dict(),steps=3,training=True)
@@ -372,7 +441,7 @@ def test_parseval_and_vacuum_loss_gradients():
     ref,pred,real=observations()
     mse=(real-real.mean((-3,-2,-1),keepdim=True)).square().mean((-3,-2,-1))
     torch.testing.assert_close(spectral_errors(ref,pred,'fourier_potential')[:2],mse[:2])
-    loss=WeightedLoss({'fourier_potential':1,'vacuum_potential':10})(ref,pred)
+    loss=WeightedLoss({'fourier_potential':1,'vacuum_potential':{'weight':10,'relative':False}})(ref,pred)
     torch.testing.assert_close(loss,(mse[0]+2*mse[1])/3+10.)
     loss.backward()
     torch.testing.assert_close(pred['vacuum_potential'].grad,torch.tensor([20.,0.,0.]))
@@ -415,7 +484,9 @@ def test_validation_weighted_global_wf_and_batch_partition():
         assert metric['rmse_wf_abs']==pytest.approx(24.**.5)
         assert metric['rmse_wf_rel']==pytest.approx((24.-(28./6)**2)**.5)
         assert metric['wf_bias']==pytest.approx(28./6)
-        assert loss==pytest.approx(100*(3.+54.))
+        assert loss==pytest.approx(100*(3.+90./11.))
+        assert metric['rmse_esp_vac_rel']==pytest.approx(5.**.5)
+        assert metric['rmse_fermi_level_rel']==pytest.approx((6.-(14./6)**2)**.5)
     for value in values[1:]:assert value[0]==pytest.approx(values[0][0])
 
 

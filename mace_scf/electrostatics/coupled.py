@@ -946,6 +946,7 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('feature_norms', torch.ones(irreps.dim))
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
+        self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('spectral_cutoff', torch.tensor(1.))
         self.register_buffer('deployment_steps', torch.tensor(50))
         self.register_buffer('deployment_mixing', torch.tensor(.5))
@@ -953,6 +954,15 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode}
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        key = prefix+'vacuum_reference_integrals'
+        if key not in state_dict:
+            state_dict = dict(state_dict)
+            state_dict[key] = torch.zeros_like(self.vacuum_reference_integrals)
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
     def set_extra_state(self, state):
         mode = state.get('deployment_mode', 'unroll_scf')
@@ -1114,7 +1124,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         raw = torch.cat((charge[..., None],dipole,response[0][..., 4:]),-1)
         solved = screen_moments(seed,raw,reference,kernel,mask,factors,materialized=materialized)
         solved_v, _ = sample_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),g.tensors)
-        mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset
+        mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset+g.vacuum_reference
         # The last bordered-inverse column is dq/dQ. Its last entry, divided by
         # sum(s), is dmu/dQ for this frozen-coefficient response. Use the exact
         # change of ensemble, retaining every operator/parameter derivative.
@@ -1141,7 +1151,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         result.update(fourier_density=density*g.ngrid,
                       fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
                       fourier_potential=(carrier+regular)*g.ngrid,
-                      vacuum_potential=g.plane(torch.view_as_complex(total.contiguous())),
+                      vacuum_potential=g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference,
                       total_charge=net_charge, reference_charge_error=net_charge-target,
                       reference_charge_stiffness=stiffness)
         masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
@@ -1157,7 +1167,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         values, gradients = sample_spectrum(selected,g.tensors)
         conditional = r(state,chemical,vector,attrs,values,gradients,p0,mask,target,neighbors,
                         include_energy=False,reference_offset=reference)
-        result['fermi_level'] = conditional[1]+model.fermi_level_offset
+        result['fermi_level'] = conditional[1]+model.fermi_level_offset+g.vacuum_reference
         masks['fermi_level'] = use
     result['reference_masks'] = masks
     return result
@@ -1253,8 +1263,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                 forces = -deriv[0] if deriv[0] is not None else torch.zeros_like(positions)
             if compute_stress:
                 stress = deriv[-1]/g.volume[:,None,None] if deriv[-1] is not None else torch.zeros_like(strain)
-        mu = mu+model.fermi_level_offset
-        vacuum = g.plane(torch.view_as_complex(total.contiguous()))
+        mu = mu+model.fermi_level_offset+g.vacuum_reference
+        vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
         smoothing = torch.exp(-.5*(float(r.receiver_widths.max())**2-r.density_width**2)*g.k2)
         output = {'energy':energy, 'forces':forces, 'stress':stress,
             'virials': -stress*g.volume[:,None,None] if stress is not None else None,
@@ -1290,7 +1300,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
 def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
+    from .potential import initialize_vacuum_reference
     initialize_response(model, loader, device)
+    vacuum_options = (loss_config or {}).get('vacuum_potential', {})
+    initialize_vacuum_reference(model, loader, device,
+        relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True)
     r = model.field_dependent_charges_map
     ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
     for batch in calibration_loader(loader):
@@ -1341,7 +1355,7 @@ def initialize_reference(model, loader, device, options, loss_config):
     including force labels. No validation correction or extra head is fitted.
     """
     from .potential import _target_fft, target_mode_mask
-    from .loss import WeightedLoss, vacuum_reference_weights
+    from .loss import WeightedLoss, RelativeScalarLoss, vacuum_reference_weights
     r = model.field_dependent_charges_map
     nlevels = r.species_level.numel()
     original = torch.cat((r.species_level, r.species_source.flatten())).clone()
@@ -1355,6 +1369,9 @@ def initialize_reference(model, loader, device, options, loss_config):
         return float(value.get('weight', 0.)) if isinstance(value,dict) else float(value)
     scales = original.new_tensor([weight('fourier_potential'), weight('fermi_level'), weight('vacuum_potential')])
     grams = original.new_zeros((3,size,size)); right = original.new_zeros((3,size)); counts = original.new_zeros(3)
+    design_sums = original.new_zeros((3,size)); target_sums = original.new_zeros(3)
+    weight_squares = original.new_zeros(3)
+    objective = WeightedLoss(loss_config)
     modes = model.training
     flags = [p.requires_grad for p in model.parameters()]
     try:
@@ -1384,8 +1401,8 @@ def initialize_reference(model, loader, device, options, loss_config):
                     raise RuntimeError('Cold reference model is not affine; initialization must precede training')
                 result, fields = observe(state,*args,screened=False)
                 spectrum = torch.where(active[...,None],geom.expand_spectrum(fields[1]+fields[2]),0.)
-                return (spectrum.flatten(1),(result[1]+model.fermi_level_offset)[:,None],
-                        geom.plane(torch.view_as_complex(geom.expand_spectrum(fields[0]).contiguous()))[:,None])
+                return (spectrum.flatten(1),(result[1]+model.fermi_level_offset+geom.vacuum_reference)[:,None],
+                        (geom.plane(torch.view_as_complex(geom.expand_spectrum(fields[0]).contiguous()))+geom.vacuum_reference)[:,None])
             baseline = predict(zero)
             columns = [[],[],[]]
             for i in range(size):
@@ -1400,6 +1417,15 @@ def initialize_reference(model, loader, device, options, loss_config):
                 grams[j] += torch.einsum('bkn,bkm,b->nm',design,design,w)
                 right[j] += torch.einsum('bkn,bk,b->n',design,residual,w)
                 counts[j] += w.sum()
+                if j:
+                    design_sums[j] += (design[:,0,:]*w[:,None]).sum(0)
+                    target_sums[j] += (residual[:,0]*w).sum()
+                    weight_squares[j] += w.square().sum()
+        for j, name in ((1, 'fermi_level'), (2, 'vacuum_potential')):
+            if getattr(objective.loss_fns.get(name), 'relative', False) and counts[j] > 0:
+                grams[j] -= torch.outer(design_sums[j], design_sums[j])/counts[j]
+                right[j] -= design_sums[j]*target_sums[j]/counts[j]
+                counts[j] -= weight_squares[j]/counts[j]
         scales = torch.where(counts>0,scales/counts.clamp_min(1.e-30),0.)
         matrix = (grams*scales[:,None,None]).sum(0)
         rhs = (right*scales[:,None]).sum(0)
@@ -1409,23 +1435,31 @@ def initialize_reference(model, loader, device, options, loss_config):
         keep = values>values.max().clamp_min(1.e-30)*1.e-10
         proposal = ((vectors[:,keep]@((vectors[:,keep].T@(rhs/units))/values[keep]))/units
                     if bool(keep.any()) else original)
-        objective = WeightedLoss(loss_config)
         model.requires_grad_(False)
         best, best_score, scores = original.clone(), float('inf'), []
         for fraction in (0.,1.,.5,.25):
             candidate = original+fraction*(proposal-original); put(candidate)
-            total, count = 0., 0
+            sums, scalar = {}, {}
             for batch in loader:
                 batch=batch.to(device)
                 output=evaluate_coupled(model,batch.to_dict(),steps=options.scf.num_scf_steps,
                     mode=options.mode,compute_force=weight('forces')>0,mixing=options.scf.mixing_parameter)
-                value=float(objective(batch,output)); total+=value*batch.num_graphs;count+=batch.num_graphs
-            score=total/max(count,1)
+                denominators = objective.normalizers(batch)
+                for name, function in objective.loss_fns.items():
+                    if not objective.loss_weights[name]: continue
+                    if isinstance(function, RelativeScalarLoss):
+                        scalar[name] = scalar.get(name, 0.)+function.moments(batch, output)
+                    else:
+                        denominator = denominators[(name, 'spatial' if name == 'fourier_potential' else '')]
+                        value = function(batch, output)
+                        sums[name] = sums.get(name, 0.)+torch.stack((value*denominator, denominator))
+            score = sum(objective.loss_weights[name]*float(pair[0]/pair[1].clamp_min(1.e-30)) for name,pair in sums.items())
+            score += sum(objective.loss_weights[name]*float(objective.loss_fns[name].from_moments(values)) for name,values in scalar.items())
             if not math.isfinite(score): raise FloatingPointError('Nonfinite training objective in cold reference fit')
             scores.append({'fraction':fraction,'loss':score})
             if score<best_score:best,best_score=candidate.clone(),score
         put(best)
-        logging.info('v366 training-only cold reference fit: rank=%d/%d; full-objective candidates=%s; no held-out calibration',int(keep.sum()),size,scores)
+        logging.info('Training-only cold reference fit: rank=%d/%d; scalar gauges follow the configured relative/absolute objectives; candidates=%s',int(keep.sum()),size,scores)
     except Exception:
         put(original)
         raise

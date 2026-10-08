@@ -59,6 +59,7 @@ class VariationalResponse(nn.Module):
         self.register_buffer("feature_norms", torch.ones(o3.Irreps(node_feats_irreps).dim))
         self.register_buffer("proto_coefficients", torch.zeros(num_elements, 64))
         self.register_buffer("proto_fitted", torch.tensor(False))
+        self.register_buffer("vacuum_reference_integrals", torch.zeros(num_elements))
         self.register_buffer("deployment_steps", torch.tensor(50))
         self.deployment_mode = "implicit"
         self.register_buffer("spectral_cutoff", torch.tensor(1.))
@@ -99,6 +100,10 @@ class VariationalResponse(nn.Module):
         if key not in state_dict:
             state_dict = dict(state_dict)
             state_dict[key] = {"deployment_mode": "implicit"}
+        reference = prefix+'vacuum_reference_integrals'
+        if reference not in state_dict:
+            state_dict = dict(state_dict)
+            state_dict[reference] = torch.zeros_like(self.vacuum_reference_integrals)
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
                                      missing_keys, unexpected_keys, error_msgs)
 
@@ -194,6 +199,13 @@ class SpectralGeometry:
             radial = radial_basis(self.k2, self.cutoff)
             form_factors = torch.einsum("gkr,zr->gkz", radial, self.response.proto_coefficients)
             self.proto = (structure*form_factors).sum(-1)/self.volume[:, None]*active
+        # Without an observed proto spectrum, only its far-vacuum reference
+        # is identifiable from vacuum-minus-deformation labels. For localized
+        # neutral atomic potentials this is -sum(integral(phi_atom))/volume.
+        # It is a shared scalar gauge for EF/vacuum, never a substitute field.
+        integrals = getattr(self.response, 'vacuum_reference_integrals', None)
+        self.vacuum_reference = (self.attrs.sum(1)@integrals/self.volume*self.slab
+            if integrals is not None and not bool(self.response.proto_fitted) else self.volume*0.)
         # Use the adjoint of the ACTUAL retained boundary field. Replacing
         # this with unwrapped z would change its uniform gauge and finite-grid
         # response, breaking the energy/EF/potential conjugacy for charged cells.
@@ -476,6 +488,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
         data["shifts"] = data["shifts"]+torch.einsum("ni,nij->nj", data["shifts"], strain_symmetric[edges])
     local = model.local_part(data, compute_force=compute_force)
     geom = SpectralGeometry(model, data, local.positions)
+    level_reference = model.fermi_level_offset+geom.vacuum_reference
     drive, hardness = response.coefficients(local.all_layer_feats, data["node_attrs"])
     if hasattr(model, "foundation_element_map"):
         # MACE-POLAR uses Cartesian SH input; native graph_longrange uses y,z,x.
@@ -503,7 +516,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
         target.requires_grad_(True)
     constraint = geom.constraint
     if not constant_charge:
-        mu = data["fermi_level"].reshape(-1)-model.fermi_level_offset
+        mu = data["fermi_level"].reshape(-1)-level_reference
         rhs = rhs-mu[:, None, None]*constraint
         constraint = torch.zeros_like(constraint)
         target = torch.zeros_like(target)
@@ -533,9 +546,9 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     if not bool(torch.isfinite(state.detach()).all() & torch.isfinite(residual.detach()).all()):
         raise RuntimeError("Nonfinite electronic state; the optimizer was not updated")
     charge = (state*geom.constraint).sum((1, 2))
-    mu = multiplier+model.fermi_level_offset if constant_charge else data["fermi_level"].reshape(-1)
+    mu = multiplier+level_reference if constant_charge else data["fermi_level"].reshape(-1)
     electronic = (.5*state*operator(state)-state*fixed_drive).sum((1, 2))
-    electronic = electronic-model.fermi_level_offset*charge+geom.counter_energy
+    electronic = electronic-level_reference*charge+geom.counter_energy
     energy = local.energies.sum(-1)+electronic
     # For fixed mu the differentiated mechanical potential is E + mu*Q.
     mechanical = energy if constant_charge else energy+mu*charge
@@ -554,7 +567,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
             stress = derivative/geom.volume[:, None, None] if derivative is not None else torch.zeros_like(strain)
     density, deformation, total = geom.potentials(state)
     dipole = (geom.dipole_map*state[..., None]).sum((1, 2))
-    vacuum = geom.plane(total)
+    vacuum = geom.plane(total)+geom.vacuum_reference
     output = {"energy": energy, "forces": forces, "stress": stress,
               "virials": -stress*geom.volume[:, None, None] if stress is not None else None,
               "density_coefficients": geom.unpack(state[..., :response.coarse_dim]),
@@ -646,6 +659,56 @@ def initialize_response(model, loader, device):
         error = (square-2*solution@rhs+solution@(gram@solution)).clamp_min(0)
         logging.info("Frozen training-only proto fit: spectral component RMS %.6g eV, observations %d", float((error/observations).sqrt()), observations)
     logging.info("Electronic response %s: %d coarse + %d regular coefficients per atom; deployment uses %d steps", type(response).__name__, response.coarse_dim, response.state_irreps.dim-response.coarse_dim, int(response.deployment_steps))
+
+
+@torch.no_grad()
+def initialize_vacuum_reference(model, loader, device, relative=True):
+    """Fit the missing atomic vacuum reference from training observations only.
+
+    Full proto spectra take precedence. Otherwise observed vacuum minus the
+    retained deformation plane determines a small atomic integral model. The
+    relative fit removes one constant from this *reference* regression too.
+    The residual measures its far-vacuum/finite-spectrum approximation.
+    """
+    response = model.field_dependent_charges_map
+    response.vacuum_reference_integrals.zero_()
+    if bool(response.proto_fitted):
+        return
+    from .loss import vacuum_reference_weights
+    designs, targets, weights = [], [], []
+    for batch in loader:
+        batch = batch.to(device)
+        label, weight = vacuum_reference_weights(batch, batch.total_charge)
+        weight = weight*batch.fourier_potential_weight
+        if not bool((weight > 0).any()):
+            continue
+        data = batch.to_dict()
+        geom = SpectralGeometry(model, data, data['positions'])
+        phi = _target_fft(data, 'fourier_potential', 'fourier_potential_shape', geom.shape, geom.volume.dtype)
+        if phi is None:
+            continue
+        complete = (~geom.axial | target_mode_mask(data['fourier_potential_shape'], geom.modes)).all(-1)
+        use = (weight > 0) & complete
+        if bool(use.any()):
+            plane = geom.plane(torch.view_as_complex(phi.contiguous())/geom.ngrid)
+            designs.append((geom.attrs.sum(1)/geom.volume[:,None])[use])
+            targets.append((label-plane)[use])
+            weights.append(weight[use])
+    if not designs:
+        logging.info('No proto spectrum or paired deformation/vacuum reference: scalar gauge remains zero')
+        return
+    x, y, w = torch.cat(designs), torch.cat(targets), torch.cat(weights)
+    if relative:
+        x = x-(x*w[:,None]).sum(0)/w.sum()
+        y = y-(y*w).sum()/w.sum()
+    scale = x.square().mul(w[:,None]).sum(0).sqrt().clamp_min(1.e-12)
+    solution = torch.linalg.lstsq((x/scale*w.sqrt()[:,None]).cpu(), (y*w.sqrt()).cpu(),
+                                  rcond=1.e-10, driver='gelsd').solution.to(x)/scale
+    response.vacuum_reference_integrals.copy_(solution)
+    residual = ((x@solution-y).square()*w).sum()/w.sum()
+    logging.info('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g eV; '
+                 'shared EF/vacuum gauge, no reconstructed proto field',relative,len(y),float(residual.sqrt()))
+
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:
     """Decode one stored three-dimensional FFT shape per graph."""
     values = values.reshape(-1)

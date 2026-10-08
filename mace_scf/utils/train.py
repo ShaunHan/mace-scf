@@ -20,7 +20,10 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.loss import vacuum_observation_weight, vacuum_reference_weights
+from mace_scf.electrostatics.loss import (
+    vacuum_observation_weight, vacuum_reference_weights, RelativeScalarLoss,
+    WeightedFermiLevel, WeightedVacuumPotential,
+)
 
 
 class CheckpointHandler(NativeCheckpointHandler):
@@ -208,12 +211,60 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     return best_epoch
 
 
+def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):
+    """Replay scalar predictions without forces or saved parameter activations.
+
+    Centering each device batch would silently remove all scalar supervision
+    at a device batch of one. Compute the logical-batch offsets first, restore
+    RNG/trainability, and differentiate the same predictions in the main pass.
+    """
+    from copy import copy
+    predictor = copy(wrapper)
+    if hasattr(wrapper, 'output_args'):
+        predictor.output_args = {key: False for key in wrapper.output_args}
+    flags = [p.requires_grad for p in model.parameters()]
+    rng = torch.random.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
+    moments = {}
+    try:
+        model.requires_grad_(False)
+        with torch.no_grad():
+            for piece in pieces:
+                piece = piece.to(device)
+                output = predictor(model, piece.to_dict(), training=True)
+                for key, value in loss_fn.relative_moments(piece, output).items():
+                    moments[key] = moments.get(key, 0.)+value
+                del output, piece
+    finally:
+        for parameter, flag in zip(model.parameters(), flags):
+            parameter.requires_grad_(flag)
+        torch.random.set_rng_state(rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state(cuda_rng, device)
+    return {key: value[1]/value[0].clamp_min(1.e-30) for key, value in moments.items()}
+
+
 def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
               max_grad_norm, device, debug_log_grad_summary=False,
               debug_grad_log_frequency=None, opt_step=0):
     """One atomic optimizer update, differentiating model parameters only."""
     start = time.time()
     model.train()
+    options = getattr(model_eval_wrapper, 'training_options', None)
+    if (getattr(options, 'reference_conditioning', None) == 'electronic'
+            and getattr(loss_fn.loss_fns.get('fermi_level'), 'relative', False)):
+        from copy import copy
+        from dataclasses import replace
+        if not getattr(model_eval_wrapper, '_logged_relative_teacher', False):
+            logging.info('Relative EF gauge: retaining measured-field -> EF supervision; '
+                         'absolute-DFT-EF -> density/potential conditioning is inactive')
+            model_eval_wrapper._logged_relative_teacher = True
+        original_wrapper = model_eval_wrapper
+        model_eval_wrapper = getattr(original_wrapper, '_relative_reference_wrapper', None)
+        if model_eval_wrapper is None:
+            model_eval_wrapper = copy(original_wrapper)
+            model_eval_wrapper.training_options = replace(options, reference_conditioning='fermi_level')
+            original_wrapper._relative_reference_wrapper = model_eval_wrapper
     parameters = [p for group in optimizer.param_groups for p in group["params"] if p.requires_grad]
     # One optimizer batch can use several device batches. Split only after an
     # actual allocation OOM, and remember the successful graph count. The
@@ -230,11 +281,15 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     def backward_batch():
         from mace.tools.torch_geometric import Batch
         total=None
+        denominators = dict(normalizers) if normalizers is not None else None
+        if adaptive and limit < len(graphs) and loss_fn.relative_scalar_losses:
+            pieces = (Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit))
+            denominators.update(_relative_batch_centers(model, model_eval_wrapper, loss_fn, pieces, device))
         pieces=(Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit)) if adaptive else (batch,)
         for piece in pieces:
             piece=piece.to(device)
             output=model_eval_wrapper(model,piece.to_dict(),training=True)
-            loss=loss_fn(pred=output,ref=piece,**({'normalizers':normalizers} if adaptive else {}))
+            loss=loss_fn(pred=output,ref=piece,**({'normalizers':denominators} if adaptive else {}))
             if not bool(torch.isfinite(loss.detach())):
                 raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
             torch.autograd.backward(loss,inputs=parameters)
@@ -266,6 +321,10 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         capacity=limit
         logging.warning('Allocation OOM: retrying the unchanged optimizer batch with at most %d graphs per device batch; no optimizer/EMA update occurred',limit)
     if adaptive:optimizer._device_batch_size=capacity
+    if batch.num_graphs < 2 and getattr(loss_fn, 'relative_scalar_losses', {}) and not getattr(model_eval_wrapper, '_logged_relative_singleton', False):
+        logging.warning('A relative scalar loss needs at least two observed labels in an optimizer batch; '
+                        'singleton batches contribute no scalar pair loss. Device microbatch size may still be one.')
+        model_eval_wrapper._logged_relative_singleton = True
     norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
                                          error_if_nonfinite=True)
     norm_value = float(norm)
@@ -380,6 +439,8 @@ def _evaluate(
     voltage_errors = {"workfunction": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
     scf_residuals = []
     objective_sums = {}
+    scalar_objectives = {}
+    scalar_metrics = {}
     wf_moments = []
     try:
         from mace_scf.utils.diagnostics import ValidationAudit
@@ -404,11 +465,17 @@ def _evaluate(
         output = tensor_dict_to_device(output, device=torch.device("cpu"))
         if validation_audit is not None:
             validation_audit.update(batch, output)
+        for function in (WeightedFermiLevel(), WeightedVacuumPotential()):
+            if output.get(function.key) is not None and getattr(batch, function.key, None) is not None:
+                scalar_metrics[function.key] = scalar_metrics.get(function.key, 0.)+function.moments(batch, output).double()
 
         # Accumulate each objective once using its full-split denominator;
         # an additional per-batch WeightedLoss evaluation would be discarded.
         for key, function in loss_fn.loss_fns.items():
             if loss_fn.loss_weights[key] == 0:
+                continue
+            if isinstance(function, RelativeScalarLoss):
+                scalar_objectives[key] = scalar_objectives.get(key, 0.)+function.moments(batch, output).double()
                 continue
             if hasattr(function, 'statistics'):
                 # Spatial and vacuum labels may live on different graphs.
@@ -546,13 +613,15 @@ def _evaluate(
     Mus_computed = len(delta_mus_list) > 0
     polars_computed = len(delta_polarizability_list) > 0
 
-    avg_loss = sum(loss_fn.loss_weights[key]*values[0]/values[1]
-                   for (key,_),values in objective_sums.items() if values[1]>0)
+    weighted_terms = {key+('/'+part if part else ''):loss_fn.loss_weights[key]*values[0]/values[1]
+                      for (key,part),values in objective_sums.items() if values[1]>0}
+    weighted_terms.update({key:loss_fn.loss_weights[key]*float(loss_fn.loss_fns[key].from_moments(values))
+                           for key,values in scalar_objectives.items() if values[0]>0})
+    avg_loss = sum(weighted_terms.values())
 
     aux = {
         "loss": avg_loss,
-        "weighted_loss_terms": {key+('/'+part if part else ''):loss_fn.loss_weights[key]*values[0]/values[1]
-            for (key,part),values in objective_sums.items() if values[1]>0},
+        "weighted_loss_terms": weighted_terms,
     }
 
     if E_computed:
@@ -656,6 +725,13 @@ def _evaluate(
             # per-batch correction or a shift installed in the deployed model.
             aux['wf_bias'] = float(first/weight)
             aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+    for key, moments in scalar_metrics.items():
+        weight, first, second, _ = moments
+        if weight > 0:
+            name = 'fermi_level' if key == 'fermi_level' else 'esp_vac'
+            aux['rmse_'+name] = float((second/weight).sqrt())
+            aux['rmse_'+name+'_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+            aux[name+'_bias'] = float(first/weight)
     aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
@@ -677,13 +753,14 @@ def valid_err_log(
     if log_errors == "ElectrostaticRMSE" or "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
                   (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
-                   ('rmse_mu_per_atom','RMSE_dip_per_atom','meA'), ('rmse_rho','RMSE_rho','me/A^3'),
-                   ('rmse_fermi_level','RMSE_EF','meV')) if key in eval_metrics]
+                   ('rmse_mu_per_atom','RMSE_dip_per_atom','meA'), ('rmse_rho','RMSE_rho','me/A^3')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
-        if 'rmse_esp' in eval_metrics or 'rmse_esp_vac' in eval_metrics:
-            pieces.append(('RMSE_ESP(tot/vac)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_vac')
-                           if eval_metrics['esp_vacuum_enabled'] or 'rmse_esp_vac' in eval_metrics
-                           else 'RMSE_ESP='+fmt('rmse_esp'))+' mV')
+        if 'rmse_fermi_level' in eval_metrics:
+            pieces.append('RMSE_EF(abs/rel)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
+        if 'rmse_esp' in eval_metrics:
+            pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
+        if 'rmse_esp_vac' in eval_metrics:
+            pieces.append('RMSE_ESPvac(abs/rel)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_wf_abs' in eval_metrics:
             pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))

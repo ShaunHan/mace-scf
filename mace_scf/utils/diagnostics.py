@@ -88,15 +88,27 @@ class ValidationAudit:
         weights=np.array([r['weight'] for r in rows]);weights/=weights.sum()
         mean=weights@error;center=error-mean
         report.update(observed_EF_vac_WF=len(rows), EF_vac_WF_rmse_eV=np.sqrt(weights@error**2).tolist(),
+                      EF_vac_WF_relative_rmse_eV=np.sqrt(weights@center**2).tolist(),
                       EF_vac_WF_bias_eV=mean.tolist(),EF_vac_covariance_eV2=float(weights@(center[:,0]*center[:,1])),
                       WF_absolute_error_quantiles_eV=dict(zip(('median','p90','p99','max'),np.quantile(abs(error[:,2]),[.5,.9,.99,1.]).tolist())))
         report['WF_identity_max_error_eV']=float(abs(error[:,2]-(error[:,1]-error[:,0])).max())
         report['WF_variance_components_eV2']={
             'EF':float(weights@center[:,0]**2), 'vacuum':float(weights@center[:,1]**2),
             'covariance_contribution':float(-2*(weights@(center[:,0]*center[:,1])))}
+        relative_power=weights*center[:,2]**2
+        relative_order=np.argsort(-relative_power)
+        report['WF_centered_squared_error_share_largest_10_percent']=float(
+            relative_power[relative_order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(relative_power.sum(),1.e-30))
+        # A centered population RMSE is not the error after one DFT anchor.
+        # This expectation uses independent anchors from the same weighted
+        # population; an actual MD trajectory can have correlated errors.
+        report['independent_single_anchor_EF_vac_WF_RMSE_eV']=np.sqrt(2*(weights@center**2)).tolist()
+        report['relative_error_scope']='One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.'
         gaps=[r['vacuum_reference_gap'] for r in rows if 'vacuum_reference_gap' in r]
         if gaps:
             report['spectral_minus_measured_vacuum_RMSE_eV']=float(np.sqrt(np.mean(np.square(gaps))))
+            report['spectral_minus_measured_vacuum_bias_eV']=float(np.mean(gaps))
+            report['spectral_minus_measured_vacuum_relative_RMSE_eV']=float(np.std(gaps))
         power=weights*error[:,2]**2
         order=np.argsort(-power)
         report['WF_squared_error_share_largest_10_percent']=float(power[order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(power.sum(),1.e-30))
@@ -157,7 +169,7 @@ def _panel(loader, maximum):
 
 
 def objective_gradients(model, wrapper, loss, loader, device, epoch=0):
-    """Read-only parameter-gradient alignment on one deterministic training graph.
+    """Read-only parameter-gradient alignment on a deterministic training pair.
 
     Report actual weighted gradients before clipping. No parameter, optimizer,
     EMA, random state or .grad buffer is updated. This small panel can expose a
@@ -167,7 +179,10 @@ def objective_gradients(model, wrapper, loss, loader, device, epoch=0):
     if not parameters:
         return {'skipped':'no trainable parameters'}
     index = ((epoch//50)*max(1,len(loader.dataset)//4)) % len(loader.dataset)
-    batch = torch_geometric.Batch.from_data_list([loader.dataset[index]]).to(device)
+    indices = [index]
+    if loss.relative_scalar_losses and len(loader.dataset)>1:
+        indices.append((index+max(1,len(loader.dataset)//2)) % len(loader.dataset))
+    batch = torch_geometric.Batch.from_data_list([loader.dataset[i] for i in indices]).to(device)
     with torch.enable_grad():
         output = wrapper(model,batch.to_dict(),training=True)
         gradients, report = {}, {}
@@ -186,6 +201,10 @@ def objective_gradients(model, wrapper, loss, loader, device, epoch=0):
         for name,function in loss.loss_fns.items():
             if loss.loss_weights[name]:
                 record(name,loss.loss_weights[name]*function(batch,output))
+                if hasattr(function,'relative'):
+                    weights = function.weights(batch)
+                    report[name].update(relative=function.relative, observed_labels=int((weights>0).sum()),
+                                        pair_weight=float(weights.sum()-weights.square().sum()/weights.sum().clamp_min(1.e-30)))
         if 'reference_response' in output:
             record('reference_conditioning',loss.reference_loss(batch,output)+output['energy'].sum()*0.)
         if 'fourier_density' in gradients and 'fourier_farfield_density_dft' in output:
@@ -201,8 +220,8 @@ def objective_gradients(model, wrapper, loss, loader, device, epoch=0):
                 a,b = gradients[left],gradients[right]
                 denominator = a.norm()*b.norm()
                 alignment[left+' / '+right] = float(a@b/denominator) if denominator>0 else None
-    return {'training_index':index,'atoms':len(batch.positions),'terms':report,'cosines':alignment,
-            'scope':'One training graph, before clipping; diagnostic only.'}
+    return {'training_indices':indices,'atoms':len(batch.positions),'terms':report,'cosines':alignment,
+            'scope':'Training pair for relative losses, otherwise one graph; before clipping, diagnostic only.'}
 
 
 def _probe_features(model, data, output):
@@ -219,7 +238,7 @@ def _probe_features(model, data, output):
         torch.stack((sample.mean(), sample.std(correction=0), field.square().mean().sqrt(), dipole))))
 
 
-def _ridge_report(train_x, train_y, valid_x, valid_y):
+def _ridge_report(train_x, train_y, valid_x, valid_y, relative=False):
     """Select regularization on a training-only inner split; report development."""
     if len(train_x)<12 or len(valid_x)<2:
         return {"skipped":"need >=12 observed training and >=2 validation graphs"}
@@ -227,24 +246,34 @@ def _ridge_report(train_x, train_y, valid_x, valid_y):
     inner=torch.arange(len(x))%4==0
     means=x[~inner].mean(0)
     scale=x[~inner].std(0).clamp_min(1.e-6)
-    means[0]=0.
+    if not relative:
+        means[0]=0.
     scale[0]=1.
     a,b=(x-means)/scale,(v-means)/scale
-    baseline=float(y[inner].square().mean())
+    def mse(error):
+        if relative:
+            error=error-error.mean()
+        return float(error.square().mean())
+    target=y[~inner]-y[~inner].mean() if relative else y[~inner]
+    baseline=mse(y[inner])
     candidates=[(baseline,None)]
     for ridge in (1.e-3,.1,10.,1000.):
         gram=a[~inner].T@a[~inner]+ridge*torch.eye(a.shape[1],dtype=a.dtype)
-        coefficient=torch.linalg.solve(gram,a[~inner].T@y[~inner])
-        candidates.append((float((y[inner]-a[inner]@coefficient).square().mean()),ridge))
+        coefficient=torch.linalg.solve(gram,a[~inner].T@target)
+        candidates.append((mse(y[inner]-a[inner]@coefficient),ridge))
     score,ridge=min(candidates,key=lambda item:item[0])
     if ridge is None:
-        return {"selected":"no correction", "inner_RMSE":baseline**.5,
-                "development_RMSE":float(z.square().mean().sqrt())}
-    coefficient=torch.linalg.solve(a.T@a+ridge*torch.eye(a.shape[1],dtype=a.dtype),a.T@y)
-    return {"selected_ridge":ridge,"training_before":float(y.square().mean().sqrt()),
-            "training_after":float((y-a@coefficient).square().mean().sqrt()),
-            "development_before":float(z.square().mean().sqrt()),
-            "development_after":float((z-b@coefficient).square().mean().sqrt()),
+        return {"selected":"no correction", "relative":relative, "inner_RMSE":baseline**.5,
+                "development_RMSE":mse(z)**.5}
+    if relative:
+        a,b=(x-x.mean(0))/scale,(v-x.mean(0))/scale
+    target=y-y.mean() if relative else y
+    coefficient=torch.linalg.solve(a.T@a+ridge*torch.eye(a.shape[1],dtype=a.dtype),a.T@target)
+    return {"selected_ridge":ridge,"relative":relative,"training_before":mse(y)**.5,
+            "training_after":mse(y-a@coefficient)**.5,
+            "development_before":mse(z)**.5,
+            "development_after":mse(z-b@coefficient)**.5,
+            "development_absolute_after":float((z-b@coefficient).square().mean().sqrt()),
             "selection":"training inner split only; diagnostic readout NOT installed"}
 
 
@@ -273,8 +302,8 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
             loader=torch_geometric.dataloader.DataLoader(train_loader.dataset,
                 batch_size=valid_loader.batch_size,shuffle=False,drop_last=False)
             _, train_metrics=evaluate(model,wrapper,loss,ema,loader,device,split='training')
-            keys=('rmse_e_per_atom','rmse_f','rmse_mu_per_atom','rmse_fermi_level','rmse_rho',
-                  'rmse_esp','rmse_esp_vac','rmse_wf_abs','rmse_wf_rel')
+            keys=('rmse_e_per_atom','rmse_f','rmse_mu_per_atom','rmse_fermi_level','rmse_fermi_level_rel','rmse_rho',
+                  'rmse_esp','rmse_esp_vac','rmse_esp_vac_rel','rmse_wf_abs','rmse_wf_rel')
             report={'epoch':epoch,'training_graphs':len(loader.dataset),'validation_graphs':len(valid_loader.dataset),
                 'train':{k:train_metrics[k] for k in keys if k in train_metrics},
                 'validation':{k:validation_metrics[k] for k in keys if k in validation_metrics},
@@ -414,7 +443,8 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
                 if conditional_failures:
                     rows[label]['reference_conditioning_failures'] = conditional_failures
             if all(k in feature_rows for k in ('train','validation')):
-                rows['model_field_EF_readout_probe']=_ridge_report(feature_rows['train'],residual_rows['train'],feature_rows['validation'],residual_rows['validation'])
+                rows['model_field_EF_readout_probe']=_ridge_report(feature_rows['train'],residual_rows['train'],feature_rows['validation'],residual_rows['validation'],
+                    relative=getattr(loss.loss_fns.get('fermi_level'),'relative',False))
             rows['epoch']=epoch
             if all('WF_relative_RMSE_eV' in rows[k] for k in ('train','validation')):
                 train,valid=rows['train'],rows['validation']
