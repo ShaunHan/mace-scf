@@ -1,0 +1,694 @@
+2026-10-08 11:12:09.397 INFO: MACE version: 0.3.16
+2026-10-08 11:12:09.667 INFO: CUDA version: 12.8, CUDA device: 0
+2026-10-08 11:12:09.667 INFO: Configuration: Namespace(config='config.yaml', name='fit_0', seed=7777, work_dir='.', log_dir='./logs', model_dir='.', checkpoints_dir='checkpoints_IrO2_finetune_v372', results_dir='./results', downloads_dir='./downloads', device='cuda', default_dtype='float64', distributed=False, launcher='slurm', log_level='INFO', plot=True, plot_frequency=0, plot_interaction_e=False, r_max=6.0, radial_type='bessel', num_radial_basis=8, num_cutoff_basis=5, pair_repulsion=False, distance_transform='None', apply_cutoff=True, use_last_readout_only=False, use_embedding_readout=False, interaction='RealAgnosticResidualInteractionBlock', interaction_first='RealAgnosticResidualInteractionBlock', max_ell=3, correlation=3, use_reduced_cg=False, use_so3=False, use_agnostic_product=False, num_interactions=2, MLP_irreps='64x0e', radial_MLP='[64, 64, 64]', hidden_irreps='64x0e + 64x1o', edge_irreps=None, use_edge_irreps_first=False, num_channels=None, max_L=None, gate='silu', num_recursion_steps=1, field_si=False, add_local_electron_energy=False, fixedpoint_update_config=None, scaling='rms_forces_scaling', avg_num_neighbors=1, compute_avg_num_neighbors=True, compute_stress=False, compute_forces=True, train_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1735_vasp_sp_train.xyz', valid_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1735_vasp_sp_valid.xyz', valid_fraction=0.1, test_file=None, test_dir=None, multi_processed_test=False, num_workers=0, pin_memory=True, atomic_numbers=None, mean=None, std=None, statistics_file=None, les_arguments=None, E0s='{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}', pseudolabel_replay=False, pseudolabel_replay_compute_stress=False, foundation_filter_elements=True, multiheads_finetuning=True, foundation_head=None, weight_pt_head=1.0, real_pt_data_ratio_threshold=0.1, num_samples_pt=10000, force_mh_ft_lr=False, subselect_pt='random', filter_type_pt='none', allow_random_padding_pt=True, pt_train_file=None, pt_valid_file=None, foundation_model_elements=False, keep_isolated_atoms=False, lora=False, lora_rank=4, lora_alpha=1.0, energy_key=None, forces_key=None, virials_key=None, stress_key=None, dipole_key=None, polarizability_key=None, head_key=None, charges_key=None, elec_temp_key=None, total_spin_key=None, total_charge_key=None, embedding_specs=None, skip_evaluate_heads='pt_head', forces_weight=100.0, swa_forces_weight=100.0, energy_weight=1.0, swa_energy_weight=1000.0, virials_weight=1.0, swa_virials_weight=10.0, stress_weight=1.0, swa_stress_weight=10.0, dipole_weight=1.0, swa_dipole_weight=1.0, swa_polarizability_weight=1.0, polarizability_weight=1.0, config_type_weights={'slab': 1.0, 'bulk': 1.0}, huber_delta=0.01, beta=0.9, beta1_schedulefree=0.9, beta2_schedulefree=0.98, batch_size=4, valid_batch_size=4, lr=0.001, swa_lr=0.001, weight_decay=0.001, lr_params_factors='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}', freeze=None, scheduler='none', lr_factor=0.8, scheduler_patience=50, lr_scheduler_gamma=0.9993, swa=False, start_swa=None, lbfgs=False, ema=True, ema_decay=0.99, max_num_epochs=500, patience=1000, foundation_model='/fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model', foundation_model_kwargs='{}', foundation_model_readout=True, eval_interval=5, keep_checkpoints=False, save_all_checkpoints=False, save_cpu=True, clip_grad=10.0, dry_run=False, enable_cueq=True, only_cueq=False, enable_oeq=False, wandb=False, wandb_dir=None, wandb_project='', wandb_entity='', wandb_name='', wandb_log_hypers=['num_channels', 'max_L', 'correlation', 'lr', 'swa_lr', 'weight_decay', 'batch_size', 'max_num_epochs', 'start_swa', 'energy_weight', 'forces_weight'], amsgrad=False, atomic_multipoles_key=None, electrostatic_potentials_key=None, external_field_key=None, fermi_level_key=None, include_local_electron_energy=False, atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5, kspace_cutoff_factor=1.0, atomic_formal_charges='{}', formal_charges_from_data=False, field_feature_max_l=1, field_feature_widths='[1.5, 3.0]', dont_include_pbc_corrections=False, include_electrostatic_self_interaction=True, valid_set_seed=7777, quadrupole_feature_corrections=False, electrostatic_pbc_method='mixed_periodic', static_bond_transfer_block='OxidationDependentSymmetricPredictionSourceBlock', oxidation_state_mixer='SumOxidationStateMixer', return_electrostatic_potentials=False, train_schedule=[{'name': 'heads', 'start': 0, 'end': 9, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none'), 'freeze_foundation_backbone': True}, {'name': 'stage1', 'start': 10, 'end': 49, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage2', 'start': 50, 'end': 499, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=24, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage3', 'start': 500, 'end': 550, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=50, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}], fixed_point_update_config={'type': <class 'mace_scf.electrostatics.coupled.CoupledResponse'>, 'potential_widths': [1.5, 3.0]}, field_readout_config={'type': <class 'mace_scf.electrostatics.field_blocks.StrictQuadraticFieldEnergyReadout'>}, field_block_weight_decay=0.01, local_charges_weight_decay=0.0, field_feature_norms='None', fermi_level_offset=None, field_norm_factor=1.0, oxidation_state_range='(-6.0, 6.0)', polarizable_charges=False, beta_two=0.999, log_on_test_sets=False, scf_convergence_summary=False, use_linear_final_readout=False, include_field_si=False, use_linear_local_charges=False, atom_density_scaling='None', allow_low_density_pbc=False, override_pbc_checks=False, low_density_pbc_max_volume_per_atom=100.0, wandb_watch='off', wandb_watch_log_freq=50, debug_log_grad_summary=False, fixedpoint_initial_charge_head_scale=0.01, heads={'default': {'arrays_keys': {'forces': 'vasp_forces'}, 'info_keys': {'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}}}, error_table='ElectrostaticRMSE', compute_polarizability=True, restart_latest=False, model='FixedPoint', optimizer='adamw', qeq_charges='autograd', train_hardness=False, read_enegs=False, read_hardness=False, enegs_key=None, default_hardness=2.0)
+2026-10-08 11:12:09.667 INFO: Using the key specifications to parse data:
+2026-10-08 11:12:09.667 INFO: KeySpecification(info_keys={'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}, arrays_keys={'forces': 'vasp_forces'})
+2026-10-08 11:13:44.546 INFO: Training set 1/1 [dipole components: 1308, dipole_correction_zfrac: 1385, dipole_weight: 1385, energy: 1385, external_field: 1385, fermi_level: 1308, fourier_density: 1385, fourier_potential: 1385, total_charge: 1385, vacuum_zfrac: 1385, vacuum_potential: 1308, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1385, forces: 1385]
+2026-10-08 11:13:44.566 INFO: Total Training set [dipole components: 1308, dipole_correction_zfrac: 1385, dipole_weight: 1385, energy: 1385, external_field: 1385, fermi_level: 1308, fourier_density: 1385, fourier_potential: 1385, total_charge: 1385, vacuum_zfrac: 1385, vacuum_potential: 1308, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1385, forces: 1385]
+2026-10-08 11:13:51.291 INFO: Validation set 1/1 [dipole components: 331, dipole_correction_zfrac: 351, dipole_weight: 351, energy: 351, external_field: 351, fermi_level: 331, fourier_density: 351, fourier_potential: 351, total_charge: 351, vacuum_zfrac: 351, vacuum_potential: 331, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 351, forces: 351]
+2026-10-08 11:13:51.292 INFO: Total Validation set [dipole components: 331, dipole_correction_zfrac: 351, dipole_weight: 351, energy: 351, external_field: 351, fermi_level: 331, fourier_density: 351, fourier_potential: 351, total_charge: 351, vacuum_zfrac: 351, vacuum_potential: 331, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 351, forces: 351]
+2026-10-08 11:13:51.292 INFO: Total number of configurations: train=1385, valid=351, tests=[]
+2026-10-08 11:13:51.315 INFO: AtomicNumberTable: (1, 8, 77)
+2026-10-08 11:13:51.315 INFO: Isolated Atomic Energies (E0s) not in training file, using command line argument
+2026-10-08 11:14:02.669 INFO: Atomic energies: [-1.20639624, -1.98686083, -1.75921356]
+2026-10-08 11:14:04.429 INFO: Average number of neighbors: 73.78564068510717
+2026-10-08 11:14:04.443 INFO: computed Fermi level offset -1.7212872324159036
+2026-10-08 11:14:04.443 INFO: using Fermi level offset -1.7212872324159036
+2026-10-08 11:14:04.444 INFO: using normalization for field features None
+2026-10-08 11:14:04.444 INFO: using atom density scaling factors [1. 1. 1.]
+2026-10-08 11:14:04.444 INFO: Building model
+2026-10-08 11:14:04.444 INFO: Hidden irreps: 64x0e + 64x1o
+2026-10-08 11:14:06.076 INFO: Rescaled initial FixedPoint charge heads by 0.01 to keep initial charge predictions small
+2026-10-08 11:14:06.186 INFO: Foundation: exact module adoption, 83 species retained, native neighbour normalization preserved
+2026-10-08 11:14:10.931 INFO: Training-only foundation force scale: 0.187412; local F RMSE 1.26659 -> 0.804824 eV/A; folded into readout weights
+2026-10-08 11:14:10.931 INFO: Fixed training-geometry readout units by layer/irrep: [[1.0042815272472396, 1.0000362355461414], [2.7423730440435286, 1.0959686069785166]]; initial energy function preserved by inverse weight transformation
+2026-10-08 11:14:13.531 INFO: Electronic response CoupledResponse: 4 coarse + 8 regular coefficients per atom; deployment uses 50 steps
+2026-10-08 11:14:17.128 INFO: Training-only atomic vacuum reference: relative=True, labels=1308, residual_RMSE=0.00276693 eV; shared EF/vacuum gauge, no reconstructed proto field
+2026-10-08 11:14:18.234 INFO: SCF CUDA linear algebra: cuSOLVER/cuBLAS selected (process-wide); exact cached matrix-solve derivatives; torch=2.9.1+cu128 CUDA=12.8
+2026-10-08 11:15:03.784 INFO: Training-only cold reference fit: rank=8/9; scalar gauges follow the configured relative/absolute objectives; candidates=[{'fraction': 0.0, 'loss': 2033.0671669950136}, {'fraction': 1.0, 'loss': 1953.4189751224148}, {'fraction': 0.5, 'loss': 1973.2585181226402}, {'fraction': 0.25, 'loss': 1998.1674065285476}]
+2026-10-08 11:15:05.640 INFO: Coupled total-field response: screened moment seed, 2 local potential channels, Gaussian receiver widths [1.5, 0.0, 3.0]
+2026-10-08 11:15:14.458 INFO: Training-only EF reference initialization: offset correction -0.984933 eV
+2026-10-08 11:15:14.458 INFO: Training-only total-energy reference: 3.90156 -> 0.0407916 eV/atom on 64 graphs
+2026-10-08 11:15:17.480 INFO: CuEquivariance ACTIVE: 2 interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=True; electronic response/readouts retain their original coordinates
+2026-10-08 11:15:17.498 INFO: No external LR schedule: the learning rate follows the explicit training stages.
+2026-10-08 11:15:17.500 INFO: restart_latest is False; starting from initialized model and optimizer.
+2026-10-08 11:15:17.500 INFO: FixedPointCore(
+  (node_embedding): LinearNodeEmbeddingBlock(
+    (linear): Linear(83x0e -> 512x0e | 42496 weights)
+  )
+  (radial_embedding): RadialEmbeddingBlock(
+    (bessel_fn): BesselBasis(r_max=6.0, num_basis=8, trainable=False)
+    (cutoff_fn): PolynomialCutoff(p=5, r_max=6.0)
+  )
+  (spherical_harmonics): SphericalHarmonics()
+  (atomic_energies_fn): AtomicEnergiesBlock(energies=[[-4.2675, -5.8644, -7.7931]])
+  (interactions): ModuleList(
+    (0): RealAgnosticResidualNonLinearInteractionBlock(
+      (source_embedding): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=42496
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[42496:1⨯(83,512)] b=[83:1⨯(1,83)] -> C=[512:1⨯(1,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=83 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+        )
+      )
+      (target_embedding): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=42496
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[42496:1⨯(83,512)] b=[83:1⨯(1,83)] -> C=[512:1⨯(1,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=83 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+        )
+      )
+      (linear_up): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=262144
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[262144:1⨯(512,512)] b=[512:1⨯(1,512)] -> C=[512:1⨯(1,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.04]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.04]
+            )
+          )
+        )
+      )
+      (conv_tp): FusedConvolution(
+        (fused): ╭ a=[2048:4⨯(512)] b=[512:1⨯(512)] c=[16:16⨯()] -> D=[8192:16⨯(512)]
+        ╰─ []·a[u]·b[u]·c[]➜D[u] ─ num_paths=16 u=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+        (unfused): ChannelWiseTensorProduct(
+          shared_weights=False, internal_weights=False, weight_numel=2048
+          (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (f): ╭ a=[2048:4⨯(512,1)] b=[512:1⨯(1,512)] c=[16:(1,1)+(3,1)+(5,1)+...] -> D=[8192:(1,512,1)+(3,512,1)+...]
+          ╰─ [ijk]·a[uv]·b[iu]·c[jv]➜D[kuv] ─ num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1
+          SegmentedPolynomial(
+            (m): SegmentedPolynomialFromUniform1dJit()
+            (fallback): SegmentedPolynomialFromUniform1dJit()
+          )
+        )
+      )
+      (conv_tp_weights): RadialMLP(
+        (net): Sequential(
+          (0): Linear(in_features=1032, out_features=64, bias=True)
+          (1): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (2): SiLU()
+          (3): Linear(in_features=64, out_features=64, bias=True)
+          (4): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (5): SiLU()
+          (6): Linear(in_features=64, out_features=64, bias=True)
+          (7): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (8): SiLU()
+          (9): Linear(in_features=64, out_features=2048, bias=True)
+        )
+      )
+      (skip_tp): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=262144
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[262144:1⨯(512,512)] b=[512:1⨯(1,512)] -> C=[2048:(1,512)+(3,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i={1, 3} u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512
+            )
+          )
+        )
+      )
+      (reshape): reshape_irreps()
+      (equivariant_nonlin): GatedEquivariantBlock (2048x0e+512x1o+512x2e+512x3o -> 512x0e+512x1o+512x2e+512x3o | ir_mul)
+      (linear_res): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=1048576
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1048576:1⨯(512,2048)] b=[512:1⨯(1,512)] -> C=[9728:(1,2048)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}
+            )
+          )
+        )
+      )
+      (linear_1): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=1835008
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1835008:(512,2048)+(512,512)+...] b=[8192:(1,512)+(3,512)+...] -> C=[9728:(1,2048)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}
+            )
+          )
+        )
+      )
+      (linear_2): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=1048576
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1048576:4⨯(512,512)] b=[8192:(1,512)+(3,512)+...] -> C=[8192:(1,512)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=4 i={1, 3, 5, 7} u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+            )
+          )
+        )
+      )
+      (density_fn): RadialMLP(
+        (net): Sequential(
+          (0): Linear(in_features=1032, out_features=64, bias=True)
+          (1): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (2): SiLU()
+          (3): Linear(in_features=64, out_features=1, bias=True)
+        )
+      )
+    )
+    (1): RealAgnosticResidualNonLinearInteractionBlock(
+      (source_embedding): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=42496
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[42496:1⨯(83,512)] b=[83:1⨯(1,83)] -> C=[512:1⨯(1,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=83 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+        )
+      )
+      (target_embedding): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=42496
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[42496:1⨯(83,512)] b=[83:1⨯(1,83)] -> C=[512:1⨯(1,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=83 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+            )
+          )
+        )
+      )
+      (linear_up): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=131072
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[131072:2⨯(512,128)] b=[2048:(1,512)+(3,512)] -> C=[512:(1,128)+(3,128)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3} u=512 v=128
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128
+            )
+          )
+        )
+      )
+      (conv_tp): FusedConvolution(
+        (fused): ╭ a=[1280:10⨯(128)] b=[512:4⨯(128)] c=[16:16⨯()] -> D=[5120:40⨯(128)]
+        ╰─ []·a[u]·b[u]·c[]➜D[u] ─ num_paths=86 u=128
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+        (unfused): ChannelWiseTensorProduct(
+          shared_weights=False, internal_weights=False, weight_numel=1280
+          (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (f): ╭ a=[1280:10⨯(128,1)] b=[512:(1,128)+(3,128)] c=[16:(1,1)+(3,1)+(5,1)+...] -> D=[5120:(1,128,1)+(1,128,1)+...]
+          ╰─ [ijk]·a[uv]·b[iu]·c[jv]➜D[kuv] ─ num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1
+          SegmentedPolynomial(
+            (m): SegmentedPolynomialFromUniform1dJit()
+            (fallback): SegmentedPolynomialFromUniform1dJit()
+          )
+        )
+      )
+      (conv_tp_weights): RadialMLP(
+        (net): Sequential(
+          (0): Linear(in_features=1032, out_features=64, bias=True)
+          (1): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (2): SiLU()
+          (3): Linear(in_features=64, out_features=64, bias=True)
+          (4): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (5): SiLU()
+          (6): Linear(in_features=64, out_features=64, bias=True)
+          (7): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (8): SiLU()
+          (9): Linear(in_features=64, out_features=1280, bias=True)
+        )
+      )
+      (skip_tp): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=524288
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[524288:2⨯(512,512)] b=[2048:(1,512)+(3,512)] -> C=[2048:(1,512)+(3,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3} u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+            )
+          )
+        )
+      )
+      (reshape): reshape_irreps()
+      (equivariant_nonlin): GatedEquivariantBlock (2048x0e+512x1o+512x2e+512x3o -> 512x0e+512x1o+512x2e+512x3o | ir_mul)
+      (linear_res): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=327680
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[327680:(128,2048)+(128,512)] b=[512:(1,128)+(3,128)] -> C=[9728:(1,2048)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}
+            )
+          )
+        )
+      )
+      (linear_1): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=1048576
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1048576:(128,2048)+...] b=[5120:(1,128)+(1,128)+...] -> C=[9728:(1,2048)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}
+            )
+          )
+        )
+      )
+      (linear_2): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=1048576
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1048576:4⨯(512,512)] b=[8192:(1,512)+(3,512)+...] -> C=[8192:(1,512)+(3,512)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=4 i={1, 3, 5, 7} u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+            )
+          )
+        )
+      )
+      (density_fn): RadialMLP(
+        (net): Sequential(
+          (0): Linear(in_features=1032, out_features=64, bias=True)
+          (1): LayerNorm((64,), eps=1e-05, elementwise_affine=True)
+          (2): SiLU()
+          (3): Linear(in_features=64, out_features=1, bias=True)
+        )
+      )
+    )
+  )
+  (products): ModuleList(
+    (0-1): 2 x EquivariantProductBasisBlock(
+      (symmetric_contractions): SymmetricContraction(
+        contraction_degree=3, weight_shape=(86, 512)
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[14848:29⨯(512)] b=[8192:16⨯(512)] -> C=[2048:4⨯(512)]
+        │  []·a[u]·b[u]➜C[u] ─────────── num_paths=4 u=512
+        │  []·a[u]·b[u]·b[u]➜C[u] ────── num_paths=86 u=512
+        ╰─ []·a[u]·b[u]·b[u]·b[u]➜C[u] ─ num_paths=1949 u=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+      )
+      (linear): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=524288
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[524288:2⨯(512,512)] b=[2048:(1,512)+(3,512)] -> C=[2048:(1,512)+(3,512)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3} u=512 v=512
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+            )
+          )
+        )
+      )
+    )
+  )
+  (readouts): ModuleList(
+    (0): LinearReadoutBlock(
+      (linear): Linear(512x0e+512x1o -> 1x0e | 512 weights)
+    )
+    (1): NonLinearBiasReadoutBlock(
+      (linear_1): Linear(512x0e+512x1o -> 16x0e | 8192 weights)
+      (non_linearity): Activation [x] (16x0e -> 16x0e)
+      (linear_mid): Linear(16x0e -> 16x0e | 256 weights)
+      (linear_2): Linear(16x0e -> 1x0e | 16 weights)
+    )
+  )
+  (electric_potential_descriptor): GTOElectrostaticFeatures(
+    (density_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (feature_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (self_interaction_terms): GTOSelfInteractionBlock()
+    (realspace_features): RealSpaceFiniteDifferenceElectrostaticFeatures(
+      (self_interaction): GTOSelfInteractionBlock()
+    )
+    (non_periodic_correction_terms): NonPeriodicFeatureCorrections(
+      (self_field): CorrectivePotentialBlock()
+      (displaced_interactions): GTOInternalFieldtoFeaturesBlock()
+    )
+  )
+  (lr_source_maps): ModuleList(
+    (0-1): 2 x GeneralNonLinearBiasReadoutBlock(
+      (equivariant_nonlin): Gate (64x0e -> 64x0e)
+      (linear_1): Linear(512x0e+512x1o -> 64x0e | 32768 weights)
+      (linear_mid): Linear(64x0e -> 64x0e | 4096 weights)
+      (linear_2): Linear(64x0e -> 1x0e+1x1o | 64 weights)
+    )
+  )
+  (field_dependent_charges_map): CoupledResponse(
+    (chemical_scalar): Linear(in_features=512, out_features=64, bias=True)
+    (chemical_vector): Linear(in_features=512, out_features=16, bias=False)
+    (shared): Sequential(
+      (0): Linear(in_features=96, out_features=64, bias=True)
+      (1): SiLU()
+      (2): Linear(in_features=64, out_features=64, bias=True)
+      (3): SiLU()
+    )
+    (vector_out): Linear(in_features=64, out_features=96, bias=True)
+    (scalar_out): Linear(in_features=64, out_features=4, bias=True)
+    (dipole_hardness): Linear(in_features=64, out_features=1, bias=True)
+    (state_scalar): Linear(in_features=3, out_features=64, bias=False)
+    (state_vector): Linear(in_features=3, out_features=16, bias=False)
+    (neighbor_scalar): Linear(in_features=3, out_features=64, bias=False)
+    (neighbor_vector): Linear(in_features=3, out_features=16, bias=False)
+    (neighbor_divergence): Linear(in_features=3, out_features=64, bias=False)
+    (neighbor_gradient): Linear(in_features=3, out_features=16, bias=False)
+    (common_level): Linear(in_features=64, out_features=1, bias=False)
+    (local_source_scalar): Linear(in_features=64, out_features=2, bias=False)
+    (local_source_vector): Linear(in_features=16, out_features=2, bias=False)
+  )
+  (local_electron_energy): Identity()
+  (external_field_contribution): DisplacedGTOExternalFieldBlock()
+  (external_field_contribution_internal): GTOInternalFieldtoFeaturesBlock()
+  (coulomb_energy): GTOElectrostaticEnergy(
+    (density_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (self_interaction_terms): GTOSelfInteractionBlock()
+    (realspace_energy): RealSpaceFiniteDiffereneEnergy(
+      (self_interaction): GTOSelfInteractionBlock()
+    )
+    (monopole_dipole_correction): MonopoleDipoleCorrectionBlock()
+  )
+  (layer_feature_mixer): MultiLayerFeatureMixer(
+    (linears): ModuleList(
+      (0-1): 2 x Linear(512x0e+512x1o -> 512x0e+512x1o | 524288 weights)
+    )
+  )
+)
+2026-10-08 11:15:17.504 INFO: Number of parameters: 10574661
+2026-10-08 11:15:17.504 INFO: Optimizer: AdamW (
+Parameter Group 0
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: embedding
+    weight_decay: 0.0
+
+Parameter Group 1
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: interactions_no_decay
+    weight_decay: 0.0
+
+Parameter Group 2
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: products
+    weight_decay: 0.001
+
+Parameter Group 3
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: readouts
+    weight_decay: 0.0
+
+Parameter Group 4
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: lr_source_maps
+    weight_decay: 0.0
+
+Parameter Group 5
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: field_dependent_charges_map
+    weight_decay: 0.01
+
+Parameter Group 6
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: electronic_references
+    weight_decay: 0.0
+
+Parameter Group 7
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: layer_feature_mixer
+    weight_decay: 0.001
+)
+2026-10-08 11:15:17.504 INFO: Foundation feature extractor frozen=True; energy/electronic readouts remain trainable
+2026-10-08 11:15:17.505 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
+2026-10-08 11:15:17.505 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-08 11:15:17.505 INFO: Setting global learning rate to 0.001
+2026-10-08 11:15:17.519 INFO: Runtime inventory {"parameters": 10574661, "parameter_MiB": 80.67826080322266, "optimizer_MiB": 0.0, "batch_size": 4, "layout": "ir_mul", "blocks": {"node_embedding": 42496, "radial_embedding": 0, "spherical_harmonics": 0, "atomic_energies_fn": 0, "interactions": 8205190, "products": 1136640, "readouts": 8993, "electric_potential_descriptor": 0, "lr_source_maps": 73856, "field_dependent_charges_map": 58910, "local_electron_energy": 0, "external_field_contribution": 0, "external_field_contribution_internal": 0, "coulomb_energy": 0, "layer_feature_mixer": 1048576}, "optimizer_groups": [{"name": "embedding", "lr": 0.001, "weight_decay": 0.0, "parameters": 42496}, {"name": "interactions_no_decay", "lr": 0.001, "weight_decay": 0.0, "parameters": 8205190}, {"name": "products", "lr": 0.001, "weight_decay": 0.001, "parameters": 1136640}, {"name": "readouts", "lr": 0.001, "weight_decay": 0.0, "parameters": 8993}, {"name": "lr_source_maps", "lr": 0.001, "weight_decay": 0.0, "parameters": 73856}, {"name": "field_dependent_charges_map", "lr": 0.001, "weight_decay": 0.01, "parameters": 58608}, {"name": "electronic_references", "lr": 0.001, "weight_decay": 0.0, "parameters": 302}, {"name": "layer_feature_mixer", "lr": 0.001, "weight_decay": 0.001, "parameters": 1048576}], "gpu": "NVIDIA H100 NVL", "device_MiB": 95319.4375}
+2026-10-08 11:15:17.529 INFO: CoupledResponse mode=unroll_scf: 12 training steps; 50 validation/deployment steps
+2026-10-08 11:18:40.444 WARNING: A relative scalar loss needs at least two observed labels in an optimizer batch; singleton batches contribute no scalar pair loss. Device microbatch size may still be one.
+2026-10-08 11:19:18.000 INFO: Full validation audit {"graphs": 351, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.49569801393538837, "1": 0.4689521884615491, "2": 0.32836768071137146}, "force_target_rms_by_element_column_eV_A": {"0": 0.7584590607696344, "1": 0.8723013494869878, "2": 0.9590743569439976}, "force_rmse_over_target_rms_by_element_column": {"0": 0.6535593541889876, "1": 0.5376034196637964, "2": 0.34237979394807816}, "density_observers": {"density_RMSE_e_A3": 0.0012565520951530495, "farfield_RMSE_e_A3": 0.00038999377302606725, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 331, "EF_vac_WF_rmse_eV": [0.5314268446860511, 0.3225005329261517, 0.6956051443399356], "EF_vac_WF_relative_rmse_eV": [0.22932148099224292, 0.3211934051560473, 0.4747496379098597], "EF_vac_WF_bias_eV": [0.4794018665050196, -0.029006727183796398, -0.5084085936888161], "EF_vac_covariance_eV2": -0.03481683676766526, "WF_absolute_error_quantiles_eV": {"median": 0.5354421007668346, "p90": 1.048318729926744, "p99": 1.5156091546762007, "max": 2.162811984778166}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.05258834164447565, "vacuum": 0.10316520351573673, "covariance_contribution": 0.06963367353533052}, "WF_centered_squared_error_share_largest_10_percent": 0.5562424799611402, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.3243095485627139, 0.45423606971647845, 0.6713973766638397], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.3991769443511039, "largest_WF_errors": [{"index": 298, "atoms": 185, "composition": [64, 91, 30], "charge": -0.0, "weight": 1.0, "ef": 1.103960617373073, "vac": -1.0588513674050937, "wf": -2.162811984778166, "force_rmse": 0.5060600419207234}, {"index": 258, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 0.8961802408871243, "vac": -0.8412764449514558, "wf": -1.7374566858385805, "force_rmse": 0.3912788999808214}, {"index": 213, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": -0.6356482532963356, "vac": 0.9119205401514301, "wf": 1.5475687934477658, "force_rmse": 0.5325488636758022}, {"index": 167, "atoms": 185, "composition": [64, 91, 30], "charge": -0.0, "weight": 1.0, "ef": 0.8968991033135859, "vac": -0.6246609976910662, "wf": -1.5215601010046518, "force_rmse": 0.4605138983437584}, {"index": 342, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.0468062915007592, "vac": -0.4549173217423892, "wf": -1.5017236132431488, "force_rmse": 0.5137283402636494}, {"index": 25, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.0811560069323263, "vac": -0.4168820577238721, "wf": -1.498038064656198, "force_rmse": 0.47019924977444466}, {"index": 301, "atoms": 82, "composition": [20, 44, 18], "charge": -0.0, "weight": 1.0, "ef": 0.907130733869089, "vac": -0.5833903457532381, "wf": -1.4905210796223276, "force_rmse": 0.5546261403423739}, {"index": 103, "atoms": 183, "composition": [63, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 0.936399664481758, "vac": -0.5332305551171936, "wf": -1.469630219598952, "force_rmse": 0.4290513490281325}], "composition_cohorts": [{"element_counts": "(20, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.4905210796223276}, {"element_counts": "(64, 91, 30)", "graphs": 5, "wf_rmse_eV": 1.3751960126791198}, {"element_counts": "(40, 111, 48)", "graphs": 1, "wf_rmse_eV": 1.3594230470822222}, {"element_counts": "(41, 135, 60)", "graphs": 1, "wf_rmse_eV": 1.33535961398586}, {"element_counts": "(62, 90, 30)", "graphs": 3, "wf_rmse_eV": 1.3255765549200764}, {"element_counts": "(63, 90, 30)", "graphs": 7, "wf_rmse_eV": 1.200691775016577}, {"element_counts": "(40, 88, 36)", "graphs": 1, "wf_rmse_eV": 1.1819465979773547}, {"element_counts": "(61, 90, 30)", "graphs": 10, "wf_rmse_eV": 1.0836858651586905}, {"element_counts": "(66, 90, 30)", "graphs": 10, "wf_rmse_eV": 1.0335941766898902}, {"element_counts": "(22, 56, 24)", "graphs": 2, "wf_rmse_eV": 1.0334455897687007}, {"element_counts": "(40, 136, 60)", "graphs": 1, "wf_rmse_eV": 0.9474313262019836}, {"element_counts": "(21, 44, 18)", "graphs": 1, "wf_rmse_eV": 0.9468496035410277}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:19:18.003 INFO: Epoch 0: loss=133.168, RMSE_E_per_atom=34.6084 meV, RMSE_F=460.5707 meV/A, RMSE_dip_per_atom=2.1830 meA, RMSE_rho=0.3900 me/A^3, RMSE_EF(abs/rel)=531.4268/229.3215 meV, RMSE_ESP=310.3913 mV, RMSE_ESPvac(abs/rel)=322.5005/321.1934 mV, RMSE_WF(abs/rel)=695.6051/474.7496 meV
+2026-10-08 11:19:18.003 INFO: 50-step electronic residual maximum: 3.2165e-05
+2026-10-08 11:19:18.009 INFO: Optimizer epoch 0: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=929.48, clipped=347/347
+2026-10-08 11:19:18.009 INFO: Epoch timing: train=202.957s, validation=37.534s, updates=347, train/update=0.58489s, peak allocated=10563.8 MiB, backbone=CuEq
+2026-10-08 11:19:18.009 INFO: Optimization budget: graphs=1385/1385, updates=347, mean retained gradient=0.015976, min retained gradient=0.0016603
+2026-10-08 11:19:18.010 INFO: Optimizer time scales {"updates_per_epoch": 347, "groups": [{"name": "embedding", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "interactions_no_decay", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "products", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}, {"name": "readouts", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "lr_source_maps", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "field_dependent_charges_map", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.9965359962023838}, {"name": "electronic_references", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "layer_feature_mixer", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}], "EMA_asymptotic_memory_epochs": 0.28818443804034555}
+2026-10-08 11:19:18.010 INFO: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-08 11:19:18.010 INFO: 50-step finite-budget validation residual 3.2165e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-08 11:21:44.290 INFO: Full training audit {"graphs": 1385, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.49463064380918, "1": 0.4600193902147737, "2": 0.32183503117098805}, "force_target_rms_by_element_column_eV_A": {"0": 0.7573264491735692, "1": 0.8678911240069728, "2": 0.9536206914917966}, "force_rmse_over_target_rms_by_element_column": {"0": 0.6531273856194307, "1": 0.5300427409499326, "2": 0.33748746649731914}, "density_observers": {"density_RMSE_e_A3": 0.001265063522857576, "farfield_RMSE_e_A3": 0.0003989031102718702, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 1308, "EF_vac_WF_rmse_eV": [0.5450369258243483, 0.314745521453383, 0.713359682717553], "EF_vac_WF_relative_rmse_eV": [0.24482107259534996, 0.31261104792655386, 0.4845370963959446], "EF_vac_WF_bias_eV": [0.4869577937822924, -0.036593387233541164, -0.5235511810158338], "EF_vac_covariance_eV2": -0.03855658645566853, "WF_absolute_error_quantiles_eV": {"median": 0.547117750398991, "p90": 1.1336799302439222, "p99": 1.6573352031577495, "max": 2.208569867854111}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.05993735758673764, "vacuum": 0.09772566728573813, "covariance_contribution": 0.07711317291133706}, "WF_centered_squared_error_share_largest_10_percent": 0.6073268862565915, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.346229281219072, 0.44209878372539807, 0.6852389331960246], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.39691357722045456, "largest_WF_errors": [{"index": 521, "atoms": 74, "composition": [13, 43, 18], "charge": -0.0, "weight": 1.0, "ef": 0.7318101927262917, "vac": -1.4767596751278198, "wf": -2.208569867854111, "force_rmse": 0.5500551571922726}, {"index": 909, "atoms": 183, "composition": [63, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.0887189623900175, "vac": -0.9314638891329281, "wf": -2.0201828515229456, "force_rmse": 0.4268958919651529}, {"index": 483, "atoms": 185, "composition": [65, 90, 30], "charge": -0.0, "weight": 1.0, "ef": -0.5485663537845615, "vac": 1.3903963835212165, "wf": 1.9389627373057783, "force_rmse": 0.43654449789166677}, {"index": 900, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": -0.583948265619153, "vac": 1.3369878368157329, "wf": 1.9209361024348859, "force_rmse": 0.4295444084946799}, {"index": 585, "atoms": 183, "composition": [63, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.1302189003065861, "vac": -0.746705052832862, "wf": -1.876923953139448, "force_rmse": 0.43937794536581715}, {"index": 362, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": -0.6067530065841583, "vac": 1.2684469332027617, "wf": 1.8751999397869201, "force_rmse": 0.41859395623478535}, {"index": 1276, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.1200431201127026, "vac": -0.7365427046453616, "wf": -1.8565858247580644, "force_rmse": 0.43410839046921923}, {"index": 630, "atoms": 184, "composition": [64, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.0147371829511935, "vac": -0.7485699542068618, "wf": -1.7633071371580549, "force_rmse": 0.44301875824216913}], "composition_cohorts": [{"element_counts": "(13, 43, 18)", "graphs": 1, "wf_rmse_eV": 2.208569867854111}, {"element_counts": "(39, 88, 36)", "graphs": 2, "wf_rmse_eV": 1.5658740262078579}, {"element_counts": "(33, 136, 60)", "graphs": 1, "wf_rmse_eV": 1.437734294440408}, {"element_counts": "(10, 39, 18)", "graphs": 2, "wf_rmse_eV": 1.3830296817110361}, {"element_counts": "(21, 56, 24)", "graphs": 1, "wf_rmse_eV": 1.3490394139468016}, {"element_counts": "(40, 88, 36)", "graphs": 3, "wf_rmse_eV": 1.3091770146367396}, {"element_counts": "(37, 87, 36)", "graphs": 1, "wf_rmse_eV": 1.2581046751577398}, {"element_counts": "(61, 90, 30)", "graphs": 25, "wf_rmse_eV": 1.257399886351196}, {"element_counts": "(64, 90, 30)", "graphs": 18, "wf_rmse_eV": 1.2255367650448998}, {"element_counts": "(62, 90, 30)", "graphs": 29, "wf_rmse_eV": 1.1821744287506961}, {"element_counts": "(63, 90, 30)", "graphs": 32, "wf_rmse_eV": 1.1564822807655923}, {"element_counts": "(39, 138, 60)", "graphs": 1, "wf_rmse_eV": 1.1543988220518946}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:21:44.319 INFO: Full-split generalization {"epoch": 0, "training_graphs": 1385, "validation_graphs": 351, "train": {"rmse_e_per_atom": 0.0350659971279637, "rmse_f": 0.4538080938296335, "rmse_mu_per_atom": 0.002132216106124587, "rmse_fermi_level": 0.5450369258243485, "rmse_fermi_level_rel": 0.24482107259535044, "rmse_rho": 0.0003989031102718702, "rmse_esp": 0.30357342171598856, "rmse_esp_vac": 0.3147455214533831, "rmse_esp_vac_rel": 0.3126110479265538, "rmse_wf_abs": 0.713359682717553, "rmse_wf_rel": 0.4845370963959445}, "validation": {"rmse_e_per_atom": 0.03460839615696632, "rmse_f": 0.4605707024849286, "rmse_mu_per_atom": 0.0021830409115286857, "rmse_fermi_level": 0.5314268446860511, "rmse_fermi_level_rel": 0.22932148099224242, "rmse_rho": 0.0003899937730260673, "rmse_esp": 0.31039129660665693, "rmse_esp_vac": 0.32250053292615183, "rmse_esp_vac_rel": 0.32119340515604733, "rmse_wf_abs": 0.6956051443399355, "rmse_wf_rel": 0.47474963790985975}, "weighted_training_objectives": {"energy_per_atom": 0.12296241545783572, "forces": 102.9708930126427, "dipole": 0.1962730856440085, "fourier_density": 1.5912369138457187, "fourier_potential/spatial": 9.215682237235349, "vacuum_potential": 9.780043826300343, "fermi_level": 5.998321631480728}, "weighted_validation_objectives": {"energy_per_atom": 0.11977410845575215, "forces": 106.06268599373031, "dipole": 0.20790452303445506, "fourier_density": 1.5209514299910765, "fourier_potential/spatial": 9.634275700916168, "vacuum_potential": 10.347782534457233, "fermi_level": 5.27477002555193}, "seconds": 146.06451886700233, "scope": "Whole splits at the same EMA parameters and deployment step count; read-only, native units."}
+2026-10-08 11:22:07.693 INFO: Electronic diagnostic {"train": {"graphs": 32, "charge_span": [-0.0, -0.0], "step_comparison": [[{"steps": 12, "WF_eV": 4.0142835030489215, "EF_eV": -2.333987331742129, "residual": 0.0001237093602740589}, {"steps": 50, "WF_eV": 4.0141237130461125, "EF_eV": -2.3340882386942856, "residual": 2.635883178392362e-11}, {"steps": 100, "WF_eV": 4.014123712987458, "EF_eV": -2.334088238713069, "residual": 8.881784197001252e-16}], [{"steps": 12, "WF_eV": 7.329738113700268, "EF_eV": -0.7798745849800559, "residual": 0.0016434523725408212}, {"steps": 50, "WF_eV": 7.329857533056608, "EF_eV": -0.7799164424573988, "residual": 1.7142021640267208e-06}, {"steps": 100, "WF_eV": 7.3298575410502, "EF_eV": -0.7799164481454186, "residual": 2.394920511905596e-10}]], "dEF_dQ_and_dWF_dQ_eV_per_e": [[-2.295442409208226, 4.37109909371276], [-2.28029114695687, 4.129253167376845]], "force_RMSE_by_atomic_number_eV_A": {"1": 0.5064141458282986, "8": 0.4790434057734262, "77": 0.3153100001815724}, "force_RMSE_eV_A": 0.4679652054334418, "charge_response_identifiability": "Single-charge data do not determine capacitance; slopes above are predictions, not validation.", "EF_vac_WF_RMSE": [0.5338120901700354, 0.31926903965957826, 0.7031836938726496], "EF_vac_WF_bias": [0.47529549971332513, -0.009505376264312585, -0.4848008759776377], "EF_vac_covariance": -0.04927175745425674, "WF_relative_RMSE_eV": 0.5093480322723346, "WF_error_variance_from_EF_vac_covariance": 0.25943541797969916, "reference_WF_identity_max_error_eV": 4.440892098500626e-16, "Gaussian_lowpass_potential_error_power_fraction": 0.7453229173668311, "reference_conditioning": {"charge_error_e_RMSE": 0.44388154637470195, "vacuum_given_DFT_EF_eV_RMSE": 0.7026102345645284, "scope": "Oracle conditional errors, not deployment metrics; charge error measures the departure from the prescribed fixed-Q ensemble.", "dmu_dQ_eV_per_e_range": [-3.281637769533062, -0.8266560855472559]}}, "validation": {"graphs": 16, "charge_span": [-0.0, -0.0], "step_comparison": [[{"steps": 12, "WF_eV": 6.971582773640665, "EF_eV": -0.7243866767930403, "residual": 0.0032631602254587014}, {"steps": 50, "WF_eV": 6.971510612147369, "EF_eV": -0.7243411000673827, "residual": 4.383349318055549e-06}, {"steps": 100, "WF_eV": 6.971510534882119, "EF_eV": -0.7243410482762958, "residual": 7.934339045154171e-10}], [{"steps": 12, "WF_eV": 6.035682617212897, "EF_eV": 0.12880331316100246, "residual": 0.004564419084086575}, {"steps": 50, "WF_eV": 6.035504238359933, "EF_eV": 0.12884544942894127, "residual": 8.82737682100787e-06}, {"steps": 100, "WF_eV": 6.035504201512887, "EF_eV": 0.12884547269060231, "residual": 2.4432519410422238e-09}]], "dEF_dQ_and_dWF_dQ_eV_per_e": [[-2.2862619140417095, 4.169768371064819], [-0.9242443225137453, 1.847179704033275]], "force_RMSE_by_atomic_number_eV_A": {"8": 0.45054325140862655, "77": 0.31030543353943685, "1": 0.47812821496769864}, "force_RMSE_eV_A": 0.44211824508608916, "charge_response_identifiability": "Single-charge data do not determine capacitance; slopes above are predictions, not validation.", "EF_vac_WF_RMSE": [0.5017314549584547, 0.24250570507858032, 0.5997581240661354], "EF_vac_WF_bias": [0.46693536687106724, -0.014127488091903458, -0.48106285496297063], "EF_vac_covariance": -0.01798654491131173, "WF_relative_RMSE_eV": 0.3581736128725924, "WF_error_variance_from_EF_vac_covariance": 0.1282883369582057, "reference_WF_identity_max_error_eV": 4.440892098500626e-16, "Gaussian_lowpass_potential_error_power_fraction": 0.6836083009695447, "reference_conditioning": {"charge_error_e_RMSE": 0.2830311840511962, "vacuum_given_DFT_EF_eV_RMSE": 0.5614901810060178, "scope": "Oracle conditional errors, not deployment metrics; charge error measures the departure from the prescribed fixed-Q ensemble.", "dmu_dQ_eV_per_e_range": [-3.4126310642531466, -0.9387293942057078]}}, "model_field_EF_readout_probe": {"selected_ridge": 0.001, "relative": true, "training_before": 0.24300110198096325, "training_after": 0.15673309034138644, "development_before": 0.1835914378714589, "development_after": 0.1257547542585775, "development_absolute_after": 0.5644408089578439, "selection": "training inner split only; diagnostic readout NOT installed"}, "epoch": 0, "WF_generalization": {"panel_relative_gap_eV": -0.1511744193997422, "validation_covariance_amplification_eV2": 0.03597308982262346, "bias_only_correction_is_insufficient": false}, "response_weight_norms": {"vector_out.weight": 2.3846860339337157, "scalar_out.weight": 0.6569638308954947, "state_scalar.weight": 4.210660395504818, "state_vector.weight": 2.4021154253480974, "neighbor_scalar.weight": 0.10466203417873483, "neighbor_vector.weight": 0.6396590465228863, "common_level.weight": 0.23552341061650578}, "regularization": {"field_weight_decay": 0.01}, "objective_gradients": {"training_indices": [0, 692], "atoms": 180, "terms": {"energy_per_atom": {"weighted_loss": 0.11063387095199453, "gradient_norm": 7.359631161421787}, "forces": {"weighted_loss": 142.42422654624622, "gradient_norm": 77.44082006995893}, "dipole": {"weighted_loss": 0.33573338014195825, "gradient_norm": 1.3296460290969416}, "fourier_density": {"weighted_loss": 0.07656239335498806, "gradient_norm": 1.3003731035454438}, "fourier_potential": {"weighted_loss": 20.555615030532035, "gradient_norm": 55.25090411466019}, "vacuum_potential": {"weighted_loss": 33.71172322561202, "gradient_norm": 252.6723180765901, "relative": true, "observed_labels": 2, "pair_weight": 1.0}, "fermi_level": {"weighted_loss": 3.0180862886807636, "gradient_norm": 51.0486706503875, "relative": true, "observed_labels": 2, "pair_weight": 1.0}, "density_observer_density": {"weighted_loss": 10.341482980197958, "gradient_norm": 127.4175835258192}}, "cosines": {"energy_per_atom / forces": -0.031530526127557315, "energy_per_atom / dipole": -0.007447831247806569, "energy_per_atom / fourier_density": 0.001861397395880999, "energy_per_atom / fourier_potential": -0.012055675962178552, "energy_per_atom / vacuum_potential": -0.008588211047113783, "energy_per_atom / fermi_level": 0.008728583524067994, "energy_per_atom / density_observer_density": 0.020559329550696736, "forces / dipole": 0.18062016664063255, "forces / fourier_density": -0.15930035784360927, "forces / fourier_potential": 0.24106468509461432, "forces / vacuum_potential": 0.17587929893833817, "forces / fermi_level": -0.29030424446001135, "forces / density_observer_density": -0.5283874792713151, "dipole / fourier_density": 0.21966154590292367, "dipole / fourier_potential": 0.5646782423486004, "dipole / vacuum_potential": 0.5072813342172855, "dipole / fermi_level": -0.7363863070411577, "dipole / density_observer_density": -0.23349161782235361, "fourier_density / fourier_potential": -0.02526931809968409, "fourier_density / vacuum_potential": 0.07464895057531286, "fourier_density / fermi_level": -0.30125804750814916, "fourier_density / density_observer_density": 0.15959630386356893, "fourier_potential / vacuum_potential": 0.4631802835046695, "fourier_potential / fermi_level": -0.1646410110882116, "fourier_potential / density_observer_density": -0.4809600983491163, "vacuum_potential / fermi_level": -0.32038644552207557, "vacuum_potential / density_observer_density": -0.33548197319442585, "fermi_level / density_observer_density": 0.26985773754198356}, "scope": "Training pair for relative losses, otherwise one graph; before clipping, diagnostic only.", "parameter_state": "EMA"}, "scope": "Deterministic panels, not whole-dataset metrics. Validation is development data, never used for fitting or selecting the probe."}
+2026-10-08 11:33:14.123 INFO: Full validation audit {"graphs": 351, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.13719000900634828, "1": 0.1365040453186731, "2": 0.1656351942374511}, "force_target_rms_by_element_column_eV_A": {"0": 0.7584590607696344, "1": 0.8723013494869878, "2": 0.9590743569439976}, "force_rmse_over_target_rms_by_element_column": {"0": 0.18087991310583973, "1": 0.15648725683956924, "2": 0.17270318306208543}, "density_observers": {"density_RMSE_e_A3": 0.0010684398143973935, "farfield_RMSE_e_A3": 0.000303946676584755, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 331, "EF_vac_WF_rmse_eV": [1.6330905499304211, 0.16353518686297197, 1.6359871188362363], "EF_vac_WF_relative_rmse_eV": [0.11845249998477413, 0.1630620145309364, 0.2526686306131816], "EF_vac_WF_bias_eV": [1.6287890438971535, 0.012431281487435364, -1.6163577624097176], "EF_vac_covariance_eV2": -0.011610610780205111, "WF_absolute_error_quantiles_eV": {"median": 1.6170112076501368, "p90": 1.8844532252140054, "p99": 2.25309386283958, "max": 2.3098805165344665}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.014030994752642915, "vacuum": 0.0265892205828873, "covariance_contribution": 0.023221221560410222}, "WF_centered_squared_error_share_largest_10_percent": 0.6861283437752957, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.16751713197546642, 0.23060451245752897, 0.3573274041993993], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.16063876198426813, "largest_WF_errors": [{"index": 258, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.8739098296815357, "vac": -0.4359706868529303, "wf": -2.3098805165344665, "force_rmse": 0.15441513124182896}, {"index": 332, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.8589278324576175, "vac": -0.4318203526720099, "wf": -2.290748185129627, "force_rmse": 0.12220169441334085}, {"index": 69, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.9051779088236502, "vac": -0.3845858919256733, "wf": -2.2897638007493235, "force_rmse": 0.13819120292686335}, {"index": 36, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.847178741374195, "vac": -0.4274129803956743, "wf": -2.2745917217698697, "force_rmse": 0.14832634052640284}, {"index": 47, "atoms": 120, "composition": [22, 68, 30], "charge": -0.0, "weight": 1.0, "ef": 1.8119324853311873, "vac": -0.3909997066710522, "wf": -2.2029321920022396, "force_rmse": 0.1580561497344748}, {"index": 324, "atoms": 211, "composition": [23, 128, 60], "charge": -0.0, "weight": 1.0, "ef": 1.7886102229518344, "vac": -0.35189886799246217, "wf": -2.1405090909442963, "force_rmse": 0.1647170232223558}, {"index": 115, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.9038658750317023, "vac": -0.21882990512449396, "wf": -2.122695780156196, "force_rmse": 0.1731669088190405}, {"index": 31, "atoms": 183, "composition": [63, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.804610922868646, "vac": -0.313087697719336, "wf": -2.1176986205879818, "force_rmse": 0.14380355116697902}], "composition_cohorts": [{"element_counts": "(22, 68, 30)", "graphs": 1, "wf_rmse_eV": 2.2029321920022396}, {"element_counts": "(62, 90, 30)", "graphs": 3, "wf_rmse_eV": 2.144246127453293}, {"element_counts": "(23, 128, 60)", "graphs": 1, "wf_rmse_eV": 2.1405090909442963}, {"element_counts": "(41, 135, 60)", "graphs": 1, "wf_rmse_eV": 2.048970359969805}, {"element_counts": "(21, 44, 18)", "graphs": 1, "wf_rmse_eV": 2.0158507553410168}, {"element_counts": "(20, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.9678197050528814}, {"element_counts": "(22, 56, 24)", "graphs": 2, "wf_rmse_eV": 1.9266182744003888}, {"element_counts": "(21, 127, 60)", "graphs": 1, "wf_rmse_eV": 1.885471617279622}, {"element_counts": "(40, 111, 48)", "graphs": 1, "wf_rmse_eV": 1.8844532252140054}, {"element_counts": "(63, 90, 30)", "graphs": 7, "wf_rmse_eV": 1.884260937037458}, {"element_counts": "(20, 56, 24)", "graphs": 3, "wf_rmse_eV": 1.8840135092481165}, {"element_counts": "(36, 112, 48)", "graphs": 1, "wf_rmse_eV": 1.8289029251165667}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:33:14.151 INFO: Epoch 5: loss=17.448, RMSE_E_per_atom=25.3335 meV, RMSE_F=141.6119 meV/A, RMSE_dip_per_atom=1.0322 meA, RMSE_rho=0.3039 me/A^3, RMSE_EF(abs/rel)=1633.0905/118.4525 meV, RMSE_ESP=151.7781 mV, RMSE_ESPvac(abs/rel)=163.5352/163.0620 mV, RMSE_WF(abs/rel)=1635.9871/252.6686 meV
+2026-10-08 11:33:14.151 INFO: 50-step electronic residual maximum: 0.0016057
+2026-10-08 11:33:14.160 INFO: Optimizer epoch 5: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=464.52, clipped=347/347
+2026-10-08 11:33:14.160 INFO: Epoch timing: train=125.726s, validation=37.074s, updates=347, train/update=0.36232s, peak allocated=10411.0 MiB, backbone=CuEq
+2026-10-08 11:33:14.161 INFO: Optimization budget: graphs=1385/1385, updates=347, mean retained gradient=0.029187, min retained gradient=0.00585
+2026-10-08 11:33:14.161 INFO: Optimizer time scales {"updates_per_epoch": 347, "groups": [{"name": "embedding", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "interactions_no_decay", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "products", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}, {"name": "readouts", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "lr_source_maps", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "field_dependent_charges_map", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.9965359962023838}, {"name": "electronic_references", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "layer_feature_mixer", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}], "EMA_asymptotic_memory_epochs": 0.28818443804034555}
+2026-10-08 11:33:14.161 INFO: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-08 11:33:14.161 INFO: 50-step finite-budget validation residual 0.0016057 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-08 11:42:15.116 INFO: Full validation audit {"graphs": 351, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.09569050658081085, "1": 0.10709836351151693, "2": 0.1336253437092821}, "force_target_rms_by_element_column_eV_A": {"0": 0.7584590607696344, "1": 0.8723013494869878, "2": 0.9590743569439976}, "force_rmse_over_target_rms_by_element_column": {"0": 0.12616436605518352, "1": 0.12277679448106198, "2": 0.13932740745469102}, "density_observers": {"density_RMSE_e_A3": 0.0009686961428266052, "farfield_RMSE_e_A3": 0.0002488793140446297, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 331, "EF_vac_WF_rmse_eV": [1.6477143232646725, 0.13434900941221148, 1.6388210850247198], "EF_vac_WF_relative_rmse_eV": [0.10485193004680202, 0.13294842219177955, 0.2121903430906381], "EF_vac_WF_bias_eV": [1.6443748246239425, 0.019348730365552156, -1.6250260942583898], "EF_vac_covariance_eV2": -0.008177765751549803, "WF_absolute_error_quantiles_eV": {"median": 1.6305339710562743, "p90": 1.8087971223358439, "p99": 2.2235678575168834, "max": 2.558048913011549}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.01099392723453946, "vacuum": 0.017675282963283665, "covariance_contribution": 0.016355531503099607}, "WF_centered_squared_error_share_largest_10_percent": 0.7448814614061577, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.14828302151318246, 0.1880174617597188, 0.30008246100338054], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.1518001786140161, "largest_WF_errors": [{"index": 213, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7378380421857371, "vac": -0.8202108708258118, "wf": -2.558048913011549, "force_rmse": 0.1348205410444139}, {"index": 193, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7813629585487856, "vac": -0.5991583188528966, "wf": -2.380521277401682, "force_rmse": 0.12388817412932111}, {"index": 258, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.9399925996759984, "vac": -0.3085229618483689, "wf": -2.2485155615243677, "force_rmse": 0.11462862545175069}, {"index": 332, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.8404603188187694, "vac": -0.3894199213625926, "wf": -2.2298802401813616, "force_rmse": 0.09254973299227329}, {"index": 47, "atoms": 120, "composition": [22, 68, 30], "charge": -0.0, "weight": 1.0, "ef": 1.854856353563552, "vac": -0.35398261106954987, "wf": -2.2088389646331015, "force_rmse": 0.12619619063694573}, {"index": 36, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.8579744519826278, "vac": -0.34723338486861266, "wf": -2.205207836851241, "force_rmse": 0.10394645111988025}, {"index": 8, "atoms": 185, "composition": [65, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.9023450624936804, "vac": -0.22771562426066794, "wf": -2.130060686754349, "force_rmse": 0.12742770026510758}, {"index": 69, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.852245313308356, "vac": -0.23876575840580738, "wf": -2.0910110717141634, "force_rmse": 0.09896639596528851}], "composition_cohorts": [{"element_counts": "(22, 68, 30)", "graphs": 1, "wf_rmse_eV": 2.2088389646331015}, {"element_counts": "(62, 90, 30)", "graphs": 3, "wf_rmse_eV": 2.0168908681596434}, {"element_counts": "(41, 135, 60)", "graphs": 1, "wf_rmse_eV": 1.9186950643936944}, {"element_counts": "(21, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.860128803664888}, {"element_counts": "(20, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.8439101663284845}, {"element_counts": "(23, 128, 60)", "graphs": 1, "wf_rmse_eV": 1.8320968620386138}, {"element_counts": "(36, 112, 48)", "graphs": 1, "wf_rmse_eV": 1.8087971223358439}, {"element_counts": "(63, 90, 30)", "graphs": 7, "wf_rmse_eV": 1.7720599746845327}, {"element_counts": "(0, 36, 18)", "graphs": 1, "wf_rmse_eV": 1.7694008934392347}, {"element_counts": "(66, 90, 30)", "graphs": 10, "wf_rmse_eV": 1.7592067147729273}, {"element_counts": "(40, 111, 48)", "graphs": 1, "wf_rmse_eV": 1.7568174582777285}, {"element_counts": "(22, 56, 24)", "graphs": 2, "wf_rmse_eV": 1.7534709568737539}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:42:15.152 INFO: Epoch 9: loss=10.8512, RMSE_E_per_atom=18.2139 meV, RMSE_F=107.7296 meV/A, RMSE_dip_per_atom=0.6178 meA, RMSE_rho=0.2489 me/A^3, RMSE_EF(abs/rel)=1647.7143/104.8519 meV, RMSE_ESP=122.3348 mV, RMSE_ESPvac(abs/rel)=134.3490/132.9484 mV, RMSE_WF(abs/rel)=1638.8211/212.1903 meV
+2026-10-08 11:42:15.152 INFO: 50-step electronic residual maximum: 0.0022733
+2026-10-08 11:42:15.160 INFO: Optimizer epoch 9: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=328.1, clipped=347/347
+2026-10-08 11:42:15.160 INFO: Epoch timing: train=125.724s, validation=36.987s, updates=347, train/update=0.36232s, peak allocated=10907.9 MiB, backbone=CuEq
+2026-10-08 11:42:15.160 INFO: Optimization budget: graphs=1385/1385, updates=347, mean retained gradient=0.04429, min retained gradient=0.0056693
+2026-10-08 11:42:15.160 INFO: Optimizer time scales {"updates_per_epoch": 347, "groups": [{"name": "embedding", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "interactions_no_decay", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "products", "lr": 0.001, "parameter_update_range": [0.0, 0.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}, {"name": "readouts", "lr": 0.001, "parameter_update_range": [3470.0, 3470.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "lr_source_maps", "lr": 0.001, "parameter_update_range": [3470.0, 3470.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "field_dependent_charges_map", "lr": 0.001, "parameter_update_range": [3470.0, 3470.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.9965359962023838}, {"name": "electronic_references", "lr": 0.001, "parameter_update_range": [3470.0, 3470.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "layer_feature_mixer", "lr": 0.001, "parameter_update_range": [3470.0, 3470.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}], "EMA_asymptotic_memory_epochs": 0.28818443804034555}
+2026-10-08 11:42:15.160 INFO: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-08 11:42:15.160 INFO: 50-step finite-budget validation residual 0.0022733 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-08 11:42:15.641 INFO: Foundation feature extractor frozen=False; energy/electronic readouts remain trainable
+2026-10-08 11:42:15.641 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
+2026-10-08 11:42:15.641 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-08 11:42:15.641 INFO: Setting global learning rate to 0.001
+2026-10-08 11:42:15.642 INFO: Runtime inventory {"parameters": 10574661, "parameter_MiB": 80.67826080322266, "optimizer_MiB": 18.163360595703125, "batch_size": 4, "layout": "ir_mul", "blocks": {"node_embedding": 42496, "radial_embedding": 0, "spherical_harmonics": 0, "atomic_energies_fn": 0, "interactions": 8205190, "products": 1136640, "readouts": 8993, "electric_potential_descriptor": 0, "lr_source_maps": 73856, "field_dependent_charges_map": 58910, "local_electron_energy": 0, "external_field_contribution": 0, "external_field_contribution_internal": 0, "coulomb_energy": 0, "layer_feature_mixer": 1048576}, "optimizer_groups": [{"name": "embedding", "lr": 0.001, "weight_decay": 0.0, "parameters": 42496}, {"name": "interactions_no_decay", "lr": 0.001, "weight_decay": 0.0, "parameters": 8205190}, {"name": "products", "lr": 0.001, "weight_decay": 0.001, "parameters": 1136640}, {"name": "readouts", "lr": 0.001, "weight_decay": 0.0, "parameters": 8993}, {"name": "lr_source_maps", "lr": 0.001, "weight_decay": 0.0, "parameters": 73856}, {"name": "field_dependent_charges_map", "lr": 0.001, "weight_decay": 0.01, "parameters": 58608}, {"name": "electronic_references", "lr": 0.001, "weight_decay": 0.0, "parameters": 302}, {"name": "layer_feature_mixer", "lr": 0.001, "weight_decay": 0.001, "parameters": 1048576}], "gpu": "NVIDIA H100 NVL", "device_MiB": 95319.4375}
+2026-10-08 11:42:15.653 INFO: CoupledResponse mode=unroll_scf: 12 training steps; 50 validation/deployment steps
+2026-10-08 11:46:05.764 WARNING: A relative scalar loss needs at least two observed labels in an optimizer batch; singleton batches contribute no scalar pair loss. Device microbatch size may still be one.
+2026-10-08 11:46:42.391 INFO: Full validation audit {"graphs": 351, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.043666488371724294, "1": 0.0752602127557618, "2": 0.1104729076257782}, "force_target_rms_by_element_column_eV_A": {"0": 0.7584590607696344, "1": 0.8723013494869878, "2": 0.9590743569439976}, "force_rmse_over_target_rms_by_element_column": {"0": 0.05757263724612165, "1": 0.08627776719596197, "2": 0.11518701008521381}, "density_observers": {"density_RMSE_e_A3": 0.000488203938481001, "farfield_RMSE_e_A3": 0.00011637007516826408, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 331, "EF_vac_WF_rmse_eV": [1.5464846687752598, 0.14813795455451162, 1.5392421416219142], "EF_vac_WF_relative_rmse_eV": [0.12692368565599466, 0.14652182287421256, 0.24607455249138255], "EF_vac_WF_bias_eV": [1.541267403397744, 0.02182221348104829, -1.519445189916695], "EF_vac_covariance_eV2": -0.01148720941247516, "WF_absolute_error_quantiles_eV": {"median": 1.5406286286696727, "p90": 1.7589738584921806, "p99": 2.0281701492491075, "max": 2.1272574757538703}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.01610962198050175, "vacuum": 0.02146864457838212, "covariance_contribution": 0.02297441882495032}, "WF_centered_squared_error_share_largest_10_percent": 0.714301564231741, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.17949719764108713, 0.20721314909233976, 0.3480019694882033], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.1503942001633258, "largest_WF_errors": [{"index": 332, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7590725353955663, "vac": -0.3681849403583044, "wf": -2.1272574757538703, "force_rmse": 0.059895408180736825}, {"index": 295, "atoms": 180, "composition": [0, 120, 60], "charge": -0.0, "weight": 1.0, "ef": 1.59638004216477, "vac": -0.5292300276421775, "wf": -2.1256100698069478, "force_rmse": 0.08859075745559405}, {"index": 69, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7704873253715592, "vac": -0.3271922005081622, "wf": -2.0976795258797214, "force_rmse": 0.0691759529869836}, {"index": 191, "atoms": 185, "composition": [64, 91, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7470470289858442, "vac": -0.30780099030745145, "wf": -2.0548480192932956, "force_rmse": 0.05908712830700975}, {"index": 123, "atoms": 108, "composition": [0, 72, 36], "charge": -0.0, "weight": 1.0, "ef": 1.6501993113610607, "vac": -0.3157224744516114, "wf": -1.9659217858126725, "force_rmse": 0.0861573341795017}, {"index": 282, "atoms": 108, "composition": [72, 36, 0], "charge": -0.0, "weight": 1.0, "ef": 1.7078054997495449, "vac": -0.23606909927530362, "wf": -1.9438745990248485, "force_rmse": 0.037922840789715744}, {"index": 341, "atoms": 236, "composition": [41, 135, 60], "charge": -0.0, "weight": 1.0, "ef": 1.5746119079531902, "vac": -0.3681522593168225, "wf": -1.9427641672700124, "force_rmse": 0.0920199601372367}, {"index": 220, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.6917535697485078, "vac": -0.24085256340906724, "wf": -1.9326061331575746, "force_rmse": 0.06881499834949362}], "composition_cohorts": [{"element_counts": "(62, 90, 30)", "graphs": 3, "wf_rmse_eV": 1.9809400009452582}, {"element_counts": "(41, 135, 60)", "graphs": 1, "wf_rmse_eV": 1.9427641672700124}, {"element_counts": "(40, 88, 36)", "graphs": 1, "wf_rmse_eV": 1.9291559077338585}, {"element_counts": "(20, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.8346673697855582}, {"element_counts": "(22, 56, 24)", "graphs": 2, "wf_rmse_eV": 1.7898036142421871}, {"element_counts": "(0, 120, 60)", "graphs": 2, "wf_rmse_eV": 1.7890561827513642}, {"element_counts": "(23, 128, 60)", "graphs": 1, "wf_rmse_eV": 1.752407376123866}, {"element_counts": "(21, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.7412897000459555}, {"element_counts": "(20, 56, 24)", "graphs": 3, "wf_rmse_eV": 1.717926439266324}, {"element_counts": "(19, 56, 24)", "graphs": 3, "wf_rmse_eV": 1.706623330912677}, {"element_counts": "(20, 45, 18)", "graphs": 2, "wf_rmse_eV": 1.7054648427722183}, {"element_counts": "(36, 112, 48)", "graphs": 1, "wf_rmse_eV": 1.704941214245273}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:46:42.394 INFO: Epoch 10: loss=8.66614, RMSE_E_per_atom=12.9239 meV, RMSE_F=72.7727 meV/A, RMSE_dip_per_atom=0.7061 meA, RMSE_rho=0.1164 me/A^3, RMSE_EF(abs/rel)=1546.4847/126.9237 meV, RMSE_ESP=143.7681 mV, RMSE_ESPvac(abs/rel)=148.1380/146.5218 mV, RMSE_WF(abs/rel)=1539.2421/246.0746 meV
+2026-10-08 11:46:42.394 INFO: 50-step electronic residual maximum: 4.4902e-07
+2026-10-08 11:46:42.403 INFO: Optimizer epoch 10: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=698.8, clipped=347/347
+2026-10-08 11:46:42.403 INFO: Epoch timing: train=230.161s, validation=36.598s, updates=347, train/update=0.66329s, peak allocated=14131.9 MiB, backbone=CuEq
+2026-10-08 11:46:42.403 INFO: Optimization budget: graphs=1385/1385, updates=347, mean retained gradient=0.032878, min retained gradient=0.00031219
+2026-10-08 11:46:42.403 INFO: Optimizer time scales {"updates_per_epoch": 347, "groups": [{"name": "embedding", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "interactions_no_decay", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "products", "lr": 0.001, "parameter_update_range": [347.0, 347.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}, {"name": "readouts", "lr": 0.001, "parameter_update_range": [3817.0, 3817.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "lr_source_maps", "lr": 0.001, "parameter_update_range": [3817.0, 3817.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "field_dependent_charges_map", "lr": 0.001, "parameter_update_range": [3817.0, 3817.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.9965359962023838}, {"name": "electronic_references", "lr": 0.001, "parameter_update_range": [3817.0, 3817.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "layer_feature_mixer", "lr": 0.001, "parameter_update_range": [3817.0, 3817.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}], "EMA_asymptotic_memory_epochs": 0.28818443804034555}
+2026-10-08 11:46:42.403 INFO: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-08 11:58:21.316 INFO: Full validation audit {"graphs": 351, "index_convention": "supplied loader order, zero based", "force_rmse_by_element_column_eV_A": {"0": 0.02772022869842891, "1": 0.046411916873777256, "2": 0.06546955830155109}, "force_target_rms_by_element_column_eV_A": {"0": 0.7584590607696344, "1": 0.8723013494869878, "2": 0.9590743569439976}, "force_rmse_over_target_rms_by_element_column": {"0": 0.03654808826504129, "1": 0.05320628805753049, "2": 0.06826327680177356}, "density_observers": {"density_RMSE_e_A3": 0.0003731525685033089, "farfield_RMSE_e_A3": 6.262665271284312e-05, "scope": "Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain."}, "observed_EF_vac_WF": 331, "EF_vac_WF_rmse_eV": [1.501959889749125, 0.12346058701590185, 1.4915294240270516], "EF_vac_WF_relative_rmse_eV": [0.09964153578957725, 0.12176698459537025, 0.19842557164546987], "EF_vac_WF_bias_eV": [1.4986510850630639, 0.02037935251331459, -1.478271732549749], "EF_vac_covariance_eV2": -0.007308536645438381, "WF_absolute_error_quantiles_eV": {"median": 1.4891927895966832, "p90": 1.6694235697854758, "p99": 2.0137052579983363, "max": 2.242203006919712}, "WF_identity_max_error_eV": 8.881784197001252e-16, "WF_variance_components_eV2": {"EF": 0.009928435654505605, "vacuum": 0.014827198537449128, "covariance_contribution": 0.014617073290876761}, "WF_centered_squared_error_share_largest_10_percent": 0.7223796927154145, "independent_single_anchor_EF_vac_WF_RMSE_eV": [0.1409144112893043, 0.17220452106404835, 0.2806161345426577], "relative_error_scope": "One whole-split offset for RMSE_rel; no fitted offset is applied to predictions. Single-anchor expectation assumes independent configurations.", "WF_squared_error_share_largest_10_percent": 0.15228905818606772, "largest_WF_errors": [{"index": 213, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.5157142000348958, "vac": -0.7264888068848161, "wf": -2.242203006919712, "force_rmse": 0.08324520320913455}, {"index": 36, "atoms": 181, "composition": [61, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.786013469227251, "vac": -0.37926125482709416, "wf": -2.1652747240543455, "force_rmse": 0.05307400479429061}, {"index": 332, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7200190407143272, "vac": -0.37763209986710056, "wf": -2.0976511405814273, "force_rmse": 0.03713487035038807}, {"index": 258, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7563777871826969, "vac": -0.27149568321965667, "wf": -2.027873470402354, "force_rmse": 0.03785756130337547}, {"index": 193, "atoms": 186, "composition": [66, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.5242073348210379, "vac": -0.45643876090125923, "wf": -1.980646095722297, "force_rmse": 0.060475901594732595}, {"index": 301, "atoms": 82, "composition": [20, 44, 18], "charge": -0.0, "weight": 1.0, "ef": 1.6081707995490988, "vac": -0.3177560684653429, "wf": -1.9259268680144421, "force_rmse": 0.06640198978188289}, {"index": 69, "atoms": 182, "composition": [62, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.6560868738091559, "vac": -0.25753279213881086, "wf": -1.9136196659479667, "force_rmse": 0.044110959792797506}, {"index": 8, "atoms": 185, "composition": [65, 90, 30], "charge": -0.0, "weight": 1.0, "ef": 1.7390485568954408, "vac": -0.12250257919594532, "wf": -1.8615511360913866, "force_rmse": 0.039327622606567476}], "composition_cohorts": [{"element_counts": "(20, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.9259268680144421}, {"element_counts": "(62, 90, 30)", "graphs": 3, "wf_rmse_eV": 1.871089677257577}, {"element_counts": "(40, 88, 36)", "graphs": 1, "wf_rmse_eV": 1.8308572077150362}, {"element_counts": "(23, 128, 60)", "graphs": 1, "wf_rmse_eV": 1.8249533735974381}, {"element_counts": "(41, 135, 60)", "graphs": 1, "wf_rmse_eV": 1.7985589781218891}, {"element_counts": "(21, 127, 60)", "graphs": 1, "wf_rmse_eV": 1.745644475285257}, {"element_counts": "(21, 44, 18)", "graphs": 1, "wf_rmse_eV": 1.6533644507947791}, {"element_counts": "(0, 120, 60)", "graphs": 2, "wf_rmse_eV": 1.6312791661223933}, {"element_counts": "(22, 56, 24)", "graphs": 2, "wf_rmse_eV": 1.6241942694260458}, {"element_counts": "(1, 36, 18)", "graphs": 2, "wf_rmse_eV": 1.5968651422715698}, {"element_counts": "(40, 111, 48)", "graphs": 1, "wf_rmse_eV": 1.5960297835620985}, {"element_counts": "(22, 68, 30)", "graphs": 1, "wf_rmse_eV": 1.5934175671772657}], "scope": "Full supplied split; diagnostic only, no reference-dependent correction is installed.", "atomic_numbers": [1, 8, 77]}
+2026-10-08 11:58:21.351 INFO: Epoch 15: loss=4.817, RMSE_E_per_atom=8.1485 meV, RMSE_F=44.4443 meV/A, RMSE_dip_per_atom=0.5356 meA, RMSE_rho=0.0626 me/A^3, RMSE_EF(abs/rel)=1501.9599/99.6415 meV, RMSE_ESP=113.2086 mV, RMSE_ESPvac(abs/rel)=123.4606/121.7670 mV, RMSE_WF(abs/rel)=1491.5294/198.4256 meV
+2026-10-08 11:58:21.351 INFO: 50-step electronic residual maximum: 0.00063915
+2026-10-08 11:58:21.358 INFO: Optimizer epoch 15: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=213.04, clipped=347/347
+2026-10-08 11:58:21.358 INFO: Epoch timing: train=132.103s, validation=36.652s, updates=347, train/update=0.38070s, peak allocated=14813.3 MiB, backbone=CuEq
+2026-10-08 11:58:21.358 INFO: Optimization budget: graphs=1385/1385, updates=347, mean retained gradient=0.072532, min retained gradient=0.0094236
+2026-10-08 11:58:21.359 INFO: Optimizer time scales {"updates_per_epoch": 347, "groups": [{"name": "embedding", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "interactions_no_decay", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "products", "lr": 0.001, "parameter_update_range": [2082.0, 2082.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}, {"name": "readouts", "lr": 0.001, "parameter_update_range": [5552.0, 5552.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "lr_source_maps", "lr": 0.001, "parameter_update_range": [5552.0, 5552.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "field_dependent_charges_map", "lr": 0.001, "parameter_update_range": [5552.0, 5552.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.9965359962023838}, {"name": "electronic_references", "lr": 0.001, "parameter_update_range": [5552.0, 5552.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 1.0}, {"name": "layer_feature_mixer", "lr": 0.001, "parameter_update_range": [5552.0, 5552.0], "moment_memory_epochs": [0.028818443804034585, 2.8818443804034555], "AdamW_decay_only_retention_per_epoch": 0.999653060024087}], "EMA_asymptotic_memory_epochs": 0.28818443804034555}
+2026-10-08 11:58:21.359 INFO: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-08 11:58:21.359 INFO: 50-step finite-budget validation residual 0.00063915 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
