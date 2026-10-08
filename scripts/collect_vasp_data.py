@@ -1,4 +1,4 @@
-"""Collect training labels directly from VASP outputs. Edit the settings below."""
+"""Collect training labels directly from VASP outputs."""
 from pathlib import Path
 import multiprocessing as mp
 
@@ -15,7 +15,7 @@ POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 6.0
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
-UNCONVERGED_IDS = []
+UNCONVERGED_IDS = [279, 1668]
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
