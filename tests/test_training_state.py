@@ -45,6 +45,76 @@ def test_optimizer_budget_does_not_change_the_optimizer(caplog):
     assert not opt.state
 
 
+@pytest.mark.parametrize('relative_ef,relative_vac', [(True,True),(True,False),(False,True)])
+def test_scalar_reference_calibration_uses_training_ema_and_preserves_state(relative_ef,relative_vac):
+    from copy import deepcopy
+    from mace.tools import torch_geometric
+    from mace_scf.utils.train import calibrate_scalar_references
+    from mace_scf.electrostatics.loss import WeightedLoss
+    from .test_coupled_response import coupled_model
+    model=coupled_model()
+    model.field_dependent_charges_map.deployment_steps.fill_(4)
+    wrapper=FixedPointWrapper(None,{'forces':True},FixedPointTrainingOptions(
+        mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=2)))
+    graphs=[small_data(charge=q,batched=False) for q in (.1,-.2,.3)]
+    for graph,weight,noise in zip(graphs,(1.,2.,1.),(.1,-.1,.1)):
+        batch=torch_geometric.Batch.from_data_list([graph])
+        before=wrapper(model,deepcopy(batch.to_dict()),training=False)
+        graph.fermi_level=before['fermi_level'].detach()[0]+3.5+(noise if weight==1. else noise/2)
+        graph.fermi_level_weight=torch.tensor(1.)
+        graph.vacuum_potential=before['vacuum_potential'].detach()[0]-.2+noise
+        graph.vacuum_potential_weight=torch.tensor(1.)
+        graph.weight=torch.tensor(weight)
+    # The last graph has a missing EF label; its NaN must not enter the fit.
+    graphs[-1].fermi_level_weight.zero_();graphs[-1].fermi_level.fill_(float('nan'))
+    loader=torch_geometric.dataloader.DataLoader(graphs,batch_size=2,shuffle=True)
+    ema=ExponentialMovingAverage(model.parameters(),decay=.99)
+    with torch.no_grad():model.field_dependent_charges_map.common_level.weight.add_(.2)
+    model.node_embedding.requires_grad_(False);model.train()
+    raw=[p.clone().detach() for p in model.parameters()]
+    flags=[p.requires_grad for p in model.parameters()]
+    rng=torch.random.get_rng_state()
+    loss=WeightedLoss({'fermi_level':{'weight':100,'relative':relative_ef},
+                       'vacuum_potential':{'weight':100,'relative':relative_vac}})
+    report=calibrate_scalar_references(model,wrapper,loss,ema,loader,'cpu')
+    expected=torch.tensor([3.5 if relative_ef else 0.,-.2 if relative_vac else 0.])
+    torch.testing.assert_close(model.field_dependent_charges_map.scalar_reference,expected,atol=1.e-12,rtol=1.e-12)
+    assert model.training and wrapper.output_args['forces']
+    assert flags==[p.requires_grad for p in model.parameters()]
+    torch.testing.assert_close(torch.random.get_rng_state(),rng,atol=0.,rtol=0.)
+    for a,b in zip(raw,model.parameters()):torch.testing.assert_close(a,b,atol=0.,rtol=0.)
+    for key,target in (('fermi_level',.005**.5),('vacuum_potential',.1)):
+        if key in report:assert report[key]['panel_RMSE_after_eV']==pytest.approx(target,abs=1.e-12)
+    repeated=calibrate_scalar_references(model,wrapper,loss,ema,loader,'cpu')
+    torch.testing.assert_close(model.field_dependent_charges_map.scalar_reference,expected,atol=1.e-12,rtol=1.e-12)
+    for key in ('fermi_level','vacuum_potential'):
+        if key in repeated:assert abs(repeated[key]['shift_eV'])<1.e-12
+    absolute=WeightedLoss({'fermi_level':{'weight':100,'relative':False},
+                           'vacuum_potential':{'weight':100,'relative':False}})
+    assert calibrate_scalar_references(model,wrapper,absolute,ema,loader,'cpu') is None
+    class Broken:
+        output_args={'forces':True}
+        def __call__(self,*args,**kwargs):
+            raise RuntimeError('calibration interrupted')
+    with pytest.raises(RuntimeError,match='calibration interrupted'):
+        calibrate_scalar_references(model,Broken(),loss,ema,loader,'cpu')
+    torch.testing.assert_close(model.field_dependent_charges_map.scalar_reference,expected,atol=1.e-12,rtol=1.e-12)
+    assert model.training and flags==[p.requires_grad for p in model.parameters()]
+    torch.testing.assert_close(torch.random.get_rng_state(),rng,atol=0.,rtol=0.)
+    for a,b in zip(raw,model.parameters()):torch.testing.assert_close(a,b,atol=0.,rtol=0.)
+
+
+def test_ir_finetune_has_no_epoch_ten_freeze_transition():
+    from pathlib import Path
+    import yaml
+    config=yaml.safe_load((Path(__file__).parents[1]/'config_IrO2_finetune.yaml').read_text())
+    stages=list(config['train_schedule'].values())
+    assert stages[0]['start']==0 and stages[0]['end']==49
+    assert all(not stage.get('freeze_foundation_backbone',False) for stage in stages)
+    assert all(stage['lr']>=.001 for stage in stages)
+    assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps']==50
+
+
 def test_whole_split_audit_restores_ema_rng_and_frozen_parameters(caplog):
     import logging
     from mace.tools import torch_geometric

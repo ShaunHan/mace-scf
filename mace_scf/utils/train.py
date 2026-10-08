@@ -151,6 +151,8 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             validation_start = time.perf_counter()
             if hasattr(optimizer, "eval"):
                 optimizer.eval()
+            calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
+                                        train_loader, device)
             valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
             logging.info("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
@@ -338,6 +340,63 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         ema.update()
     metrics["time"] = time.time()-start
     return loss.detach(), metrics
+
+
+def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device):
+    """Fix relative scalar references on a deterministic training panel.
+
+    Relative supervision cannot identify this constant. Calibrate the same EMA
+    parameters and deployment trajectory used by validation/export, never from
+    validation labels. The response buffer persists in checkpoints; density,
+    energy, forces, spatial electrostatic fields and scalar differences are unchanged.
+    These are observation references, not electrostatic source coefficients or
+    energy offsets. Native/variational energy-conjugate chemical potentials are
+    outside this calibration of the coupled model's separate scalar observers.
+    """
+    response = getattr(model, 'field_dependent_charges_map', None)
+    functions = getattr(loss_fn, 'relative_scalar_losses', {})
+    if not functions or not hasattr(response, 'scalar_reference'):
+        return None
+    from copy import copy
+    from .foundation import calibration_loader
+    predictor = copy(wrapper)
+    predictor.output_args = {key: False for key in wrapper.output_args}
+    flags = [p.requires_grad for p in model.parameters()]
+    was_training = model.training
+    rng = torch.random.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
+    start = time.perf_counter()
+    moments, observed = {}, {}
+    try:
+        model.eval(); model.requires_grad_(False)
+        with torch.no_grad(), ema.average_parameters() if ema is not None else nullcontext():
+            for batch, output in _evaluation_batches(model, predictor, calibration_loader(train_loader), device, None):
+                for key, function in functions.items():
+                    values = function.moments(batch, output).detach().double()
+                    moments[key] = moments.get(key, 0.)+values
+                    observed[key] = observed.get(key, 0)+int((function.weights(batch)>0).sum())
+            report = {}
+            for index, key in enumerate(('fermi_level', 'vacuum_potential')):
+                if key not in moments or not bool(moments[key][0]>0):
+                    continue
+                weight, first, second, _ = moments[key]
+                shift = -first/weight
+                response.scalar_reference[index].add_(shift.to(response.scalar_reference))
+                report[key] = {'observed_training_graphs':observed[key], 'shift_eV':float(shift),
+                    'reference_eV':float(response.scalar_reference[index]),
+                    'panel_RMSE_before_eV':float((second/weight).clamp_min(0).sqrt()),
+                    'panel_RMSE_after_eV':float((second/weight-(first/weight).square()).clamp_min(0).sqrt())}
+            report['seconds'] = time.perf_counter()-start
+            logging.info('Training-only scalar reference calibration %s; constants saved with the model; '
+                         'relative errors and physical fixed-Q trajectory unchanged', report)
+            return report
+    finally:
+        for parameter, flag in zip(model.parameters(), flags):
+            parameter.requires_grad_(flag)
+        model.train(was_training)
+        torch.random.set_rng_state(rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state(cuda_rng, device)
 
 
 def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device, split='validation'):

@@ -947,6 +947,9 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
+        # Observation references for EF and vacuum, fitted on training data.
+        # They do not alter the zero-mean spatial fields or the energy model.
+        self.register_buffer('scalar_reference', torch.zeros(2))
         self.register_buffer('spectral_cutoff', torch.tensor(1.))
         self.register_buffer('deployment_steps', torch.tensor(50))
         self.register_buffer('deployment_mixing', torch.tensor(.5))
@@ -957,10 +960,11 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
-        key = prefix+'vacuum_reference_integrals'
-        if key not in state_dict:
-            state_dict = dict(state_dict)
-            state_dict[key] = torch.zeros_like(self.vacuum_reference_integrals)
+        state_dict = dict(state_dict)
+        for name in ('vacuum_reference_integrals', 'scalar_reference'):
+            key = prefix+name
+            if key not in state_dict:
+                state_dict[key] = torch.zeros_like(getattr(self, name))
         super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
                                      missing_keys, unexpected_keys, error_msgs)
 
@@ -1138,7 +1142,8 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         stiffness = column[:, -1]/(s*present).sum(-1)
         if bool((observed & (~torch.isfinite(stiffness) | (stiffness.abs()<=torch.finfo(stiffness.dtype).tiny))).any()):
             raise RuntimeError('Reference-conditioned chemical-potential response is singular')
-        label = torch.where(observed,data['fermi_level'].reshape(-1),mu)
+        scalar_reference = getattr(r, 'scalar_reference', mu.new_zeros(2))
+        label = torch.where(observed,data['fermi_level'].reshape(-1)-scalar_reference[0],mu)
         delta_charge = (label-mu)/torch.where(observed,stiffness,torch.ones_like(stiffness))
         direction = (root*column[:, :-1]).reshape(*mask.shape,4)
         solved = torch.cat((solved[..., :4]+direction*delta_charge[:, None,None],solved[..., 4:]),-1)
@@ -1270,6 +1275,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             'virials': -stress*g.volume[:,None,None] if stress is not None else None,
             'density_coefficients':density_coefficients, 'dipole':dipole, 'total_charge':charge,
             'fermi_level':mu, 'vacuum_potential':vacuum, 'workfunction':vacuum-mu,
+            'potential_reference':g.vacuum_reference,
             'fourier_density':coarse*g.ngrid, 'fourier_farfield_density':coarse*smoothing[...,None]*g.ngrid,
             'fourier_effective_density':effective*g.ngrid,
             'fourier_potential':(lr+sr)*g.ngrid, 'fourier_total_potential':total*g.ngrid,
@@ -1294,7 +1300,29 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                                                   condition_density=reference_conditioning!='fermi_level')
             if reference is not None:
                 output['reference_response'] = reference
-        return output
+        return apply_scalar_reference(output, r)
+
+
+def apply_scalar_reference(output, response):
+    """Map scalar observations to their saved training-label references.
+
+    Spatial Fourier quantities retain their zero-mean convention. A calibrated
+    vacuum observation equals the model plane plus its scalar reference; the
+    latter is not a deformation-field coefficient. No force/energy or SCF state
+    changes. WF remains the difference of the two reported scalar observations.
+    """
+    reference = getattr(response, 'scalar_reference', None)
+    if reference is not None:
+        for index, key in enumerate(('fermi_level', 'vacuum_potential')):
+            if key in output:
+                output[key] = output[key]+reference[index]
+        if 'potential_reference' in output:
+            output['potential_reference'] = output['potential_reference']+reference[1]
+        if 'workfunction' in output:
+            output['workfunction'] = output['vacuum_potential']-output['fermi_level']
+        if 'reference_response' in output:
+            apply_scalar_reference(output['reference_response'], response)
+    return output
 
 @torch.no_grad()
 def initialize_coupled(model, loader, device, options=None, loss_config=None):

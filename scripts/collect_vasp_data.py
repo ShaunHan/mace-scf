@@ -330,7 +330,13 @@ def truncate_signal_fft(signal, atoms):
 
 
 def align_electrostatic_gauge(scf_grid, proto_grid):
-    """One explicit, recorded gauge for a periodic scalar field."""
+    """Separate deformation and proto fields in the SCF cell-mean reference.
+
+    Both returned grids have zero cell mean. Their sum is SCF minus its cell
+    mean; the proto grid is the atomic reference, not a deformation field and
+    not an independently absolute voltage zero. Fourier storage changes the
+    representation only. EF and the measured vacuum are shifted by scf_mean.
+    """
     scf_grid = np.asarray(scf_grid, dtype=float)
     proto_grid = np.asarray(proto_grid, dtype=float)
     if scf_grid.shape != proto_grid.shape or scf_grid.ndim != 3 or not scf_grid.size:

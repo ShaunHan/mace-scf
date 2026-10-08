@@ -150,6 +150,12 @@ class FixedPointWrapper:
                                  type(response).__name__, self.mode, self.scf_options.num_scf_steps,
                                  int(response.deployment_steps))
                     self._logged_spectral_policy = True
+                    if getattr(response, 'coupled', False):
+                        logging.info('Observation convention: RMSE_ESP is the real-space error of the retained '
+                                     'zero-mean deformation spectrum; proto supplies the atomic reference field. '
+                                     'EF and vacuum include saved training-only scalar references %s eV; '
+                                     'WF is their difference. Relative RMSE removes one whole-split bias.',
+                                     getattr(response, 'scalar_reference', torch.zeros(2)).tolist())
                     if reference != 'none':
                         logging.info('Reference-conditioned auxiliary %s training enabled; '
                                      'validation, forces and deployment use the ordinary reference-free trajectory',reference)

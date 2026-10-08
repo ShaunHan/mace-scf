@@ -351,6 +351,22 @@ def test_reference_conditioning_configuration(reference_mode):
         validate_fixed_point_training_options({'mode':'unroll_scf','scf':{'num_scf_steps':3},'reference_conditioning':'unknown'})
 
 
+def test_reference_conditioning_respects_saved_scalar_references():
+    model=coupled_model()
+    data=reference_data(model)
+    before=evaluate_coupled(model,deepcopy(data),steps=5,training=True,reference_conditioning=True)
+    model.field_dependent_charges_map.scalar_reference.copy_(torch.tensor([.8,-.3]))
+    shifted=deepcopy(data)
+    shifted['fermi_level']=shifted['fermi_level']+.8
+    shifted['vacuum_potential']=shifted['vacuum_potential']-.3
+    after=evaluate_coupled(model,shifted,steps=5,training=True,reference_conditioning=True)
+    for key in ('fourier_density','fourier_potential','reference_charge_error'):
+        torch.testing.assert_close(before['reference_response'][key],after['reference_response'][key],rtol=1.e-12,atol=1.e-12)
+    for key,shift in (('fermi_level',.8),('vacuum_potential',-.3)):
+        torch.testing.assert_close(after['reference_response'][key]-before['reference_response'][key],torch.tensor([shift]),rtol=1.e-12,atol=1.e-12)
+    assert 'workfunction' not in after['reference_response']
+
+
 def test_no_fermi_observations_means_no_conditional_branch():
     model = coupled_model()
     data = small_data()

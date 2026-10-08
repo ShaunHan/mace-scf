@@ -42,6 +42,7 @@ class MACEFixedPointSCF(Calculator):
         "fermi_level",
         "workfunction",
         "vacuum_potential",
+        "potential_reference",
         "electrostatic_energy",
         "electron_energy",
         "convergence_history",
@@ -569,7 +570,7 @@ class MACEFixedPointSCF(Calculator):
             "scf_converged": diagnostics["final_abs_difference"] <= self.scf_options.scf_tolerance,
             "electrostatic_features": electrostatic_features,
         }
-        for key in ("workfunction", "vacuum_potential"):
+        for key in ("workfunction", "vacuum_potential", "potential_reference"):
             if output.get(key) is not None:
                 results[key] = float(output[key].detach().reshape(-1)[0])
         if self.save_full_scf_history:

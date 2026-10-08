@@ -175,6 +175,47 @@ def test_optional_proto_reference_is_one_shared_gauge_and_serializes(tmp_path):
     torch.testing.assert_close(actual['vacuum_potential'],before['vacuum_potential'])
 
 
+@pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
+@pytest.mark.parametrize('proto', [False, True])
+def test_scalar_references_preserve_physics_relative_gradients_and_export(mode, proto, tmp_path):
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    response.proto_fitted.fill_(proto)
+    graphs = [small_data(charge=q,batched=False) for q in (.1,-.2)]
+    for i, graph in enumerate(graphs):
+        graph.fermi_level = torch.tensor(float(i))
+        graph.fermi_level_weight = torch.tensor(1.)
+        graph.vacuum_potential = torch.tensor(.5*i)
+        graph.vacuum_potential_weight = torch.tensor(1.)
+    batch = torch_geometric.Batch.from_data_list(graphs)
+    options = dict(steps=50 if mode == 'implicit' else 3, mode=mode,training=True,tolerance=1.e-10)
+    before = evaluate_coupled(model,deepcopy(batch.to_dict()),**options)
+    loss = WeightedLoss({'fermi_level':100,'vacuum_potential':100})
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    gradient = torch.autograd.grad(loss(batch,before),parameters,allow_unused=True)
+    response.scalar_reference.copy_(torch.tensor([3.5,-.2]))
+    after = evaluate_coupled(model,deepcopy(batch.to_dict()),**options)
+    new_gradient = torch.autograd.grad(loss(batch,after),parameters,allow_unused=True)
+    for a,b in zip(gradient,new_gradient):
+        if a is None: assert b is None
+        else: torch.testing.assert_close(a,b,atol=1.e-9,rtol=1.e-9)
+    for key in ('energy','forces','dipole','density_coefficients','fourier_potential','fourier_total_potential','scf_residual'):
+        torch.testing.assert_close(before[key],after[key],atol=1.e-12,rtol=1.e-12)
+    for key,shift in (('fermi_level',3.5),('vacuum_potential',-.2),('workfunction',-3.7)):
+        torch.testing.assert_close(after[key]-before[key],torch.full((2,),shift),atol=1.e-12,rtol=1.e-12)
+    geometry=CoupledGeometry(model,batch.to_dict(),batch.positions)
+    plane=geometry.plane(torch.view_as_complex((after['fourier_total_potential']/geometry.ngrid).contiguous()))
+    torch.testing.assert_close(plane+after['potential_reference'],after['vacuum_potential'],atol=1.e-12,rtol=1.e-12)
+    path=tmp_path/'referenced.model';torch.save(model,path)
+    restored=torch.load(path,weights_only=False)
+    prediction=evaluate_coupled(restored,deepcopy(batch.to_dict()),**options)
+    torch.testing.assert_close(prediction['workfunction'],after['workfunction'])
+    state=model.state_dict()
+    del state['field_dependent_charges_map.scalar_reference']
+    restored.load_state_dict(state,strict=True)
+    assert not bool(restored.field_dependent_charges_map.scalar_reference.any())
+
+
 def test_field_only_probes_respect_no_grad_after_force_evaluation():
     model=coupled_model();data=small_data()
     reference=evaluate_coupled(model,data,steps=12)
