@@ -1,16 +1,11 @@
 #!/usr/bin/env python3
-"""Collect matched VASP SCF/proto data for MACE-VOLT, without project helpers.
+"""Collect VASP density, potential, energy, force and dipole targets.
 
-Dependencies: NumPy, SciPy, h5py, ASE and pymatgen. This script never runs VASP.
-Scalar labels retain the raw VASP reference. Fourier labels retain the raw
-deformation and proto potentials, including their uniform coefficient. Neither
-spatial nor dataset means are subtracted. The model compares potential fields
-modulo their arbitrary uniform offset; no duplicate gauge fields enter XYZ.
-Use --preflight for read-only validation; add --poisson-check for a source audit.
+Edit the settings below, then run this script. Potentials and the Fermi level
+retain their raw VASP reference; no spatial mean is subtracted.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import math
@@ -29,12 +24,20 @@ from scipy.optimize import linear_sum_assignment
 BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
 PROTO_BASE_PATH = BASE_PATH.with_name("dft_proto")
 SYSTEM_NAME = "IrO2OH_110"
-CHUNK_SIZE, N_PROCS, REUSE_HDF = 5, 64, False
+CHUNK_SIZE = 5
+N_PROCS = 64
+REUSE_HDF = False
 K_CUTOFF = 18.0
-DENSITY_SIGMAS, POTENTIAL_SIGMAS = [1.5], [1.5]
+DENSITY_SIGMAS = [1.5]
+POTENTIAL_SIGMAS = [1.5]
 FOURIER_CUTOFF_SAFETY_FACTOR = 1.25
 FMAX_TOL = 6.0
-VALID_FRACTION, SPLIT_SEED = 0.2, 7777
+VALID_FRACTION = 0.2
+SPLIT_SEED = 7777
+OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
+OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
+OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
+
 UNCONVERGED_IDS = []
 POTENTIAL_REFERENCE = "vasp_raw"
 PAIR_SCHEMA = "macevolt_vasp_pair"
@@ -744,19 +747,10 @@ def split_configs(configs):
     return train_configs, valid_configs
 
 
-def _initialize_worker(settings):
-    globals().update(settings)
-
-
 def run_jobs(function, jobs):
-    # Pass CLI paths explicitly to workers, also under spawn/forkserver.
-    names = ("BASE_PATH", "PROTO_BASE_PATH", "SYSTEM_NAME", "K_CUTOFF", "DENSITY_SIGMAS",
-             "POTENTIAL_SIGMAS", "POTENTIAL_REFERENCE", "FMAX_TOL", "PAIR_SCHEMA",
-             "RHO_HDF_NAME", "PHI_HDF_NAME", "PROTO_PHI_HDF_NAME", "FOURIER_CUTOFF_SAFETY_FACTOR")
-    settings = {name: globals()[name] for name in names}
     if N_PROCS is None or N_PROCS <= 1:
         return [function(job) for job in jobs]
-    with mp.Pool(N_PROCS, initializer=_initialize_worker, initargs=(settings,)) as pool:
+    with mp.Pool(processes=N_PROCS) as pool:
         return list(pool.imap(function, jobs))
 
 
@@ -774,112 +768,11 @@ def collect():
     if not configs:
         raise SystemExit("No configurations collected")
     train, valid = split_configs(configs)
-    for suffix, subset in (("", configs), ("_train", train), ("_valid", valid)):
-        path = BASE_PATH / f"combined_VASP_shifted{suffix}.xyz"
+    for path, subset in ((OUT_XYZ, configs), (OUT_TRAIN_XYZ, train),
+                         (OUT_VALID_XYZ, valid)):
         write(str(path), subset)
         print(f"Wrote {len(subset)} configurations to {path}")
 
 
-# Optional raw-source diagnostic; never used to modify any training label.
-def nonplanar_poisson_check(scf_potential, proto_potential, delta_electron_density,
-                            cell, *, sigma=1.5, open_axis=2):
-    """Diagnostic on full raw arrays; not a label conversion or pass/fail bound."""
-    a,b,n=(np.asarray(x,dtype=float) for x in (scf_potential,proto_potential,delta_electron_density))
-    if a.shape!=b.shape or a.shape!=n.shape or a.ndim!=3 or not all(np.isfinite(x).all() for x in (a,b,n)):
-        raise ValueError('Poisson diagnostic requires finite, matching full 3D arrays')
-    if sigma<=0 or open_axis not in (0,1,2):raise ValueError('Invalid diagnostic width or open axis')
-    reciprocal=2*np.pi*np.linalg.inv(np.asarray(cell,dtype=float)).T
-    axes=[np.fft.fftfreq(k)*k for k in a.shape]
-    integer=np.stack(np.meshgrid(*axes,indexing='ij'),-1)
-    wave=integer@reciprocal;k2=np.sum(wave*wave,axis=-1)
-    periodic=[i for i in range(3) if i!=open_axis]
-    selected=(k2>0)&np.any(integer[...,periodic]!=0,axis=-1)
-    kernel=np.exp(-.5*sigma*sigma*k2)
-    potential=np.fft.fftn(a-b)/a.size*kernel
-    density=np.fft.fftn(n)/a.size*kernel
-    # n is positive electron number; delta electron potential is +K*delta n/k^2.
-    K=1/(5.526349406e-3)
-    predicted=K*density/np.where(k2>0,k2,1.)
-    error=(predicted-potential)[selected]
-    return dict(modes=int(selected.sum()),sigma_A=float(sigma),
-        nonplanar_potential_RMS_eV=float(np.linalg.norm(potential[selected])),
-        nonplanar_Poisson_error_RMS_eV=float(np.linalg.norm(error)),
-        electron_number_change=float(n.mean()*abs(np.linalg.det(cell))),
-        scope='Smoothed nonplanar modes only; not a vacuum error floor or proof of exact PAW source identity')
-
-
-def preflight(limit=None, poisson_check=False):
-    directories = get_output_dirs(BASE_PATH)
-    selected = directories if limit is None else directories[:limit]
-    records = []
-    for outdir in selected:
-        try:
-            atoms = read(str(outdir / f"{SYSTEM_NAME}_vasp_sp.traj"))
-            report = check_pair(outdir, atoms)
-            _, forces, _, _ = scalar_labels(outdir, atoms)
-            _, _, metadata, (scf, proto) = read_potential_pair(outdir, atoms, report)
-            get_external_field(outdir, atoms)
-            axis = open_axis_from_info(atoms.info)
-            first, second = (read_chg_total(outdir / name) for name in ("AECCAR1", "AECCAR2"))
-            if first.shape != second.shape:
-                raise ValueError("AECCAR grids differ")
-            # Ensure the existing grids can support the configured Fourier cutoff.
-            for shape in (first.shape, scf.shape):
-                target_shape = 2 * fft_attrs(atoms, shape)["i_cutoff"]
-                if np.any(target_shape > np.asarray(shape)):
-                    raise ValueError(f"K_CUTOFF requires {target_shape.tolist()}, larger than raw grid {shape}")
-            if atoms.info["config_type"] == "slab" and report["proto"]["outcar_dipole"] is not None:
-                periodic = [i for i in range(3) if i != axis]
-                area_vector = np.cross(atoms.cell[periodic[0]], atoms.cell[periodic[1]])
-                area = float(np.linalg.norm(area_vector))
-                step = (1 / 5.526349406e-3) * abs(np.asarray(report["proto"]["outcar_dipole"]) @ (area_vector / area)) / area
-                report["proto_boundary_diagnostic"] = dict(
-                    dipole_step_magnitude_eV=float(step),
-                    note="Diagnostic only; a nonzero proto boundary is not silently subtracted.")
-            if poisson_check:
-                sources = {"AE_reconstructed_valence_difference": (second - first) / atoms.get_volume()}
-                proto_dir = proto_locpot_path_for_outdir(outdir).parent
-                if all((path / "CHGCAR").is_file() for path in (outdir, proto_dir)):
-                    sources["CHGCAR_smooth_grid_difference"] = (read_chg_total(outdir / "CHGCAR") - read_chg_total(proto_dir / "CHGCAR")) / atoms.get_volume()
-                report["source_comparators"] = {
-                    key: nonplanar_poisson_check(scf, proto, value, atoms.cell,
-                         sigma=float(POTENTIAL_SIGMAS[0]), open_axis=axis)
-                    for key, value in sources.items()}
-            fmax = float(np.linalg.norm(forces, axis=1).max())
-            records.append(dict(path=str(outdir), ok=True, report=report, gauge=metadata,
-                                excluded_by_fmax=fmax > FMAX_TOL))
-        except Exception as error:
-            records.append(dict(path=str(outdir), ok=False, error=f"{type(error).__name__}: {error}"))
-    print(json.dumps(dict(discovered=len(directories), checked=len(records),
-                         partial=len(selected) < len(directories), records=records), indent=2))
-    if not records or any(not record["ok"] for record in records):
-        raise SystemExit(2)
-
-
-def main():
-    global BASE_PATH, PROTO_BASE_PATH, N_PROCS, REUSE_HDF
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base-path", type=Path, default=BASE_PATH)
-    parser.add_argument("--proto-base-path", type=Path, default=PROTO_BASE_PATH)
-    parser.add_argument("--processes", type=int, default=N_PROCS)
-    parser.add_argument("--reuse-hdf", action="store_true", default=REUSE_HDF)
-    parser.add_argument("--preflight", action="store_true", help="Read-only validation; write no HDF/XYZ files")
-    parser.add_argument("--poisson-check", action="store_true", help="With --preflight, add a nonplanar raw-source diagnostic")
-    parser.add_argument("--limit", type=int, help="Limit the read-only preflight; default checks every discovered pair")
-    args = parser.parse_args()
-    if (args.poisson_check or args.limit is not None) and not args.preflight:
-        parser.error("--poisson-check and --limit require --preflight")
-    if args.limit is not None and args.limit < 1:
-        parser.error("--limit must be positive")
-    if args.processes < 0:
-        parser.error("--processes must be nonnegative; 0 or 1 runs serially")
-    BASE_PATH, PROTO_BASE_PATH = args.base_path, args.proto_base_path
-    N_PROCS, REUSE_HDF = args.processes, args.reuse_hdf
-    if args.preflight:
-        preflight(args.limit, args.poisson_check)
-    else:
-        collect()
-
-
 if __name__ == "__main__":
-    main()
+    collect()
