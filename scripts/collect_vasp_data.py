@@ -2,7 +2,10 @@
 """Collect matched VASP SCF/proto data for MACE-VOLT, without project helpers.
 
 Dependencies: NumPy, SciPy, h5py, ASE and pymatgen. This script never runs VASP.
-It retains the current field, gauge, Fourier, label and grouped-split conventions.
+Scalar labels retain the raw VASP reference. Fourier labels retain the raw
+deformation and proto potentials, including their uniform coefficient. Neither
+spatial nor dataset means are subtracted. The model compares potential fields
+modulo their arbitrary uniform offset; no duplicate gauge fields enter XYZ.
 Use --preflight for read-only validation; add --poisson-check for a source audit.
 """
 from __future__ import annotations
@@ -33,7 +36,7 @@ FOURIER_CUTOFF_SAFETY_FACTOR = 1.25
 FMAX_TOL = 6.0
 VALID_FRACTION, SPLIT_SEED = 0.2, 7777
 UNCONVERGED_IDS = []
-POTENTIAL_REFERENCE = "applied_zero_mean"
+POTENTIAL_REFERENCE = "vasp_raw"
 PAIR_SCHEMA = "macevolt_vasp_pair"
 RHO_HDF_NAME = "deformation_charge_density.hdf"
 PHI_HDF_NAME = "deformation_hartree_potential.hdf"
@@ -231,7 +234,7 @@ def final_force_block(outcar_text: str, atom_count: int):
     return [r[:3] for r in values], [r[3:] for r in values]
 
 
-# Fourier conventions and target construction (unchanged).
+# Fourier conventions and target construction.
 def _component_weight(source_info, key, default, require_nonzero=False):
     value = np.asarray(source_info.get(key, default), dtype=float).reshape(3)
     if (not np.all(np.isfinite(value))) or np.any(value < 0.0):
@@ -329,31 +332,20 @@ def truncate_signal_fft(signal, atoms):
     return truncated, attrs
 
 
-def align_electrostatic_gauge(scf_grid, proto_grid):
-    """Separate deformation and proto fields in the SCF cell-mean reference.
+def decompose_potential(scf_grid, proto_grid):
+    """Retain raw deformation S-A and proto A, whose sum is the SCF grid S.
 
-    Both returned grids have zero cell mean. Their sum is SCF minus its cell
-    mean; the proto grid is the atomic reference, not a deformation field and
-    not an independently absolute voltage zero. Fourier storage changes the
-    representation only. EF and the measured vacuum are shifted by scf_mean.
+    Their spatial means carry the VASP gauge, not an electric field. Keep them
+    in storage; the spectral loss compares nonzero modes and scalar labels
+    define the observation reference separately.
     """
     scf_grid = np.asarray(scf_grid, dtype=float)
     proto_grid = np.asarray(proto_grid, dtype=float)
     if scf_grid.shape != proto_grid.shape or scf_grid.ndim != 3 or not scf_grid.size:
         raise ValueError("SCF and proto potential grids must have the same nonempty 3D shape")
     if not np.isfinite(scf_grid).all() or not np.isfinite(proto_grid).all():
-        raise ValueError("Nonfinite SCF/proto potential grid; gauge alignment cannot repair it")
-    scf_mean, proto_mean = float(scf_grid.mean()), float(proto_grid.mean())
-    proto = proto_grid - proto_mean
-    deformation = scf_grid - scf_mean - proto
-    return deformation, proto, scf_mean, proto_mean
-
-
-def align_electronic_level(fermi_level, scf_mean):
-    """Shift EF by exactly the scalar offset removed from the total potential."""
-    if not np.isfinite(fermi_level) or not np.isfinite(scf_mean):
-        raise ValueError("Nonfinite Fermi level or potential gauge")
-    return float(fermi_level) - float(scf_mean)
+        raise ValueError("Nonfinite SCF/proto potential grid")
+    return scf_grid - proto_grid, proto_grid
 
 
 def add_density_targets(atoms, shifted_rho_fft, sigmas, total_charge):
@@ -388,13 +380,12 @@ def open_axis_from_info(info):
 
 
 def add_potential_targets(atoms, shifted_phi_fft, sigmas, key_prefix="vasp_phi"):
-    """Store one Gaussian-resolved target per requested width."""
+    """Store one Gaussian-resolved target per width, retaining its raw mean."""
     for sigma in sigmas:
         sigma = float(sigma)
         shape = tuple(max_n_cut(atoms, sigma=sigma, max_l=1))
         coefficients = truncate_fft3(shifted_phi_fft, shape, apply_scale=True)
         coefficients = project_hermitian_fft(coefficients*gaussian_kernel(shape, sigma, atoms.cell.array))
-        coefficients[0, 0, 0] = 0.
         atoms.info[f"{key_prefix}_fftn_shifted_{sigma}"] = split_complex_fft(coefficients).astype(np.float32)
 
 
@@ -453,7 +444,7 @@ def compute_vacuum_potential(atoms, outdir, potential_grid=None):
         2.0 * dz
     )
     return (
-        float(vacuum_potential - np.mean(potential_grid)),
+        float(vacuum_potential),
         float(vacuum_fraction),
         float(slope),
     )
@@ -561,10 +552,8 @@ def read_potential_pair(outdir, atoms, pair=None):
     if pair is None:
         validate_potential_runs(*paths, atoms.info["config_type"], open_axis_from_info(atoms.info))
     raw = [np.asarray(grid.data["total"], dtype=float) for grid in grids]
-    deformation, proto, mean, proto_mean = align_electrostatic_gauge(*raw)
-    metadata = dict(potential_reference=POTENTIAL_REFERENCE, scf_mean=mean,
-                    proto_mean=proto_mean, gauge_version="joint_scf_zero_mean_v1",
-                    potential_kind="ionic_plus_hartree", potcar_match=1)
+    deformation, proto = decompose_potential(*raw)
+    metadata = dict(potential_reference=POTENTIAL_REFERENCE)
     return deformation, proto, metadata, raw
 
 
@@ -682,7 +671,7 @@ def combine_job(outdir):
     signature = raw_signature(outdir, proto_locpot_path_for_outdir(outdir).parent)
     if not all(current_cache(path, signature) for path in paths):
         raise ValueError(f"Stale/incompatible HDF cache in {outdir}; rebuild caches, not DFT")
-    (rho_fftn, _), (phi_fftn, phi_attrs), (proto_phi_fftn, proto_attrs) = map(read_hdf, paths)
+    (rho_fftn, _), (phi_fftn, _), (proto_phi_fftn, _) = map(read_hdf, paths)
     rho_fft = -rho_fftn.sum(axis=0)  # Delta n in HDF; signed charge Delta rho in XYZ.
     phi_fft, proto_phi_fft = phi_fftn[0], proto_phi_fftn[0]
     density_sigmas, potential_sigmas = DENSITY_SIGMAS, POTENTIAL_SIGMAS
@@ -693,16 +682,11 @@ def combine_job(outdir):
     atoms.arrays["vasp_forces"] = forces
     atoms.info = {
         "config_type": config_type,
-        "open_axis": open_axis_from_info(source_info),
         "vasp_free_energy": energy,
-        "vasp_efermi": align_electronic_level(oc.efermi, phi_attrs["scf_mean"]),
+        "vasp_efermi": float(oc.efermi),
         "external_field": np.asarray(ext_field, dtype=float),
         "total_charge": float(total_charge),
         "dft_group_id": outdir.parent.name,
-        "potential_reference": POTENTIAL_REFERENCE,
-        "density_convention": "signed_charge_deformation",
-        "potcar_match": int(phi_attrs.get("potcar_match", -1)),
-        "potential_kind": "ionic_plus_hartree",
     }
     for prefix in ("vacuum", "dipole_correction"):
         key = f"{prefix}_{'xyz'[open_axis]}frac"
@@ -710,8 +694,6 @@ def combine_job(outdir):
             atoms.info[key] = float(source_info[key])
 
     add_density_targets(atoms, rho_fft, density_sigmas, float(total_charge))
-    atoms.info["density_smearing_width"] = float(density_sigmas[0])
-    atoms.info["potential_smearing_width"] = float(potential_sigmas[0])
     slab = config_type == "slab"
     dipole_weight = (_component_weight(source_info, "config_dipole_weight", np.eye(3)[open_axis])
                      if slab else np.zeros(3))

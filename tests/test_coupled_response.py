@@ -1,4 +1,4 @@
-"""v366 response transfer, physical observers and hotfix2 loss contracts."""
+"""Coupled response transfer, physical observers and spectral loss contracts."""
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -169,10 +169,55 @@ def test_optional_proto_reference_is_one_shared_gauge_and_serializes(tmp_path):
     saved=torch.load(path,weights_only=False)
     restored=evaluate_coupled(saved,small_data(),steps=3)
     torch.testing.assert_close(restored['vacuum_potential'],after['vacuum_potential'])
-    # A full observed proto spectrum always takes precedence; no double count.
+    # Optional spatial proto data must not change the scalar observation.
     r.proto_fitted.fill_(True)
     actual=evaluate_coupled(model,small_data(),steps=3)
-    torch.testing.assert_close(actual['vacuum_potential'],before['vacuum_potential'])
+    torch.testing.assert_close(actual['vacuum_potential'],after['vacuum_potential'])
+
+
+@pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
+def test_neutral_proto_reference_preserves_response_and_wf(mode):
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    options = dict(mode=mode, steps=50 if mode == 'implicit' else 4, training=True)
+    before = evaluate_coupled(model, small_data(), **options)
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    gradient = torch.autograd.grad(before['workfunction'].sum()+before['forces'].square().sum(),
+                                   parameters, allow_unused=True)
+    response.proto_fitted.fill_(True)
+    response.proto_coefficients.copy_(torch.linspace(-80.,0.,64).expand(2,-1))
+    response.vacuum_reference_integrals.fill_(80.)
+    after = evaluate_coupled(model, small_data(), **options)
+    new_gradient = torch.autograd.grad(after['workfunction'].sum()+after['forces'].square().sum(),
+                                       parameters, allow_unused=True)
+    for key in ('energy','forces','density_coefficients','fourier_potential','workfunction','scf_residual'):
+        torch.testing.assert_close(after[key],before[key],atol=1.e-11,rtol=1.e-11)
+    for a,b in zip(gradient,new_gradient):
+        if a is None: assert b is None
+        else: torch.testing.assert_close(a,b,atol=1.e-10,rtol=1.e-10)
+    for key in ('fermi_level','vacuum_potential'):
+        torch.testing.assert_close(after[key]-before[key],torch.tensor([240./(7*7*12)]))
+    assert not torch.equal(after['fourier_total_potential'],before['fourier_total_potential'])
+    data = small_data()
+    g = CoupledGeometry(model,data,data['positions'])
+    plane = g.plane(torch.view_as_complex((after['fourier_total_potential']/g.ngrid).contiguous()))
+    torch.testing.assert_close(plane+after['potential_reference'],after['vacuum_potential'])
+    # Changing the observation plane must never change a bulk chemical level.
+    data['vacuum_fraction'] = torch.tensor([.37])
+    moved = evaluate_coupled(model,data,**options)
+    torch.testing.assert_close(moved['fermi_level'],after['fermi_level'])
+
+
+def test_saved_response_reference_prevents_silent_checkpoint_reinterpretation():
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    assert response.get_extra_state()['response_reference'] == 'neutral'
+    response.set_extra_state({'deployment_mode':'unroll_scf'})
+    assert response.response_reference == 'total'
+    state = model.state_dict()
+    copy = coupled_model()
+    copy.load_state_dict(state)
+    assert copy.field_dependent_charges_map.response_reference == 'total'
 
 
 @pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])

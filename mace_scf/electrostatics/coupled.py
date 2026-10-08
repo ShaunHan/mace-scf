@@ -1,7 +1,8 @@
 """Coupled density/potential response, screened solves and physical observers.
 
-One nonlinear constitutive map sees the evolving total field. Coarse charge
-moments and the regular effective potential remain distinct observations.
+One nonlinear constitutive map sees the evolving deformation field, including
+its long- and short-range parts. The neutral-atom reference is an observation,
+not an additional applied drive. Coarse density and potential remain distinct.
 Finite trajectories and converged-root differentiation are explicit modes.
 """
 from dataclasses import dataclass
@@ -908,7 +909,7 @@ def implicit_root(function, initial, *args, options=None):
 
 
 class CoupledResponse(AtomicPotentialResponse):
-    """Shared nonlinear response with the v366 charge/chemical-level split."""
+    """Shared nonlinear response with separate charge contrasts and chemical level."""
     coupled = True
     spectral = True
 
@@ -937,7 +938,7 @@ class CoupledResponse(AtomicPotentialResponse):
         self.scalar_slices, self.vector_slices = scalar_slices, vector_slices
         self.coarse_dim = 4
         # SpectralGeometry prepares the moment carrier. The regular-potential
-        # basis below retains v366's normalization and radial-difference basis.
+        # basis below uses volume-normalized Gaussian radial differences.
         self.potential_widths = ()
         channels=len(source_widths)
         self.state_irreps = o3.Irreps(f'0e+1o+{channels}x0e+{channels}x1o').simplify()
@@ -954,9 +955,14 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('deployment_steps', torch.tensor(50))
         self.register_buffer('deployment_mixing', torch.tensor(.5))
         self.deployment_mode = 'unroll_scf'
+        # The neutral-atom potential belongs to the reference configuration.
+        # Learn its deformation response; retain the reference in observers.
+        # This is a formulation version, not an adjustable training parameter.
+        self.response_reference = 'neutral'
 
     def get_extra_state(self):
-        return {'deployment_mode': self.deployment_mode}
+        return {'deployment_mode': self.deployment_mode,
+                'response_reference': getattr(self, 'response_reference', 'total')}
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -973,6 +979,10 @@ class CoupledResponse(AtomicPotentialResponse):
         if mode not in ('unroll_scf', 'implicit'):
             raise ValueError(f'Unknown saved solver mode {mode}')
         self.deployment_mode = mode
+        reference = state.get('response_reference', 'total')
+        if reference not in ('neutral', 'total'):
+            raise ValueError(f'Unknown saved response reference {reference}')
+        self.response_reference = reference
 
 class CoupledGeometry(SpectralGeometry):
     """Same Fourier support for the response, observers and moment screening."""
@@ -988,13 +998,25 @@ class CoupledGeometry(SpectralGeometry):
         receiver = torch.exp(-.5*self.k2[..., None]*r.receiver_widths.to(positions).square())
         proto = self.proto if len(widths) else torch.zeros_like(self.proto)
         self.proto = proto
+        self.neutral_reference = getattr(r, 'response_reference', 'total') == 'neutral'
+        self.observer_proto = proto
+        if self.neutral_reference:
+            # A fixed neutral-atom field is not an extra applied perturbation.
+            # Its local chemistry is already an input through MACE geometry.
+            # Both learned long- and short-range fields still enter every step.
+            # The scalar vacuum observation is not a truncated-FFT plane.
+            # Use the same training-fitted atomic reference whether or not a
+            # band-limited proto spectrum is supplied. It is independent of
+            # the chosen vacuum plane and common to EF and vacuum.
+            self.vacuum_reference = (self.attrs.sum(1)@r.vacuum_reference_integrals)/self.volume*self.slab
+            proto = torch.zeros_like(proto)
         ramp = self.ramp(-self.slab_factor)
         zn = (self.pack(positions)*self.normal[:, None]).sum(-1)*self.present
         self.tensors = (co, si, self.wave, basis.real*active[..., None], basis.imag*active[..., None],
                         radial*active[..., None], receiver*active[..., None], torch.view_as_real(proto),
                         torch.view_as_real(ramp), torch.view_as_real(self.applied+self.counter),
                         zn, self.normal, -self.coulomb, self.volume.reciprocal())
-        # Match v366's physical-support packing. Padded FFT corners and k=0
+        # Pack the physical spectral support. Padded FFT corners and k=0
         # never enter the dense moment operator or any recurrent field sample.
         # Observers expand back to the common FFT grid without changing modes.
         count = int(active.sum(-1).max())
@@ -1083,7 +1105,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
 
     update.raw = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]
     update.convergence_residual = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]-z
-    # Exact screened geometry-reference seed from v366. The nonlinear response
+    # Exact screened geometry-reference seed. The nonlinear response
     # then updates density AND potential; this is not an inference-time fit.
     spectra = evaluate_coefficients(state, g.tensors, g.kernels, r.density_width)
     values, gradient = sample_spectrum(spectra[0], g.tensors)
@@ -1100,7 +1122,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
 
     At measured mu, solve the charge/dipole response exactly while keeping the
     current nonlinear coefficients fixed. At measured total potential, evaluate
-    the same chemical-level map. No atomic DFT partition or Poisson inversion of
+    the same chemical-level map in its saved field reference. No Poisson inversion of
     the measured density is used. The ordinary fixed-Q prediction is untouched.
     """
     r = model.field_dependent_charges_map
@@ -1162,10 +1184,13 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
     # Only complete retained DFT fields are valid inputs. A missing spectrum
     # is not a measured zero field; those graphs receive no conditional EF loss.
-    if 'fourier_total_potential_dft' in output:
-        complete = (~g.mask | (g.k2==0) | output['fourier_total_potential_dft_mask']).all(-1)
-        use = observed & complete & (data['fourier_potential_weight']>0) & (data['fourier_proto_potential_weight']>0)
-        measured = output['fourier_total_potential_dft']/g.ngrid
+    field_key = 'fourier_potential' if g.neutral_reference else 'fourier_total_potential'
+    if field_key+'_dft' in output:
+        complete = (~g.mask | (g.k2==0) | output[field_key+'_dft_mask']).all(-1)
+        use = observed & complete & (data['fourier_potential_weight']>0)
+        if not g.neutral_reference:
+            use &= data['fourier_proto_potential_weight']>0
+        measured = output[field_key+'_dft']/g.ngrid
         rows = torch.arange(len(g.counts),device=state.device)[:, None]
         selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
         selected = torch.where(use[:, None,None],selected,spectral[0])
@@ -1191,7 +1216,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if mode not in ('unroll_scf', 'shortcut_scf', 'implicit') or int(steps) < 1 or not 0 < mixing <= 1:
             raise ValueError('Invalid coupled SCF mode, iteration budget or mixing')
         if not constant_charge:
-            raise NotImplementedError('The restored v366 response uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
+            raise NotImplementedError('CoupledResponse uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
         data = dict(data)
         positions = data['positions']
         if compute_force:
@@ -1270,12 +1295,19 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                 stress = deriv[-1]/g.volume[:,None,None] if deriv[-1] is not None else torch.zeros_like(strain)
         mu = mu+model.fermi_level_offset+g.vacuum_reference
         vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
+        potential_reference = g.vacuum_reference
+        if g.neutral_reference:
+            # Restore the full band-limited field for spatial observations.
+            # Its finite-grid neutral-atom tail is replaced by the fitted
+            # atomic reference in the scalar observer, not fed back into SCF.
+            total = total+torch.view_as_real(g.observer_proto)
+            potential_reference = potential_reference-g.plane(g.observer_proto)
         smoothing = torch.exp(-.5*(float(r.receiver_widths.max())**2-r.density_width**2)*g.k2)
         output = {'energy':energy, 'forces':forces, 'stress':stress,
             'virials': -stress*g.volume[:,None,None] if stress is not None else None,
             'density_coefficients':density_coefficients, 'dipole':dipole, 'total_charge':charge,
             'fermi_level':mu, 'vacuum_potential':vacuum, 'workfunction':vacuum-mu,
-            'potential_reference':g.vacuum_reference,
+            'potential_reference':potential_reference,
             'fourier_density':coarse*g.ngrid, 'fourier_farfield_density':coarse*smoothing[...,None]*g.ngrid,
             'fourier_effective_density':effective*g.ngrid,
             'fourier_potential':(lr+sr)*g.ngrid, 'fourier_total_potential':total*g.ngrid,
@@ -1370,12 +1402,12 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.scalar_field_scale.copy_((1.+ps/max(count,1.e-30)).sqrt())
     r.vector_field_scale.copy_((1.+fs/max(count,1.e-30)).sqrt())
     r.field_scales_initialized.fill_(True)
-    logging.info('Coupled total-field response: screened moment seed, %d local potential channels, Gaussian receiver widths %s',
-                 r.source_channels, r.receiver_widths.tolist())
+    logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
+                 r.response_reference, r.source_channels, r.receiver_widths.tolist())
 
 @torch.no_grad()
 def initialize_reference(model, loader, device, options, loss_config):
-    """Restore v366's train-only cold species/field fit and objective guard.
+    """Initialize species/field references using the guarded training objective.
 
     Only existing species levels and scalar reference amplitudes are fitted.
     A cold affine trajectory has a closed form, verified against its raw

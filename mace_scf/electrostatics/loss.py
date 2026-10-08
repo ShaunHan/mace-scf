@@ -243,7 +243,11 @@ class FixedPointStability(torch.nn.Module):
 
 
 def spectral_errors(ref, pred, key):
-    """Per-graph Parseval MSE in physical real-space units."""
+    """Per-graph Parseval MSE; potential fields are compared modulo a constant.
+
+    Raw and zero-mean potential labels give the same nonzero-mode objective.
+    Density retains k=0 because it measures total charge, not a voltage gauge.
+    """
     weight_key = ('fourier_density' if key == 'fourier_farfield_density' else
                   'fourier_potential' if key == 'fourier_total_potential' else key)
     weights = (ref.weight*getattr(ref, weight_key+'_weight') if ref is not None else
@@ -304,7 +308,7 @@ class WeightedFourierDensity(torch.nn.Module):
 
 
 class WeightedFourierPotential(torch.nn.Module):
-    """Parseval MSE on the complete observed, retained potential spectrum."""
+    """Real-space MSE of the retained potential after uniform-offset alignment."""
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
         square = spectral_errors(ref, pred, 'fourier_potential')

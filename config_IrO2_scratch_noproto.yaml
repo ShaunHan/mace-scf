@@ -1,4 +1,4 @@
-# v372 hotfix: relative objectives, saved training-only scalar references.
+# v373: neutral-reference response; optional proto only restores spatial observations.
 heads:
   default:
     arrays_keys:
@@ -59,7 +59,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch_v372_hotfix
+checkpoints_dir: checkpoints_IrO2_scratch_noproto_v373
 compute_forces: true
 train_schedule:
   0:

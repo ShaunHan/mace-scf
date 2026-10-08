@@ -96,9 +96,17 @@ def test_finite_trajectory_rotation_invariance():
 
 
 @pytest.mark.parametrize('relative', [True, False])
-def test_atomic_vacuum_reference_fit_without_proto(relative):
+@pytest.mark.parametrize('kind', ['variational','coupled','coupled_proto'])
+def test_atomic_vacuum_reference_fit(relative,kind):
     from mace_scf.electrostatics.potential import initialize_vacuum_reference
-    model=small_model()
+    if kind == 'variational':
+        model=small_model()
+    else:
+        from .test_coupled_response import coupled_model
+        model=coupled_model()
+        if kind == 'coupled_proto':
+            model.field_dependent_charges_map.proto_fitted.fill_(True)
+            model.field_dependent_charges_map.proto_coefficients.fill_(13.)
     reference=torch.tensor([100.,-35.])
     graphs=[]
     for i,(hydrogens,height) in enumerate(((1,12.),(2,12.),(1,15.),(3,18.))):
@@ -109,6 +117,8 @@ def test_atomic_vacuum_reference_fit_without_proto(relative):
         shape=torch.tensor(geometry.shape)
         # Odd shifted Fourier grids, with every retained axial mode observed.
         graph.fourier_potential=torch.zeros(int(shape.prod()),2)
+        # A raw DFT constant must not contaminate the deformation plane fit.
+        graph.fourier_potential[0,0]=(i+1)*17.*shape.prod()
         graph.fourier_potential_shape=shape
         graph.fourier_potential_weight=torch.tensor(1.)
         graph.fourier_proto_potential_weight=torch.tensor(0.)

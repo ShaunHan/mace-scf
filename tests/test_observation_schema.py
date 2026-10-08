@@ -51,7 +51,8 @@ def test_migration_preserves_spectra_atoms_weights_and_unrelated_metadata(tmp_pa
     assert info['vacuum_yfrac'] == .7
     assert info['dipole_correction_yfrac'] == .9
     assert info['custom_metadata'] == 'preserve'
-    assert info['potential_reference'] == 'same_gauge'
+    assert info['potential_gauge'] == 'same_gauge'
+    assert 'potential_reference' not in info
     np.testing.assert_array_equal(info['vasp_phi_fftn_shifted_1.5'], metadata['vasp_phi_fftn_shifted_1.5'])
     assert lines[2] == 'H 1 2 3 4 5 6'
     assert script.clean_info(info).keys() == info.keys()
@@ -123,7 +124,7 @@ def test_reference_labels_cannot_change_deployment_predictions():
         torch.testing.assert_close(first[key],second[key],rtol=0,atol=0)
 
 
-def test_collector_has_no_removed_label_and_uses_same_gauge(tmp_path):
+def test_collector_has_no_removed_label_and_retains_raw_vacuum(tmp_path):
     path = ROOT/'scripts/collect_vasp_data.py'
     assert 'workfunction' not in path.read_text().lower()
     pytest.importorskip('pymatgen.io.vasp')
@@ -136,7 +137,7 @@ def test_collector_has_no_removed_label_and_uses_same_gauge(tmp_path):
         atoms.info[f'dipole_correction_{"xyz"[axis]}frac']=.5
         field=np.broadcast_to(np.arange(8.).reshape([8 if i==axis else 1 for i in range(3)]),(8,8,8))
         value,fraction,slope=module.compute_vacuum_potential(atoms,tmp_path,field)
-        assert value == -1.5
+        assert value == 2.
         assert fraction == .25
         assert slope == 1.
         assert module.open_axis_from_info(atoms.info)==axis
@@ -158,8 +159,84 @@ def test_planar_collector_math_without_vasp_io(tmp_path):
         atoms.info.update({f'vacuum_{"xyz"[axis]}frac':.25,
                            f'dipole_correction_{"xyz"[axis]}frac':.5})
         grid = np.broadcast_to(np.arange(8.).reshape([8 if i==axis else 1 for i in range(3)]),(8,8,8))
-        assert namespace['compute_vacuum_potential'](atoms,tmp_path,grid) == (-1.5,.25,1.)
+        assert namespace['compute_vacuum_potential'](atoms,tmp_path,grid) == (2.,.25,1.)
+        assert namespace['compute_vacuum_potential'](atoms,tmp_path,grid+7.) == (9.,.25,1.)
         assert namespace['open_axis_from_info'](atoms.info) == axis
+
+
+def test_collector_preserves_raw_scalar_and_fourier_gauges():
+    import ast
+    from ase.geometry import Cell
+    tree = ast.parse((ROOT/'scripts/collect_vasp_data.py').read_text())
+    names = {'decompose_potential','add_potential_targets','truncate_fft3',
+             'project_hermitian_fft','gaussian_kernel','max_n_cut','split_complex_fft'}
+    namespace = {'np':np,'Cell':Cell,'FOURIER_CUTOFF_SAFETY_FACTOR':1.25}
+    functions = ast.Module(body=[node for node in tree.body
+                                if isinstance(node,ast.FunctionDef) and node.name in names],type_ignores=[])
+    exec(compile(functions,'collector_gauge','exec'),namespace)
+    scf = np.arange(32**3,dtype=float).reshape(32,32,32)/1000.
+    proto = np.sin(scf)
+    deformation, reference = namespace['decompose_potential'](scf,proto)
+    shifted, shifted_ref = namespace['decompose_potential'](scf+100.,proto-17.)
+    np.testing.assert_allclose(shifted,deformation+117.,atol=1.e-13)
+    np.testing.assert_allclose(shifted_ref,reference-17.,atol=1.e-13)
+    np.testing.assert_allclose(deformation+reference,scf,atol=1.e-13)
+    atoms=Atoms('H',cell=[8,8,8],pbc=True)
+    for field,prefix in ((deformation,'vasp_phi'),(reference,'vasp_proto_phi')):
+        namespace['add_potential_targets'](atoms,np.fft.fftn(field),[1.5],prefix)
+        stored=atoms.info[f'{prefix}_fftn_shifted_1.5']
+        ngrid=np.prod(stored.shape[1:])
+        np.testing.assert_allclose(stored[0,0,0,0]/ngrid,field.mean(),rtol=1.e-7)
+        assert stored[1,0,0,0] == 0.
+    # Check the actual collector assignment, not a duplicate scalar helper.
+    combine=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='combine_job')
+    labels=next(node for node in ast.walk(combine) if isinstance(node,ast.Dict)
+                and any(isinstance(k,ast.Constant) and k.value=='vasp_efermi' for k in node.keys))
+    expression=next(v for k,v in zip(labels.keys,labels.values) if isinstance(k,ast.Constant) and k.value=='vasp_efermi')
+    from types import SimpleNamespace
+    value=eval(compile(ast.Expression(expression),'collector_scalar','eval'),
+               {'oc':SimpleNamespace(efermi=5.),'phi_attrs':{'scf_mean':3.}})
+    assert value == 5.
+
+
+def test_raw_potential_zero_modes_cannot_drive_response_or_change_loss_gradients():
+    from mace.tools import torch_geometric
+    from mace_scf.electrostatics.coupled import CoupledGeometry
+    from mace_scf.electrostatics.loss import WeightedFourierPotential
+    model=coupled_model()
+    graph=small_data(batched=False)
+    geometry=CoupledGeometry(model,torch_geometric.Batch.from_data_list([graph]).to_dict(),graph.positions)
+    shape=torch.tensor(geometry.shape)
+    for key in ('fourier_potential','fourier_proto_potential'):
+        setattr(graph,key,torch.randn(int(shape.prod()),2)*.1)
+        getattr(graph,key)[0]=0.
+        setattr(graph,key+'_shape',shape)
+        setattr(graph,key+'_weight',torch.tensor(1.))
+    graph.vacuum_potential=torch.tensor(.5)
+    graph.vacuum_potential_weight=torch.tensor(1.)
+    batch=torch_geometric.Batch.from_data_list([graph])
+    options=dict(steps=3,training=True,reference_conditioning=True)
+    before=evaluate_coupled(model,deepcopy(batch.to_dict()),**options)
+    loss=WeightedFourierPotential()
+    params=[p for p in model.parameters() if p.requires_grad]
+    value=loss(batch,before)
+    gradient=torch.autograd.grad(value,params,allow_unused=True)
+    batch.fourier_potential[0,0]+=13.*shape.prod()
+    batch.fourier_proto_potential[0,0]-=8.*shape.prod()
+    after=evaluate_coupled(model,deepcopy(batch.to_dict()),**options)
+    new_value=loss(batch,after)
+    new_gradient=torch.autograd.grad(new_value,params,allow_unused=True)
+    torch.testing.assert_close(value,new_value,atol=0,rtol=0)
+    for key in ('energy','forces','fermi_level','vacuum_potential','workfunction','fourier_potential'):
+        torch.testing.assert_close(before[key],after[key],atol=0,rtol=0)
+    for key in ('fermi_level','vacuum_potential','fourier_potential'):
+        torch.testing.assert_close(before['reference_response'][key],after['reference_response'][key],atol=0,rtol=0)
+    torch.testing.assert_close(after['fourier_potential_dft_mean'],torch.tensor([13.]))
+    torch.testing.assert_close(after['fourier_proto_potential_dft_mean'],torch.tensor([-8.]))
+    torch.testing.assert_close(after['vacuum_potential_dft']-before['vacuum_potential_dft'],torch.tensor([5.]))
+    for a,b in zip(gradient,new_gradient):
+        if a is None: assert b is None
+        else: torch.testing.assert_close(a,b,atol=0,rtol=0)
 
 
 @pytest.mark.parametrize('ef,vacuum', [(False,False),(True,False),(False,True),(True,True)])

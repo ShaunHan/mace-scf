@@ -596,13 +596,18 @@ def attach_observations(data, geom, output):
         if target_fft is not None:
             output[key+"_dft"] = target_fft
             output[key+"_dft_mask"] = target_mode_mask(data[key+"_shape"], geom.modes)
+            if key != "fourier_density":
+                # Raw labels retain their gauge for audits. Uniform offsets
+                # never enter Poisson, the recurrent field, or spatial loss.
+                output[key+"_dft_mean"] = (target_fft[...,0]*(geom.k2==0)).sum(-1)/geom.ngrid
     phi = output.get("fourier_potential_dft")
     proto = output.get("fourier_proto_potential_dft")
     if phi is not None and proto is not None:
         output["fourier_total_potential_dft"] = phi+proto
         output["fourier_total_potential_dft_mask"] = output["fourier_potential_dft_mask"] & output["fourier_proto_potential_dft_mask"]
         reference = torch.view_as_complex((phi+proto).contiguous())/geom.ngrid
-        output["vacuum_potential_dft"] = geom.plane(reference)
+        output["vacuum_potential_dft"] = (geom.plane(reference)
+            +output["fourier_potential_dft_mean"]+output["fourier_proto_potential_dft_mean"])
     return output
 
 
@@ -665,15 +670,21 @@ def initialize_response(model, loader, device):
 def initialize_vacuum_reference(model, loader, device, relative=True):
     """Fit the missing atomic vacuum reference from training observations only.
 
-    Full proto spectra take precedence. Otherwise observed vacuum minus the
-    retained deformation plane determines a small atomic integral model. The
+    Observed vacuum minus the retained deformation plane determines a small
+    atomic reference model. For a neutral-reference response, the same scalar
+    observer is used with and without a proto spectrum: its finite-grid tail
+    must not redefine a measured real-space vacuum value. The
     relative fit removes one constant from this *reference* regression too.
     The residual measures its far-vacuum/finite-spectrum approximation.
     """
     response = model.field_dependent_charges_map
     response.vacuum_reference_integrals.zero_()
     if bool(response.proto_fitted):
-        return
+        if getattr(response, 'response_reference', 'total') != 'neutral':
+            return
+        # When no paired scalar observation exists, the fitted atomic radial
+        # k=0 limit is a reference estimate, not an observed absolute zero.
+        response.vacuum_reference_integrals.copy_(-response.proto_coefficients[:,0])
     from .loss import vacuum_reference_weights
     designs, targets, weights = [], [], []
     for batch in loader:
@@ -695,7 +706,8 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
             targets.append((label-plane)[use])
             weights.append(weight[use])
     if not designs:
-        logging.info('No proto spectrum or paired deformation/vacuum reference: scalar gauge remains zero')
+        logging.info('No paired deformation/vacuum reference: retaining %s scalar reference',
+                     'proto radial-limit' if bool(response.proto_fitted) else 'zero')
         return
     x, y, w = torch.cat(designs), torch.cat(targets), torch.cat(weights)
     if relative:
@@ -707,7 +719,7 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
     response.vacuum_reference_integrals.copy_(solution)
     residual = ((x@solution-y).square()*w).sum()/w.sum()
     logging.info('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g eV; '
-                 'shared EF/vacuum gauge, no reconstructed proto field',relative,len(y),float(residual.sqrt()))
+                 'shared EF/vacuum gauge, fitted independently of optional spatial proto data',relative,len(y),float(residual.sqrt()))
 
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:
     """Decode one stored three-dimensional FFT shape per graph."""

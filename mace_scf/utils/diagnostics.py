@@ -49,12 +49,15 @@ class ValidationAudit:
                     previous=self.species.setdefault(str(z),[0.,0,0.])
                     previous[0]+=float(values.sum());previous[1]+=values.numel()
                     previous[2]+=float(batch.forces[start:stop][attrs[:,z]>0].square().sum())
-            if 'fourier_total_potential_dft' in output and batch.fourier_potential_weight[i]*batch.fourier_proto_potential_weight[i]>0:
-                delta=(output['fourier_total_potential'][i]-output['fourier_total_potential_dft'][i])/output['k_vectors_grid_shape'].prod()
+            if 'fourier_potential_dft' in output and batch.fourier_potential_weight[i]>0:
+                # Deformation errors are observable with or without proto data.
+                delta=(output['fourier_potential'][i]-output['fourier_potential_dft'][i])/output['k_vectors_grid_shape'].prod()
                 k2=output['k_vectors'][i].square().sum(-1)
-                use=output['k_vectors_mask'][i] & output['fourier_total_potential_dft_mask'][i] & (k2>0)
+                use=output['k_vectors_mask'][i] & output.get('fourier_potential_dft_mask',output['k_vectors_mask'])[i] & (k2>0)
                 power=torch.where(use,delta.square().sum(-1),0.)
                 row['potential_error_power_eV2']=float(power.sum())
+                if 'fourier_potential_dft_mean' in output:
+                    row['stored_deformation_potential_mean_eV']=float(output['fourier_potential_dft_mean'][i])
                 row['gaussian_lowpass_error_power_eV2']=float((power*torch.exp(-self.density_width**2*k2)).sum())
                 if 'planar_mode_mask' in output:
                     row['planar_error_power_eV2']=float((power*output['planar_mode_mask'][i]).sum())
@@ -75,6 +78,12 @@ class ValidationAudit:
                 'farfield_RMSE_e_A3':float(np.sqrt(self.density_sums[1]/self.density_sums[2])),
                 'scope':'Different Gaussian resolutions of the same error; smaller farfield RMSE is not an accuracy gain.'}
         total=sum(r.get('potential_error_power_eV2',0.) for r in self.rows)
+        means=[r['stored_deformation_potential_mean_eV'] for r in self.rows
+               if 'stored_deformation_potential_mean_eV' in r]
+        if means:
+            report['stored_potential_gauge']={
+                'deformation_mean_range_eV':[float(min(means)),float(max(means))],
+                'scope':'Stored k=0 is retained for audit; RMSE_ESP compares fields modulo a uniform offset. Scalar EF/vacuum errors use their stored label convention.'}
         if total>0:
             report['potential_error_power_fractions']={
                 'normal_reciprocal_line':sum(r.get('planar_error_power_eV2',0.) for r in self.rows)/total,
@@ -92,13 +101,23 @@ class ValidationAudit:
                       EF_vac_WF_bias_eV=mean.tolist(),EF_vac_covariance_eV2=float(weights@(center[:,0]*center[:,1])),
                       WF_absolute_error_quantiles_eV=dict(zip(('median','p90','p99','max'),np.quantile(abs(error[:,2]),[.5,.9,.99,1.]).tolist())))
         report['WF_identity_max_error_eV']=float(abs(error[:,2]-(error[:,1]-error[:,0])).max())
+        report['absolute_relative_bias_identity_max_error_eV2']=float(np.max(np.abs(
+            weights@error**2-(weights@center**2+mean**2))))
         report['WF_variance_components_eV2']={
             'EF':float(weights@center[:,0]**2), 'vacuum':float(weights@center[:,1]**2),
             'covariance_contribution':float(-2*(weights@(center[:,0]*center[:,1])))}
         relative_power=weights*center[:,2]**2
         relative_order=np.argsort(-relative_power)
+        total_relative_power=max(relative_power.sum(),1.e-30)
+        report['largest_relative_WF_errors']=[dict(rows[int(i)],
+            loader_frame_1based=rows[int(i)]['index']+1,
+            EF_vac_WF_centered_errors_eV=center[int(i)].tolist(),
+            relative_WF_squared_error_fraction=float(relative_power[int(i)]/total_relative_power))
+            for i in relative_order[:8]]
+        report['WF_centered_squared_error_share_largest_10_structures']=float(
+            relative_power[relative_order[:10]].sum()/total_relative_power)
         report['WF_centered_squared_error_share_largest_10_percent']=float(
-            relative_power[relative_order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/max(relative_power.sum(),1.e-30))
+            relative_power[relative_order[:max(1,int(np.ceil(.1*len(rows))))]].sum()/total_relative_power)
         # A centered population RMSE is not the error after one DFT anchor.
         # This expectation uses independent anchors from the same weighted
         # population; an actual MD trajectory can have correlated errors.
@@ -118,7 +137,7 @@ class ValidationAudit:
         report['composition_cohorts']=sorted(({'element_counts':k,'graphs':len(v),
                 'wf_rmse_eV':float(np.sqrt(np.average([r['wf']**2 for r in v],weights=[r['weight'] for r in v])))}
                 for k,v in groups.items()),key=lambda r:r['wf_rmse_eV'],reverse=True)[:12]
-        report['scope']='Full supplied split; diagnostic only, no reference-dependent correction is installed.'
+        report['scope']='Full supplied split; diagnostic only, no reference-dependent correction or exclusion is applied. Large error alone does not establish bad reference data.'
         return report
 
 
@@ -315,6 +334,13 @@ def audit_training(model, wrapper, loss, ema, train_loader, valid_loader, device
         model.eval()
         model.requires_grad_(False)
         with ema.average_parameters() if ema is not None else nullcontext():
+            response = model.field_dependent_charges_map
+            if getattr(response, 'coupled', False):
+                rows['references'] = {
+                    'response_field':getattr(response, 'response_reference', 'total'),
+                    'proto_fitted':bool(response.proto_fitted),
+                    'scalar_offsets_EF_vacuum_eV':response.scalar_reference.detach().cpu().tolist(),
+                    'scope':'Training-fitted, serialized references. Relative losses remove one constant error, not a separate offset for each structure. No DFT EF enters the free trajectory.'}
             for label,loader in (("train",train_loader),("validation",valid_loader)):
                 errors=[]
                 features=[]

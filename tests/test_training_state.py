@@ -478,6 +478,30 @@ def test_relative_readout_audit_selects_fluctuations_without_validation_fitting(
     assert after['development_absolute_after']>10.
 
 
+def test_relative_tail_audit_keeps_indices_weights_and_all_observations():
+    from copy import deepcopy
+    from mace_scf.utils.diagnostics import ValidationAudit
+    audit = ValidationAudit()
+    audit.rows = [dict(index=i, atoms=1, composition=(1,), weight=w,
+                       ef=0., vac=e, wf=e)
+                  for i, (w, e) in enumerate([(1., 10.), (2., 12.), (1., 20.)])]
+    before = audit.summary()
+    assert before['graphs'] == before['observed_EF_vac_WF'] == 3
+    worst = before['largest_relative_WF_errors'][0]
+    assert worst['index'] == 2 and worst['loader_frame_1based'] == 3
+    assert worst['EF_vac_WF_centered_errors_eV'] == pytest.approx([0., 6.5, 6.5])
+    assert worst['relative_WF_squared_error_fraction'] == pytest.approx(42.25/59.)
+    original = deepcopy(audit.rows)
+    for row in audit.rows:
+        row['vac'] += 100.
+        row['wf'] += 100.
+    after = audit.summary()
+    for name in ('relative_WF_squared_error_fraction', 'EF_vac_WF_centered_errors_eV'):
+        assert after['largest_relative_WF_errors'][0][name] == pytest.approx(worst[name])
+    assert before['WF_centered_squared_error_share_largest_10_structures'] == pytest.approx(1.)
+    assert original[2]['wf'] == 20.
+
+
 def test_saved_solver_policy_and_original_v367_state_dict():
     source = small_model()
     target = small_model()

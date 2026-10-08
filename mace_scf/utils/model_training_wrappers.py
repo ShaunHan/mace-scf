@@ -152,9 +152,13 @@ class FixedPointWrapper:
                     self._logged_spectral_policy = True
                     if getattr(response, 'coupled', False):
                         logging.info('Observation convention: RMSE_ESP is the real-space error of the retained '
-                                     'zero-mean deformation spectrum; proto supplies the atomic reference field. '
+                                     'deformation spectrum after uniform-offset alignment (k=0 excluded); '
+                                     'raw or zero-mean spectra are accepted. Proto supplies the atomic reference field. '
+                                     'Response reference=%s. EF/vacuum labels must share one DFT convention; '
+                                     'the collector retains raw VASP scalar values. '
                                      'EF and vacuum include saved training-only scalar references %s eV; '
                                      'WF is their difference. Relative RMSE removes one whole-split bias.',
+                                     getattr(response, 'response_reference', 'total'),
                                      getattr(response, 'scalar_reference', torch.zeros(2)).tolist())
                     if reference != 'none':
                         logging.info('Reference-conditioned auxiliary %s training enabled; '
