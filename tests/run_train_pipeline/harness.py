@@ -502,7 +502,8 @@ def summarize_run_train_result(result: RunTrainResult):
     valid_count = _search_int(
         r"Total number of configurations: train=\d+, valid=(\d+)", log_text
     )
-    z_table_text = _search_one(r"AtomicNumberTable: \((.*?)\)", log_text, "")
+    z_table_text = _search_one(r"AtomicNumberTable: \(([^\r\n]*)\)", log_text, "")
+    z_table_text = re.sub(r"np\.int\d+\((\d+)\)", r"\1", z_table_text)
     z_table = [int(item.strip()) for item in z_table_text.split(",") if item.strip()]
 
     return {

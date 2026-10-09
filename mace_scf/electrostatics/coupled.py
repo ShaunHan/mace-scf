@@ -558,9 +558,10 @@ def prepare_charge_factorization(softness, kernel, mask, constraint=None):
     lu, pivots = factor_linear_system(bordered)
     return bordered, root, lu, pivots
 
-def moment_kernel(geometry, kernels, mask, sigma):
+def moment_kernels(geometry, kernels, mask, sigma):
+    """Linear moment and completion responses, shared by every SCF step."""
     co,si,wave=geometry[:3]
-    kr,ki=(k[..., :4] for k in kernels)
+    kr,ki=kernels
     source_re=(co[...,None]*kr[:,:,None,:]+si[...,None]*ki[:,:,None,:]).flatten(-2)
     source_im=(co[...,None]*ki[:,:,None,:]-si[...,None]*kr[:,:,None,:]).flatten(-2)
     receiver=geometry[6][...,0,None,None]
@@ -568,12 +569,15 @@ def moment_kernel(geometry, kernels, mask, sigma):
     observer_im=torch.cat((-si[...,None],-sigma*co[...,None]*wave[:,:,None,:]),-1)*receiver
     matrix=-(observer_re.flatten(-2).transpose(1,2)@source_re
              +observer_im.flatten(-2).transpose(1,2)@source_im)
+    matrix=matrix.reshape(*matrix.shape[:2],mask.shape[-1],kr.shape[-1])
+    completion=-matrix[...,4:].flatten(-2)
+    matrix=matrix[...,:4].flatten(-2)
     unit_v,unit_e=sample_spectrum(geometry[8],geometry)
     observed=torch.cat((unit_v[...,:1],-sigma*unit_e[...,0,:]),-1).flatten(-2)
     dipole=torch.cat((geometry[10][...,None],sigma*geometry[11][:,None,:].expand(-1,mask.shape[1],-1)),-1).flatten(-2)
     matrix=matrix-observed[...,None]*dipole[:,None,:]
     present=mask[...,None].expand(-1,-1,4).flatten(-2)
-    return matrix*present[...,None]*present[:,None,:]
+    return matrix*present[...,None]*present[:,None,:],completion
 
 def moment_coordinates(reference, mask):
     # Last entries remain [dipole softness, chi0, charge softness].
@@ -586,7 +590,7 @@ def factor_moments(reference, kernel, mask):
     softness,present,constraint=moment_coordinates(reference,mask)
     return prepare_charge_factorization(softness,kernel,present,constraint)
 
-def screen_moments(current, proposal, reference, kernel, mask, factors, *, materialized=False):
+def screen_moments(current, proposal, reference, mask, factors, *, materialized=False):
     """Apply the already validated geometry's constrained moment solve."""
     matrix, root, lu, pivots = factors
     present = mask[..., None].expand(-1, -1, 4).flatten(-2)
@@ -600,6 +604,31 @@ def screen_moments(current, proposal, reference, kernel, mask, factors, *, mater
     # Remove charge roundoff only; the raw law already enforces fixed Q.
     charge = value[..., 0]+mask*((proposal[..., 0]-value[..., 0]).sum(-1)/mask.sum(-1))[:, None]
     return torch.cat((charge[..., None], value[..., 1:4], proposal[..., 4:]), -1)
+
+
+def screen_coupled(current, proposal, reference, completion, mask, factors, *, materialized=False):
+    """Solve the linear moment response to the NEW completion coefficients.
+
+    The nonlinear chemical levels and completion are evaluated once. Their
+    known linear completion-to-moment coupling belongs in the same bordered
+    solve as moment-to-moment screening. Leaving it one iteration behind is
+    a block-Jacobi split that can introduce an oscillatory unstable mode.
+    This block-triangular solve preserves the raw constitutive fixed points,
+    total charge, configured mixing, and all coordinate/parameter derivatives.
+    """
+    if current.shape[-1] > 4:
+        delta = (proposal[..., 4:]-current[..., 4:])*mask[..., None]
+        # One cached matrix action replaces repeated Fourier projection of
+        # the same linear response; its coordinate derivatives stay attached.
+        drive = (completion@delta.flatten(-2)[..., None])[..., 0].reshape(*mask.shape, 4)
+        soft = reference[..., -1]*mask
+        value = drive[..., 0]
+        charge = soft*(value-(soft*value).sum(-1, keepdim=True)/soft.sum(-1, keepdim=True))
+        dipole = reference[..., -3:-2]*drive[..., 1:4]
+        proposal = torch.cat((proposal[..., :1]+charge[..., None],
+                              proposal[..., 1:4]+dipole, proposal[..., 4:]), -1)
+    return screen_moments(current, proposal, reference, mask, factors,
+                          materialized=materialized)
 
 
 @dataclass(frozen=True)
@@ -1064,7 +1093,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
         g.batch, g.slot, len(g.counts), g.size, float(model.r_max), float(r.receiver_widths.max()))
     source, reference = r.prepare_reference(state, chemical, vector, g.attrs, p0, mask, target, transport)
     state = torch.cat((state[..., :1], state[..., 1:4]+reference[..., 1:4], source), -1)
-    kernel = moment_kernel(g.tensors, g.kernels, mask, r.density_width)
+    kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
     factors = factor_moments(reference, kernel, mask)
     if not functional:
         # The same constrained matrix acts at EVERY finite update. Materialize
@@ -1081,11 +1110,11 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     # All geometry, reference and parameter dependencies are explicit for the
     # converged-root adjoint, including the live linear operator behind LU.
     fixed = (chemical, vector, g.attrs, p0, mask, target, transport, reference,
-             kernel, *factors, *g.tensors, *g.kernels)
+             completion, *factors, *g.tensors, *g.kernels)
     count = len(fixed)
 
     def evaluate(z, *args, screened=True, include_energy=False, observe=True):
-        chem, vec, attrs, initial, present, charge, neighbors, ref, moment = args[:9]
+        chem, vec, attrs, initial, present, charge, neighbors, ref, coupling = args[:9]
         factor = args[9:13]
         geometry, kernels = args[13:27], args[27:29]
         spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
@@ -1096,7 +1125,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
                    'observe_chemical_level': observe}
         result = (functional_call(r, dict(zip(names, args[count:])), inputs, options, strict=False)
                   if functional else r(*inputs, **options))
-        proposal = screen_moments(z, result[0], ref, moment, present, factor,
+        proposal = screen_coupled(z, result[0], ref, coupling, present, factor,
                                   materialized=not functional) if screened else result[0]
         return (proposal, *result[1:]), (*spectral, potential, field)
 
@@ -1113,7 +1142,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     q = charge_closure(torch.zeros_like(p0[..., 0]), chi+values[..., 0], soft, target, mask)[0]
     dipole = state[..., 1:4]-reference[..., -3:-2]*r.density_width*gradient[..., 0, :]
     proposal = torch.cat((q[..., None], dipole, state[..., 4:]), -1)
-    state = screen_moments(state, proposal, reference, kernel, mask, factors, materialized=not functional)
+    state = screen_moments(state, proposal, reference, mask, factors, materialized=not functional)
     return g, state, (*fixed, *parameters), update, evaluate
 
 def reference_predictions(model, data, g, fixed, state, response, spectral, output,
@@ -1126,7 +1155,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
     the measured density is used. The ordinary fixed-Q prediction is untouched.
     """
     r = model.field_dependent_charges_map
-    chemical, vector, attrs, p0, mask, target, neighbors, reference, kernel = fixed[:9]
+    chemical, vector, attrs, p0, mask, target, neighbors, reference = fixed[:8]
     factors = fixed[9:13]
     observed = (data['fermi_level_weight'].reshape(-1)>0) & (data['weight'].reshape(-1)>0)
     if not bool(observed.any()):
@@ -1148,7 +1177,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         charge = response[0][..., 0]+softness*(delta_v-(response[2]*delta_v).sum(-1,keepdim=True))
         dipole = response[0][..., 1:4]-reference[..., -3:-2]*r.density_width*(seed_e[..., 0,:]-field[..., 0,:])
         raw = torch.cat((charge[..., None],dipole,response[0][..., 4:]),-1)
-        solved = screen_moments(seed,raw,reference,kernel,mask,factors,materialized=materialized)
+        solved = screen_moments(seed,raw,reference,mask,factors,materialized=materialized)
         solved_v, _ = sample_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),g.tensors)
         mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset+g.vacuum_reference
         # The last bordered-inverse column is dq/dQ. Its last entry, divided by

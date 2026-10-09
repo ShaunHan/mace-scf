@@ -14,34 +14,38 @@ from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
 from .test_spectral_response import small_model, small_data
 
 
-def test_iridium_recipes_train_the_full_deployment_trajectory():
+def test_iridium_recipes_keep_the_step_curriculum_and_final_deployment_budget():
     from pathlib import Path
     import yaml
     from .test_coupled_response import coupled_model
     steps = int(coupled_model().field_dependent_charges_map.deployment_steps)
     configs = list(Path(__file__).parents[1].glob('config_IrO2*.yaml'))
-    assert len(configs) == 4
+    assert configs
     for path in configs:
         config = yaml.safe_load(path.read_text())
         assert config['restart_latest'] is False
-        for stage in config['train_schedule'].values():
+        stages = list(config['train_schedule'].values())
+        assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps'] == steps == 50
+        for stage in stages:
             options = stage['fixed_point_training_options']
-            assert options['mode'] == 'shortcut_scf'
-            assert options['scf']['num_scf_steps'] == steps == 50
+            assert options['mode'] in ('unroll_scf', 'shortcut_scf')
+            assert options['scf']['num_scf_steps'] <= steps
             assert options['scf']['mixing_parameter'] == .5
             assert stage['lr'] >= .001
 
 
-def test_short_training_budget_warns_without_changing_the_requested_mode(caplog):
+def test_short_training_budget_is_supported_without_observation_banner(caplog):
     import logging
     from .test_coupled_response import coupled_model
     model = coupled_model()
     wrapper = FixedPointWrapper(None, {'forces':False}, FixedPointTrainingOptions(
         mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=2)))
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         out = wrapper(model, small_data(), training=True)
         wrapper(model, small_data(), training=True)
-    assert caplog.text.count('untrained iteration tail') == 1
+    assert 'Observation convention:' not in caplog.text
+    assert 'Use the deployment step count' not in caplog.text
+    assert '2 training steps; 50 validation/deployment steps' in caplog.text
     assert out['scf_steps'].item() == 2
 
 

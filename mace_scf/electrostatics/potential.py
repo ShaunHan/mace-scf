@@ -216,6 +216,9 @@ class SpectralGeometry:
         if bool((parallel.abs().max(-1).values > 1.e-10).any()):
             raise ValueError("A homogeneous field parallel to a periodic slab direction needs a separate boundary convention")
         self.counter_density = torch.zeros_like(self.proto)
+        # An absent counter-charge has no energy/force graph through proto.
+        self.counter = torch.zeros_like(self.proto)
+        self.counter_energy = torch.zeros_like(self.volume)
         if "counter_charge" in data:
             counter = data["counter_charge"].reshape(-1)
             if "counter_slab_bounds" in data:
@@ -237,11 +240,11 @@ class SpectralGeometry:
                 phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
                 profile = torch.exp(-.5*self.k2*width[:, None].square())
             self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
-        counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
-        self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
-        self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
-            +.5*self.slab_factor*counter_moment.square()
-            -self.volume*(self.counter_density.conj()*(self.proto+self.applied)).real.sum(-1))
+            counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
+            self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
+            self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
+                +.5*self.slab_factor*counter_moment.square()
+                -self.volume*(self.counter_density.conj()*(self.proto+self.applied)).real.sum(-1))
 
     @property
     def proto_design(self):

@@ -175,6 +175,20 @@ def test_optional_proto_reference_is_one_shared_gauge_and_serializes(tmp_path):
     torch.testing.assert_close(actual['vacuum_potential'],after['vacuum_potential'])
 
 
+def test_absent_counter_charge_has_no_zero_times_proto_force_graph():
+    model = coupled_model()
+    model.field_dependent_charges_map.proto_fitted.fill_(True)
+    model.field_dependent_charges_map.proto_coefficients.fill_(2.)
+    data = small_data()
+    data['positions'].requires_grad_(True)
+    geom = CoupledGeometry(model, data, data['positions'])
+    assert geom.observer_proto.requires_grad
+    assert not geom.counter.requires_grad
+    assert not geom.counter_energy.requires_grad
+    assert torch.count_nonzero(geom.counter) == 0
+    assert torch.count_nonzero(geom.counter_energy) == 0
+
+
 @pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
 def test_neutral_proto_reference_preserves_response_and_wf(mode):
     model = coupled_model()
@@ -319,6 +333,52 @@ def test_electronic_reference_is_not_weight_decayed():
     assert decay[id(r.common_level.weight)]==.1
     for p in (r.species_level,r.species_source,r.scalar_out.bias,r.chemical_scalar.bias):
         assert decay[id(p)]==0.
+
+
+@pytest.mark.parametrize('widths', [(), (1.5, 3.)])
+@pytest.mark.parametrize('functional', [False, True])
+def test_one_screened_step_solves_the_full_affine_response(widths, functional):
+    """A frozen nonlinear response must not leave the completion one step behind."""
+    from mace_scf.electrostatics.coupled import prepare_coupled, screen_moments
+    model = coupled_model(widths)
+    r = model.field_dependent_charges_map
+    with torch.no_grad():
+        for name in ('state_scalar', 'state_vector', 'neighbor_scalar', 'neighbor_vector',
+                     'neighbor_divergence', 'neighbor_gradient'):
+            getattr(r, name).weight.zero_()
+    data = small_data()
+    local = model.local_part(data, compute_force=False)
+    g, initial, args, update, _ = prepare_coupled(model, data, local, functional=functional)
+    state = initial+torch.randn_like(initial)*.1
+    raw = update.raw(state, *args)
+    solved = update(state, *args)
+    torch.testing.assert_close(update.raw(solved, *args), solved, atol=2.e-12, rtol=2.e-12)
+    torch.testing.assert_close(solved[..., 0].sum(-1), data['total_charge'], atol=1.e-12, rtol=0.)
+    old = screen_moments(state, raw, args[7], g.present, args[9:13],
+                         materialized=not functional)
+    if widths:
+        assert float((update.raw(old, *args)-old).detach().abs().max()) > 1.e-5
+    else:
+        torch.testing.assert_close(solved, old, atol=0., rtol=0.)
+
+
+def test_screening_preserves_nonlinear_roots_and_their_force_derivatives(monkeypatch):
+    from mace_scf.electrostatics import coupled
+    model = coupled_model(local_energy=True)
+    params = tuple(p for p in model.parameters() if p.requires_grad)
+    new = evaluate_coupled(model, small_data(), steps=70, training=True, mode='implicit', tolerance=1.e-11)
+    new_grad = torch.autograd.grad(new['forces'].square().sum()+new['fermi_level'].square().sum(), params, allow_unused=True)
+    monkeypatch.setattr(coupled, 'screen_coupled',
+                        lambda z,p,r,k,m,f,**kw: coupled.screen_moments(z,p,r,m,f,**kw))
+    old = evaluate_coupled(model, small_data(), steps=70, training=True, mode='implicit', tolerance=1.e-11)
+    old_grad = torch.autograd.grad(old['forces'].square().sum()+old['fermi_level'].square().sum(), params, allow_unused=True)
+    for key in ('energy', 'forces', 'fermi_level', 'vacuum_potential', 'density_coefficients'):
+        torch.testing.assert_close(new[key], old[key], atol=1.e-8, rtol=1.e-8)
+    for a, b in zip(new_grad, old_grad):
+        if a is None:
+            assert b is None
+        else:
+            torch.testing.assert_close(a, b, atol=1.e-8, rtol=1.e-7)
 
 
 @pytest.mark.parametrize('conditioning',[False,True])
