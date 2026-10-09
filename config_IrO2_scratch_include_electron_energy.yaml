@@ -34,7 +34,7 @@ field_feature_norms: None
 atom_density_scaling: None
 kspace_cutoff_factor: 1.0
 include_electrostatic_self_interaction: true
-include_local_electron_energy: false
+include_local_electron_energy: true
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
   type: CoupledResponse

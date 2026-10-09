@@ -82,7 +82,7 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
         num_scf_steps: 12
         constant_charge: true
@@ -110,7 +110,7 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
         num_scf_steps: 20
         constant_charge: true
@@ -138,7 +138,7 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
         num_scf_steps: 50
         constant_charge: true
