@@ -3,6 +3,7 @@
 2026-10-09 17:48:42.327 INFO: Configuration: Namespace(config='config.yaml', name='fit_0', seed=7777, work_dir='.', log_dir='./logs', model_dir='.', checkpoints_dir='checkpoints_IrO2_finetune_noproto', results_dir='./results', downloads_dir='./downloads', device='cuda', default_dtype='float64', distributed=False, launcher='slurm', log_level='INFO', plot=True, plot_frequency=0, plot_interaction_e=False, r_max=6.0, radial_type='bessel', num_radial_basis=8, num_cutoff_basis=5, pair_repulsion=False, distance_transform='None', apply_cutoff=True, use_last_readout_only=False, use_embedding_readout=False, interaction='RealAgnosticResidualInteractionBlock', interaction_first='RealAgnosticResidualInteractionBlock', max_ell=3, correlation=3, use_reduced_cg=False, use_so3=False, use_agnostic_product=False, num_interactions=2, MLP_irreps='64x0e', radial_MLP='[64, 64, 64]', hidden_irreps='64x0e + 64x1o', edge_irreps=None, use_edge_irreps_first=False, num_channels=None, max_L=None, gate='silu', num_recursion_steps=1, field_si=False, add_local_electron_energy=False, fixedpoint_update_config=None, scaling='rms_forces_scaling', avg_num_neighbors=1, compute_avg_num_neighbors=True, compute_stress=False, compute_forces=True, train_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train.xyz', valid_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_valid.xyz', valid_fraction=0.1, test_file=None, test_dir=None, multi_processed_test=False, num_workers=0, pin_memory=True, atomic_numbers=None, mean=None, std=None, statistics_file=None, les_arguments=None, E0s='{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}', pseudolabel_replay=False, pseudolabel_replay_compute_stress=False, foundation_filter_elements=True, multiheads_finetuning=True, foundation_head=None, weight_pt_head=1.0, real_pt_data_ratio_threshold=0.1, num_samples_pt=10000, force_mh_ft_lr=False, subselect_pt='random', filter_type_pt='none', allow_random_padding_pt=True, pt_train_file=None, pt_valid_file=None, foundation_model_elements=False, keep_isolated_atoms=False, lora=False, lora_rank=4, lora_alpha=1.0, energy_key=None, forces_key=None, virials_key=None, stress_key=None, dipole_key=None, polarizability_key=None, head_key=None, charges_key=None, elec_temp_key=None, total_spin_key=None, total_charge_key=None, embedding_specs=None, skip_evaluate_heads='pt_head', forces_weight=100.0, swa_forces_weight=100.0, energy_weight=1.0, swa_energy_weight=1000.0, virials_weight=1.0, swa_virials_weight=10.0, stress_weight=1.0, swa_stress_weight=10.0, dipole_weight=1.0, swa_dipole_weight=1.0, swa_polarizability_weight=1.0, polarizability_weight=1.0, config_type_weights={'slab': 1.0, 'bulk': 1.0}, huber_delta=0.01, beta=0.9, beta1_schedulefree=0.9, beta2_schedulefree=0.98, batch_size=4, valid_batch_size=4, lr=0.001, swa_lr=0.001, weight_decay=0.001, lr_params_factors='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}', freeze=None, scheduler='none', lr_factor=0.8, scheduler_patience=50, lr_scheduler_gamma=0.9993, swa=False, start_swa=None, lbfgs=False, ema=True, ema_decay=0.99, max_num_epochs=500, patience=1000, foundation_model='/fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model', foundation_model_kwargs='{}', foundation_model_readout=True, eval_interval=5, keep_checkpoints=True, save_all_checkpoints=True, save_cpu=True, clip_grad=10.0, dry_run=False, enable_cueq=True, only_cueq=False, enable_oeq=False, wandb=False, wandb_dir=None, wandb_project='', wandb_entity='', wandb_name='', wandb_log_hypers=['num_channels', 'max_L', 'correlation', 'lr', 'swa_lr', 'weight_decay', 'batch_size', 'max_num_epochs', 'start_swa', 'energy_weight', 'forces_weight'], amsgrad=False, atomic_multipoles_key=None, electrostatic_potentials_key=None, external_field_key=None, fermi_level_key=None, include_local_electron_energy=False, atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5, kspace_cutoff_factor=1.0, atomic_formal_charges='{}', formal_charges_from_data=False, field_feature_max_l=1, field_feature_widths='[1.5, 3.0]', dont_include_pbc_corrections=False, include_electrostatic_self_interaction=True, valid_set_seed=7777, quadrupole_feature_corrections=False, electrostatic_pbc_method='mixed_periodic', static_bond_transfer_block='OxidationDependentSymmetricPredictionSourceBlock', oxidation_state_mixer='SumOxidationStateMixer', return_electrostatic_potentials=False, train_schedule=[{'name': 'stage1', 'start': 0, 'end': 49, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage2', 'start': 50, 'end': 449, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=20, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage3', 'start': 450, 'end': 500, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=50, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}], fixed_point_update_config={'type': <class 'mace_scf.electrostatics.coupled.CoupledResponse'>, 'potential_widths': [1.5, 3.0]}, field_readout_config={'type': <class 'mace_scf.electrostatics.field_blocks.StrictQuadraticFieldEnergyReadout'>}, field_block_weight_decay=0.01, local_charges_weight_decay=0.0, field_feature_norms='None', fermi_level_offset=None, field_norm_factor=1.0, oxidation_state_range='(-6.0, 6.0)', polarizable_charges=False, beta_two=0.999, log_on_test_sets=False, scf_convergence_summary=False, use_linear_final_readout=False, include_field_si=False, use_linear_local_charges=False, atom_density_scaling='None', allow_low_density_pbc=False, override_pbc_checks=False, low_density_pbc_max_volume_per_atom=100.0, wandb_watch='off', wandb_watch_log_freq=50, debug_log_grad_summary=False, fixedpoint_initial_charge_head_scale=0.01, heads={'default': {'arrays_keys': {'forces': 'vasp_forces'}, 'info_keys': {'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}}}, error_table='ElectrostaticRMSE', compute_polarizability=True, restart_latest=False, model='FixedPoint', optimizer='adamw', qeq_charges='autograd', train_hardness=False, read_enegs=False, read_hardness=False, enegs_key=None, default_hardness=2.0)
 2026-10-09 17:48:42.327 INFO: Using the key specifications to parse data:
 2026-10-09 17:48:42.327 INFO: KeySpecification(info_keys={'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}, arrays_keys={'forces': 'vasp_forces'})
+2026-10-09 17:49:48.257 DEBUG: Loading training file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train.xyz
 2026-10-09 17:50:14.334 INFO: Training set 1/1 [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
 2026-10-09 17:50:14.357 INFO: Total Training set [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
 2026-10-09 17:50:20.885 INFO: Validation set 1/1 [dipole components: 330, dipole_correction_zfrac: 330, dipole_weight: 350, energy: 350, external_field: 350, fermi_level: 330, fourier_density: 350, fourier_potential: 350, fourier_proto_potential: 350, total_charge: 350, vacuum_zfrac: 330, vacuum_potential: 330, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 350, forces: 350]
@@ -20,9 +21,146 @@
 2026-10-09 17:50:34.272 INFO: Hidden irreps: 64x0e + 64x1o
 2026-10-09 17:50:35.912 INFO: Rescaled initial FixedPoint charge heads by 0.01 to keep initial charge predictions small
 2026-10-09 17:50:36.018 INFO: Foundation: exact module adoption, 83 species retained, native neighbour normalization preserved
+2026-10-09 17:50:40.709 DEBUG: Training-only foundation force scale: 0.17811; local F RMSE 1.29197 -> 0.821119 eV/A; folded into readout weights
+2026-10-09 17:50:40.710 DEBUG: Fixed training-geometry readout units by layer/irrep: [[1.0044714994337371, 1.0000380556506199], [2.7244678599378362, 1.0994442255913506]]; initial energy function preserved by inverse weight transformation
+2026-10-09 17:50:44.973 DEBUG: Frozen training-only proto fit: spectral component RMS 7.38218e-05 eV, observations 772776
 2026-10-09 17:50:44.973 INFO: Electronic response CoupledResponse: 4 coarse + 8 regular coefficients per atom; deployment uses 50 steps
+2026-10-09 17:50:53.877 DEBUG: Training-only atomic vacuum reference: relative=True, labels=1307, residual_RMSE=0.00276677 eV; shared EF/vacuum gauge, fitted independently of optional spatial proto data
 2026-10-09 17:50:54.968 INFO: SCF CUDA linear algebra: cuSOLVER/cuBLAS selected (process-wide); exact cached matrix-solve derivatives; torch=2.9.1+cu128 CUDA=12.8
+2026-10-09 17:51:43.490 DEBUG: Training-only cold reference fit: rank=8/9; scalar gauges follow the configured relative/absolute objectives; candidates=[{'fraction': 0.0, 'loss': 2061.0606853914996}, {'fraction': 1.0, 'loss': 1972.4742643980628}, {'fraction': 0.5, 'loss': 1994.397820750639}, {'fraction': 0.25, 'loss': 2022.138191178002}]
 2026-10-09 17:51:45.337 INFO: Coupled response: neutral reference, screened moment seed, 2 local potential channels, Gaussian receiver widths [1.5, 0.0, 3.0]; fixed Q is enforced without measured EF
+2026-10-09 17:51:54.438 DEBUG: Training-only EF reference initialization: offset correction -0.905514 eV
+2026-10-09 17:51:54.439 DEBUG: Training-only total-energy reference: 3.93092 -> 0.0396593 eV/atom on 64 graphs
+2026-10-09 17:51:54.451 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+2026-10-09 17:51:54.459 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+2026-10-09 17:51:54.467 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.04]
+2026-10-09 17:51:54.481 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1
+2026-10-09 17:51:54.482 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
+2026-10-09 17:51:54.483 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
+2026-10-09 17:51:54.484 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
+2026-10-09 17:51:54.485 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
+2026-10-09 17:51:54.487 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512: got uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512
+2026-10-09 17:51:54.550 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}: got uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}
+2026-10-09 17:51:54.591 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}: got uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}
+2026-10-09 17:51:54.652 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512: got uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+2026-10-09 17:51:55.840 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(23,)],[(16,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 23, 1) c.nnz=276]: got ,,,, sizes=23,16,16,16,1 num_segments=23,16,16,16,1 num_paths=276
+2026-10-09 17:51:56.045 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(4,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 4, 1) c.nnz=16]: got ,,, sizes=4,16,16,1 num_segments=4,16,16,1 num_paths=16
+2026-10-09 17:51:56.046 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 1) c.nnz=1]: got ,, sizes=1,16,1 num_segments=1,16,1 num_paths=1
+2026-10-09 17:51:56.100 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(51,)],[(16,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 51, 3) c.nnz=1554]: got ,,,, sizes=51,16,16,16,3 num_segments=51,16,16,16,3 num_paths=1554
+2026-10-09 17:51:56.110 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(6,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 6, 3) c.nnz=70]: got ,,, sizes=6,16,16,3 num_segments=6,16,16,3 num_paths=70
+2026-10-09 17:51:56.112 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 3) c.nnz=3]: got ,, sizes=1,16,3 num_segments=1,16,3 num_paths=3
+2026-10-09 17:51:56.230 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.231 DEBUG: Normalized paths for operand 2 in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1
+2026-10-09 17:51:56.231 DEBUG: Flattened aiw in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got ,, sizes=2,16,4 num_segments=2,16,4 num_paths=4
+2026-10-09 17:51:56.232 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
+2026-10-09 17:51:56.232 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.232 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.357 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.357 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.358 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.359 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.360 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.360 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.364 DEBUG: Normalized paths for operand 3 in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}
+2026-10-09 17:51:56.365 DEBUG: Flattened abiw in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got ,,, sizes=7,16,16,4 num_segments=7,16,16,4 num_paths=86
+2026-10-09 17:51:56.366 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
+2026-10-09 17:51:56.366 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-09 17:51:56.367 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.367 DEBUG: _reduced_tensor_product_basis (0e, 0e, 0e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.368 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-09 17:51:56.369 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.370 DEBUG: _reduced_tensor_product_basis (1o, 1o, 1o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.370 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1e, 2e, 1o})
+2026-10-09 17:51:56.372 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-09 17:51:56.372 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.374 DEBUG: _reduced_tensor_product_basis (2e, 2e, 2e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.374 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3o, 1o, 2o, 2e})
+2026-10-09 17:51:56.377 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-09 17:51:56.377 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-09 17:51:56.379 DEBUG: _reduced_tensor_product_basis (3o, 3o, 3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-09 17:51:56.379 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3e, 3o, 2e, 4e})
+2026-10-09 17:51:56.431 DEBUG: Normalized paths for operand 4 in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}
+2026-10-09 17:51:56.455 DEBUG: Flattened abciw in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got ,,,, sizes=20,16,16,16,4 num_segments=20,16,16,16,4 num_paths=1949
+2026-10-09 17:51:57.163 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+2026-10-09 17:51:57.194 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+2026-10-09 17:51:57.210 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
+2026-10-09 17:51:57.225 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128: got uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128
+2026-10-09 17:51:57.256 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1
+2026-10-09 17:51:57.258 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
+2026-10-09 17:51:57.260 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
+2026-10-09 17:51:57.262 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
+2026-10-09 17:51:57.264 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
+2026-10-09 17:51:57.266 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+2026-10-09 17:51:57.291 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}: got uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}
+2026-10-09 17:51:57.309 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}: got uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}
+2026-10-09 17:51:57.371 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512: got uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
+2026-10-09 17:51:57.431 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.1.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.3.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.3.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.density_fn.net.1.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.density_fn.net.3.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.0.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.9.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.9.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.0.linear_1.weight after adapting shape (1835008,) → (1, 1835008) -> torch.Size([1, 1835008])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.1.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.0.skip_tp.weight after adapting shape (262144,) → (1, 262144) -> torch.Size([1, 262144])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.density_fn.net.1.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.4.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.alpha
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.0.source_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.9.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.6.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.0.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.linear_res.weight after adapting shape (327680,) → (1, 327680) -> torch.Size([1, 327680])
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.target_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.4.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.density_fn.net.0.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.density_fn.net.3.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.beta
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.density_fn.net.3.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.density_fn.net.1.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.7.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.skip_tp.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.0.linear_res.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.density_fn.net.3.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.density_fn.net.1.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.alpha
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.linear_1.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.beta
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.linear_up.weight after adapting shape (131072,) → (1, 131072) -> torch.Size([1, 131072])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.3.weight
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.3.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.0.linear_2.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.4.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.linear_2.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
+2026-10-09 17:51:57.460 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.7.bias
+2026-10-09 17:51:57.460 DEBUG: Transferring key interactions.1.source_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
+2026-10-09 17:51:57.460 DEBUG: Transferring key products.1.linear.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.density_fn.net.0.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring key interactions.0.linear_up.weight after adapting shape (262144,) → (1, 262144) -> torch.Size([1, 262144])
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.0.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.0.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.7.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.1.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.6.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.7.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring key products.0.linear.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.6.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.1.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring key interactions.0.target_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.4.weight
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.9.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.6.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.density_fn.net.0.bias
+2026-10-09 17:51:57.461 DEBUG: Transferring additional key: interactions.1.density_fn.net.0.weight
+2026-10-09 17:51:57.465 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1
+2026-10-09 17:51:57.465 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
+2026-10-09 17:51:57.466 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
+2026-10-09 17:51:57.469 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1
+2026-10-09 17:51:57.471 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
+2026-10-09 17:51:57.473 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
 2026-10-09 17:51:57.476 INFO: CuEquivariance ACTIVE: 2 interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=True; electronic response/readouts retain their original coordinates
 2026-10-09 17:51:57.494 INFO: No external LR schedule: the learning rate follows the explicit training stages.
 2026-10-09 17:51:57.495 INFO: restart_latest is False; starting from initialized model and optimizer.
@@ -629,26 +767,403 @@ Parameter Group 7
 2026-10-09 17:51:57.500 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
 2026-10-09 17:51:57.500 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
 2026-10-09 17:51:57.500 INFO: Setting global learning rate to 0.001
+2026-10-09 17:51:57.500 DEBUG: Optimizer: AdamW (
+Parameter Group 0
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: embedding
+    weight_decay: 0.0
+
+Parameter Group 1
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: interactions_no_decay
+    weight_decay: 0.0
+
+Parameter Group 2
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: products
+    weight_decay: 0.001
+
+Parameter Group 3
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: readouts
+    weight_decay: 0.0
+
+Parameter Group 4
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: lr_source_maps
+    weight_decay: 0.0
+
+Parameter Group 5
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: field_dependent_charges_map
+    weight_decay: 0.01
+
+Parameter Group 6
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: electronic_references
+    weight_decay: 0.0
+
+Parameter Group 7
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: layer_feature_mixer
+    weight_decay: 0.001
+)
 2026-10-09 17:51:57.512 INFO: CoupledResponse mode=unroll_scf: 12 training steps; 50 validation/deployment steps
+2026-10-09 17:56:35.291 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': 0.2837926667055031, 'reference_eV': 0.2837926667055031, 'panel_RMSE_before_eV': 0.33838550402348455, 'panel_RMSE_after_eV': 0.18429995023712542}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.0023593320167231637, 'reference_eV': 0.0023593320167231637, 'panel_RMSE_before_eV': 0.2704700431024832, 'panel_RMSE_after_eV': 0.270459752584916}, 'seconds': 9.537883002019953}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 17:57:30.608 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 7.563394355258879e-15, 'force_SSE': 10.985398731331939, 'force_RMSE_meV_A': 140.31070700625406}, {'index': 311, 'SCF_residual': 8.427286646295329e-15, 'force_SSE': 10.930291321533657, 'force_RMSE_meV_A': 132.34988667338473}, {'index': 129, 'SCF_residual': 3.3029134982598407e-15, 'force_SSE': 9.316806336596521, 'force_RMSE_meV_A': 142.00791344784506}, {'index': 60, 'SCF_residual': 4.6074255521944e-15, 'force_SSE': 9.213399139060652, 'force_RMSE_meV_A': 136.01765136943635}, {'index': 278, 'SCF_residual': 5.689893001203927e-15, 'force_SSE': 8.364719865472626, 'force_RMSE_meV_A': 129.60179873708856}]; by SCF residual=[{'index': 199, 'SCF_residual': 1.8561541192951836e-14, 'force_SSE': 0.06698565940626636, 'force_RMSE_meV_A': 13.005987297063598}, {'index': 134, 'SCF_residual': 1.8360313269738526e-14, 'force_SSE': 4.290494463506938, 'force_RMSE_meV_A': 89.1367495346641}, {'index': 89, 'SCF_residual': 1.6903145549918008e-14, 'force_SSE': 1.8598229372938013, 'force_RMSE_meV_A': 73.74333030191248}, {'index': 74, 'SCF_residual': 1.62231339473351e-14, 'force_SSE': 2.8033972113255663, 'force_RMSE_meV_A': 71.65491697692423}, {'index': 36, 'SCF_residual': 1.6056600493641326e-14, 'force_SSE': 5.378671233521517, 'force_RMSE_meV_A': 88.67668484428688}]
+2026-10-09 17:57:30.608 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0323264 eV^2, WF bias=0.0631274 eV, maximum SCF residual=1.85615e-14
 2026-10-09 17:57:30.611 INFO: Epoch 0: loss=26.0477, RMSE_E_per_atom=26.6702 meV, RMSE_F=81.5360 meV/A, RMSE_dip_per_atom=2.1404 meA, RMSE_rho=0.1238 me/A^3, RMSE_EF(abs/rel)=208.6910/207.0798 meV, RMSE_ESP=290.6714 mV, RMSE_ESPvac(abs/rel)=310.5008/308.2590 mV, RMSE_WF(abs/rel)=454.4707/450.0650 meV
+2026-10-09 17:57:30.627 DEBUG: 50-step electronic residual maximum: 1.8562e-14
+2026-10-09 17:57:30.633 DEBUG: Optimizer epoch 0: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=603.58, clipped=346/346
+2026-10-09 17:57:30.633 DEBUG: Epoch timing: train=268.251s, validation=64.881s, updates=346, train/update=0.77529s, peak allocated=15281.0 MiB, backbone=CuEq
+2026-10-09 17:57:30.633 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.025231, min retained gradient=0.0019594
+2026-10-09 17:57:30.633 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 18:09:42.055 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.10600354563985918, 'reference_eV': 0.17778912106564393, 'panel_RMSE_before_eV': 0.15430239909331422, 'panel_RMSE_after_eV': 0.112127064876107}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.02295243457991233, 'reference_eV': -0.020593102563189167, 'panel_RMSE_before_eV': 0.16222778730302012, 'panel_RMSE_after_eV': 0.16059589260030527}, 'seconds': 9.511338428012095}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 18:10:22.384 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 3.0337416606629475e-11, 'force_SSE': 5.038660056044439, 'force_RMSE_meV_A': 95.02555830544978}, {'index': 147, 'SCF_residual': 7.617060003572984e-10, 'force_SSE': 3.2571659622334592, 'force_RMSE_meV_A': 76.40166873885326}, {'index': 168, 'SCF_residual': 2.1526868178647907e-11, 'force_SSE': 3.138024381264255, 'force_RMSE_meV_A': 75.19373633661198}, {'index': 172, 'SCF_residual': 1.0976723271646782e-09, 'force_SSE': 3.121070301111553, 'force_RMSE_meV_A': 72.30438058961685}, {'index': 136, 'SCF_residual': 1.4240628537498523e-09, 'force_SSE': 3.0134803172027946, 'force_RMSE_meV_A': 79.48313531289065}]; by SCF residual=[{'index': 180, 'SCF_residual': 1.769024941117303e-08, 'force_SSE': 0.5441352347799093, 'force_RMSE_meV_A': 54.98157442775763}, {'index': 345, 'SCF_residual': 1.632744586212674e-08, 'force_SSE': 1.280455761908179, 'force_RMSE_meV_A': 47.396346034085475}, {'index': 243, 'SCF_residual': 1.5532856742148105e-08, 'force_SSE': 0.8208173026860053, 'force_RMSE_meV_A': 48.56614468966274}, {'index': 164, 'SCF_residual': 1.5356482377382186e-08, 'force_SSE': 0.7012075444875978, 'force_RMSE_meV_A': 63.48171718373244}, {'index': 106, 'SCF_residual': 1.498578550834795e-08, 'force_SSE': 0.7450083935021198, 'force_RMSE_meV_A': 55.37037260629699}]
+2026-10-09 18:10:22.385 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0135429 eV^2, WF bias=-0.00568036 eV, maximum SCF residual=1.76902e-08
 2026-10-09 18:10:22.387 INFO: Epoch 5: loss=7.34424, RMSE_E_per_atom=14.6507 meV, RMSE_F=46.1716 meV/A, RMSE_dip_per_atom=0.6922 meA, RMSE_rho=0.0801 me/A^3, RMSE_EF(abs/rel)=120.5662/120.4934 meV, RMSE_ESP=136.5056 mV, RMSE_ESPvac(abs/rel)=168.5866/168.2976 mV, RMSE_WF(abs/rel)=264.5012/264.4402 meV
+2026-10-09 18:10:22.400 DEBUG: 50-step electronic residual maximum: 1.769e-08
+2026-10-09 18:10:22.406 DEBUG: Optimizer epoch 5: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=346.12, clipped=346/346
+2026-10-09 18:10:22.406 DEBUG: Epoch timing: train=143.988s, validation=49.863s, updates=346, train/update=0.41615s, peak allocated=14079.4 MiB, backbone=CuEq
+2026-10-09 18:10:22.406 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.052425, min retained gradient=0.0017034
+2026-10-09 18:10:22.406 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 18:22:32.688 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.06290846818244274, 'reference_eV': 0.11488065288320119, 'panel_RMSE_before_eV': 0.11129892311000013, 'panel_RMSE_after_eV': 0.09181489485036898}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.016352155511402258, 'reference_eV': -0.00424094705178691, 'panel_RMSE_before_eV': 0.1248064160463299, 'panel_RMSE_after_eV': 0.12373054795183165}, 'seconds': 9.44258972199168}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 18:23:12.819 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 1.3498990624201401e-05, 'force_SSE': 4.4162964763153, 'force_RMSE_meV_A': 88.96353081001858}, {'index': 168, 'SCF_residual': 1.7159475107220157e-06, 'force_SSE': 2.9334961327988953, 'force_RMSE_meV_A': 72.70198496365603}, {'index': 147, 'SCF_residual': 1.6166750264307028e-05, 'force_SSE': 2.8630981291249653, 'force_RMSE_meV_A': 71.63100049145444}, {'index': 123, 'SCF_residual': 5.3921997075767614e-11, 'force_SSE': 2.4872083975910386, 'force_RMSE_meV_A': 65.88382071303253}, {'index': 143, 'SCF_residual': 6.130452618050702e-06, 'force_SSE': 2.411918711038053, 'force_RMSE_meV_A': 65.74522770527162}]; by SCF residual=[{'index': 30, 'SCF_residual': 2.32585181319106e-05, 'force_SSE': 0.4050582859580124, 'force_RMSE_meV_A': 38.73262028211575}, {'index': 329, 'SCF_residual': 2.061493036920048e-05, 'force_SSE': 0.3976118566712954, 'force_RMSE_meV_A': 37.351429981376455}, {'index': 108, 'SCF_residual': 2.0183848671209703e-05, 'force_SSE': 0.40664253294888386, 'force_RMSE_meV_A': 38.17721988432838}, {'index': 28, 'SCF_residual': 1.669013028593458e-05, 'force_SSE': 0.9560075480996069, 'force_RMSE_meV_A': 41.39172835006708}, {'index': 222, 'SCF_residual': 1.635690167560086e-05, 'force_SSE': 0.6809685768048135, 'force_RMSE_meV_A': 43.492291041210635}]
+2026-10-09 18:23:12.819 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0108597 eV^2, WF bias=0.00199106 eV, maximum SCF residual=2.32585e-05
 2026-10-09 18:23:12.822 INFO: Epoch 10: loss=5.7054, RMSE_E_per_atom=12.0600 meV, RMSE_F=40.2256 meV/A, RMSE_dip_per_atom=0.5962 meA, RMSE_rho=0.0656 me/A^3, RMSE_EF(abs/rel)=107.3779/107.2585 meV, RMSE_ESP=118.3769 mV, RMSE_ESPvac(abs/rel)=150.0451/150.0137 mV, RMSE_WF(abs/rel)=236.0760/236.0676 meV
+2026-10-09 18:23:12.836 DEBUG: 50-step electronic residual maximum: 2.3259e-05
+2026-10-09 18:23:12.842 DEBUG: Optimizer epoch 10: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=230.33, clipped=346/346
+2026-10-09 18:23:12.842 DEBUG: Epoch timing: train=143.554s, validation=49.598s, updates=346, train/update=0.41490s, peak allocated=14694.3 MiB, backbone=CuEq
+2026-10-09 18:23:12.842 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.085204, min retained gradient=0.0021355
+2026-10-09 18:23:12.842 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 18:23:12.842 DEBUG: 50-step finite-budget validation residual 2.3259e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 18:35:16.553 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.07435200314420978, 'reference_eV': 0.04052864973899141, 'panel_RMSE_before_eV': 0.11562303835823899, 'panel_RMSE_after_eV': 0.0885464094564778}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.015256206865964777, 'reference_eV': -0.019497153917751687, 'panel_RMSE_before_eV': 0.11586467410459321, 'panel_RMSE_after_eV': 0.11485586993021506}, 'seconds': 9.364004656963516}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 18:35:56.365 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 7.474009562864758e-05, 'force_SSE': 3.418393328191901, 'force_RMSE_meV_A': 78.26974458822919}, {'index': 168, 'SCF_residual': 2.856028839828828e-05, 'force_SSE': 2.8403964540804822, 'force_RMSE_meV_A': 71.53902046291704}, {'index': 147, 'SCF_residual': 8.564808741217886e-05, 'force_SSE': 2.3995815505791955, 'force_RMSE_meV_A': 65.5768660387253}, {'index': 123, 'SCF_residual': 2.936601699397162e-07, 'force_SSE': 2.33735894361319, 'force_RMSE_meV_A': 63.868305598770384}, {'index': 172, 'SCF_residual': 1.964911497398525e-10, 'force_SSE': 2.088231361801409, 'force_RMSE_meV_A': 59.14283538935047}]; by SCF residual=[{'index': 30, 'SCF_residual': 0.00016243173248514653, 'force_SSE': 0.33885716037123387, 'force_RMSE_meV_A': 35.42635346593632}, {'index': 329, 'SCF_residual': 0.00013664776271710144, 'force_SSE': 0.315701078087823, 'force_RMSE_meV_A': 33.28247408186334}, {'index': 336, 'SCF_residual': 0.00010721068314780216, 'force_SSE': 0.3609589970397751, 'force_RMSE_meV_A': 39.78886145378487}, {'index': 338, 'SCF_residual': 0.00010631254887827346, 'force_SSE': 0.9696067226294781, 'force_RMSE_meV_A': 53.01371773881964}, {'index': 201, 'SCF_residual': 0.00010620658346517653, 'force_SSE': 1.7956106961223945, 'force_RMSE_meV_A': 56.72689234949797}]
+2026-10-09 18:35:56.365 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00945154 eV^2, WF bias=-0.0191053 eV, maximum SCF residual=0.000162432
 2026-10-09 18:35:56.368 INFO: Epoch 15: loss=4.88367, RMSE_E_per_atom=9.7616 meV, RMSE_F=36.6829 meV/A, RMSE_dip_per_atom=0.5531 meA, RMSE_rho=0.0605 me/A^3, RMSE_EF(abs/rel)=99.4268/99.4267 meV, RMSE_ESP=111.1186 mV, RMSE_ESPvac(abs/rel)=139.5801/138.2487 mV, RMSE_WF(abs/rel)=219.6963/218.8640 meV
+2026-10-09 18:35:56.381 DEBUG: 50-step electronic residual maximum: 0.00016243
+2026-10-09 18:35:56.387 DEBUG: Optimizer epoch 15: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=178.43, clipped=346/346
+2026-10-09 18:35:56.387 DEBUG: Epoch timing: train=142.260s, validation=49.198s, updates=346, train/update=0.41116s, peak allocated=15735.1 MiB, backbone=CuEq
+2026-10-09 18:35:56.387 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.098063, min retained gradient=0.0056375
+2026-10-09 18:35:56.387 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 18:35:56.387 DEBUG: 50-step finite-budget validation residual 0.00016243 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 18:47:55.242 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.10350396513028118, 'reference_eV': -0.06297531539128977, 'panel_RMSE_before_eV': 0.1289123293005499, 'panel_RMSE_after_eV': 0.07684606592404684}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.0009969108245896981, 'reference_eV': -0.018500243093161988, 'panel_RMSE_before_eV': 0.08291292433793448, 'panel_RMSE_after_eV': 0.08290693089890533}, 'seconds': 9.295793280994985}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 18:48:34.758 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 0.00018286552855904803, 'force_SSE': 2.9320845471434027, 'force_RMSE_meV_A': 72.48883917484466}, {'index': 168, 'SCF_residual': 2.9348238405967064e-05, 'force_SSE': 2.494723100871916, 'force_RMSE_meV_A': 67.04473564827889}, {'index': 123, 'SCF_residual': 1.8392736002986743e-07, 'force_SSE': 2.104866679517233, 'force_RMSE_meV_A': 60.608702332745864}, {'index': 147, 'SCF_residual': 0.00016207831278351043, 'force_SSE': 2.085180661021829, 'force_RMSE_meV_A': 61.1300491170835}, {'index': 172, 'SCF_residual': 1.939814697760056e-10, 'force_SSE': 1.985724418637046, 'force_RMSE_meV_A': 57.67297075325616}]; by SCF residual=[{'index': 30, 'SCF_residual': 0.0002776204679525718, 'force_SSE': 0.3155841627666666, 'force_RMSE_meV_A': 34.18815924364949}, {'index': 329, 'SCF_residual': 0.00027114222772636754, 'force_SSE': 0.2772949435677409, 'force_RMSE_meV_A': 31.19238231159613}, {'index': 29, 'SCF_residual': 0.000240132272634197, 'force_SSE': 0.6304441339887751, 'force_RMSE_meV_A': 48.321612908019745}, {'index': 336, 'SCF_residual': 0.00021126974503432594, 'force_SSE': 0.3012046948088149, 'force_RMSE_meV_A': 36.34657099157607}, {'index': 109, 'SCF_residual': 0.0002005225508101005, 'force_SSE': 0.3634388401489095, 'force_RMSE_meV_A': 32.31662858632567}]
+2026-10-09 18:48:34.758 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.007639 eV^2, WF bias=-0.0125413 eV, maximum SCF residual=0.00027762
 2026-10-09 18:48:34.761 INFO: Epoch 20: loss=4.08804, RMSE_E_per_atom=8.6900 meV, RMSE_F=34.6627 meV/A, RMSE_dip_per_atom=0.4839 meA, RMSE_rho=0.0569 me/A^3, RMSE_EF(abs/rel)=90.8812/90.8636 meV, RMSE_ESP=100.0920 mV, RMSE_ESPvac(abs/rel)=127.1237/126.3133 mV, RMSE_WF(abs/rel)=199.1143/198.7190 meV
+2026-10-09 18:48:34.773 DEBUG: 50-step electronic residual maximum: 0.00027762
+2026-10-09 18:48:34.779 DEBUG: Optimizer epoch 20: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=138.1, clipped=346/346
+2026-10-09 18:48:34.779 DEBUG: Epoch timing: train=140.690s, validation=48.833s, updates=346, train/update=0.40662s, peak allocated=15338.5 MiB, backbone=CuEq
+2026-10-09 18:48:34.779 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.11758, min retained gradient=0.0097745
+2026-10-09 18:48:34.779 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 18:48:34.779 DEBUG: 50-step finite-budget validation residual 0.00027762 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 19:00:30.307 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.051087273880840715, 'reference_eV': -0.11406258927213048, 'panel_RMSE_before_eV': 0.08233197555407232, 'panel_RMSE_after_eV': 0.064565041981403}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.006976217136067334, 'reference_eV': -0.011524025957094654, 'panel_RMSE_before_eV': 0.07200107809160937, 'panel_RMSE_after_eV': 0.0716623167419563}, 'seconds': 9.28288794902619}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 19:01:09.726 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 168, 'SCF_residual': 2.381394649846741e-06, 'force_SSE': 2.5205744533084498, 'force_RMSE_meV_A': 67.39121301435934}, {'index': 2, 'SCF_residual': 8.317451108402762e-05, 'force_SSE': 2.22807978767668, 'force_RMSE_meV_A': 63.189987576249166}, {'index': 123, 'SCF_residual': 2.859587014819587e-07, 'force_SSE': 2.081491357088301, 'force_RMSE_meV_A': 60.271221735074946}, {'index': 147, 'SCF_residual': 9.288329249613168e-05, 'force_SSE': 1.9291970650044834, 'force_RMSE_meV_A': 58.79917015062628}, {'index': 172, 'SCF_residual': 6.674022445807282e-11, 'force_SSE': 1.7312590787585636, 'force_RMSE_meV_A': 53.851011645158295}]; by SCF residual=[{'index': 30, 'SCF_residual': 0.00017501828625735016, 'force_SSE': 0.2852606405304277, 'force_RMSE_meV_A': 32.5041672844181}, {'index': 329, 'SCF_residual': 0.00016124070385961642, 'force_SSE': 0.26060359308461806, 'force_RMSE_meV_A': 30.239023995934957}, {'index': 29, 'SCF_residual': 0.0001484617176981673, 'force_SSE': 0.5433024938932384, 'force_RMSE_meV_A': 44.85790296997671}, {'index': 336, 'SCF_residual': 0.00012212631482416691, 'force_SSE': 0.2585281440492097, 'force_RMSE_meV_A': 33.673362894681084}, {'index': 105, 'SCF_residual': 0.00011057658960028725, 'force_SSE': 0.34226058247765034, 'force_RMSE_meV_A': 34.654210775647215}]
+2026-10-09 19:01:09.726 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00775329 eV^2, WF bias=-0.00800303 eV, maximum SCF residual=0.000175018
 2026-10-09 19:01:09.729 INFO: Epoch 25: loss=4.09515, RMSE_E_per_atom=8.3769 meV, RMSE_F=33.2988 meV/A, RMSE_dip_per_atom=0.4846 meA, RMSE_rho=0.0539 me/A^3, RMSE_EF(abs/rel)=87.6218/87.6132 meV, RMSE_ESP=102.5457 mV, RMSE_ESPvac(abs/rel)=129.2041/128.8737 mV, RMSE_WF(abs/rel)=199.6375/199.4770 meV
+2026-10-09 19:01:09.740 DEBUG: 50-step electronic residual maximum: 0.00017502
+2026-10-09 19:01:09.758 DEBUG: Optimizer epoch 25: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=132.08, clipped=346/346
+2026-10-09 19:01:09.758 DEBUG: Epoch timing: train=140.850s, validation=48.735s, updates=346, train/update=0.40708s, peak allocated=15591.7 MiB, backbone=CuEq
+2026-10-09 19:01:09.758 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.12242, min retained gradient=0.0044228
+2026-10-09 19:01:09.758 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 19:01:09.758 DEBUG: 50-step finite-budget validation residual 0.00017502 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 19:13:05.293 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.023268416145252085, 'reference_eV': -0.13733100541738255, 'panel_RMSE_before_eV': 0.06012904841482574, 'panel_RMSE_after_eV': 0.055444416070185375}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.010519679750051178, 'reference_eV': -0.0010043462070434758, 'panel_RMSE_before_eV': 0.057918547525782134, 'panel_RMSE_after_eV': 0.056955197176839334}, 'seconds': 9.308613335946575}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 19:13:44.760 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 9.966419395185389e-07, 'force_SSE': 2.645919773142946, 'force_RMSE_meV_A': 68.86066880405302}, {'index': 168, 'SCF_residual': 6.48299544256381e-10, 'force_SSE': 2.5198070278595663, 'force_RMSE_meV_A': 67.38095311725867}, {'index': 147, 'SCF_residual': 3.4019856376410473e-10, 'force_SSE': 2.0637686265631667, 'force_RMSE_meV_A': 60.81537703119611}, {'index': 123, 'SCF_residual': 3.6007940379390035e-10, 'force_SSE': 1.9532908259225332, 'force_RMSE_meV_A': 58.38565331443856}, {'index': 172, 'SCF_residual': 1.8933507539564687e-11, 'force_SSE': 1.6969232150265645, 'force_RMSE_meV_A': 53.314326832528195}]; by SCF residual=[{'index': 29, 'SCF_residual': 5.1597058847149824e-05, 'force_SSE': 0.5284025329441101, 'force_RMSE_meV_A': 44.238517361135855}, {'index': 109, 'SCF_residual': 3.922313696613777e-05, 'force_SSE': 0.2860020236356572, 'force_RMSE_meV_A': 28.66783730079341}, {'index': 30, 'SCF_residual': 3.905949058623237e-05, 'force_SSE': 0.2596427723060349, 'force_RMSE_meV_A': 31.01031920876918}, {'index': 336, 'SCF_residual': 3.0136798487449823e-05, 'force_SSE': 0.21905529880295174, 'force_RMSE_meV_A': 30.996271620937108}, {'index': 176, 'SCF_residual': 2.2687174994831527e-05, 'force_SSE': 0.7287648999163241, 'force_RMSE_meV_A': 36.634798638736655}]
+2026-10-09 19:13:44.760 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00733216 eV^2, WF bias=0.000335356 eV, maximum SCF residual=5.15971e-05
 2026-10-09 19:13:44.763 INFO: Epoch 30: loss=3.85658, RMSE_E_per_atom=7.6258 meV, RMSE_F=32.0621 meV/A, RMSE_dip_per_atom=0.4796 meA, RMSE_rho=0.0548 me/A^3, RMSE_EF(abs/rel)=85.9522/85.8855 meV, RMSE_ESP=98.8841 mV, RMSE_ESPvac(abs/rel)=125.2366/125.1995 mV, RMSE_WF(abs/rel)=194.2052/194.2049 meV
+2026-10-09 19:13:44.772 DEBUG: 50-step electronic residual maximum: 5.1597e-05
+2026-10-09 19:13:44.776 DEBUG: Optimizer epoch 30: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=114.44, clipped=346/346
+2026-10-09 19:13:44.777 DEBUG: Epoch timing: train=140.650s, validation=48.793s, updates=346, train/update=0.40650s, peak allocated=16296.7 MiB, backbone=CuEq
+2026-10-09 19:13:44.777 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.12946, min retained gradient=0.014653
+2026-10-09 19:13:44.777 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 19:13:44.777 DEBUG: 50-step finite-budget validation residual 5.1597e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 19:25:40.474 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.0957841489136806, 'reference_eV': -0.23311515433106317, 'panel_RMSE_before_eV': 0.11046383569969588, 'panel_RMSE_after_eV': 0.05502413847005026}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.0077953441855947775, 'reference_eV': -0.008799690392638254, 'panel_RMSE_before_eV': 0.05817999373320208, 'panel_RMSE_after_eV': 0.057655392460927254}, 'seconds': 9.303673835005611}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 19:26:20.080 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 1.2513759473087305e-10, 'force_SSE': 2.572609965817215, 'force_RMSE_meV_A': 67.900015648897}, {'index': 168, 'SCF_residual': 4.755677518453183e-10, 'force_SSE': 2.4952000300467065, 'force_RMSE_meV_A': 67.05114398721372}, {'index': 147, 'SCF_residual': 8.528335954105515e-10, 'force_SSE': 1.8957342131000703, 'force_RMSE_meV_A': 58.286989472406255}, {'index': 123, 'SCF_residual': 1.1442487929391731e-10, 'force_SSE': 1.86276768831214, 'force_RMSE_meV_A': 57.01669466045655}, {'index': 172, 'SCF_residual': 8.570838483379362e-11, 'force_SSE': 1.681197259407129, 'force_RMSE_meV_A': 53.066710953310704}]; by SCF residual=[{'index': 29, 'SCF_residual': 1.1336859043586944e-05, 'force_SSE': 0.5618762004170805, 'force_RMSE_meV_A': 45.61823061570566}, {'index': 30, 'SCF_residual': 8.338849780853419e-06, 'force_SSE': 0.2283776623782322, 'force_RMSE_meV_A': 29.083383468803152}, {'index': 109, 'SCF_residual': 2.8595235498918292e-06, 'force_SSE': 0.2559274137476005, 'force_RMSE_meV_A': 27.11869470905615}, {'index': 176, 'SCF_residual': 2.7397577946203233e-06, 'force_SSE': 0.6213418789039586, 'force_RMSE_meV_A': 33.8271491568674}, {'index': 69, 'SCF_residual': 2.5317095189714145e-06, 'force_SSE': 0.5121106850618157, 'force_RMSE_meV_A': 30.710154680205783}]
+2026-10-09 19:26:20.080 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00628352 eV^2, WF bias=-0.00665959 eV, maximum SCF residual=1.13369e-05
 2026-10-09 19:26:20.083 INFO: Epoch 35: loss=3.39535, RMSE_E_per_atom=7.4199 meV, RMSE_F=31.2398 meV/A, RMSE_dip_per_atom=0.4464 meA, RMSE_rho=0.0524 me/A^3, RMSE_EF(abs/rel)=77.0257/77.0188 meV, RMSE_ESP=92.6624 mV, RMSE_ESPvac(abs/rel)=118.5439/118.4104 mV, RMSE_WF(abs/rel)=180.4559/180.3329 meV
+2026-10-09 19:26:20.096 DEBUG: 50-step electronic residual maximum: 1.1337e-05
+2026-10-09 19:26:20.106 DEBUG: Optimizer epoch 35: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=104.99, clipped=346/346
+2026-10-09 19:26:20.106 DEBUG: Epoch timing: train=140.854s, validation=48.937s, updates=346, train/update=0.40709s, peak allocated=14128.9 MiB, backbone=CuEq
+2026-10-09 19:26:20.106 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.14105, min retained gradient=0.015068
+2026-10-09 19:26:20.106 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 19:26:20.106 DEBUG: 50-step finite-budget validation residual 1.1337e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 19:38:17.277 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.04579651619336196, 'reference_eV': -0.2789116705244251, 'panel_RMSE_before_eV': 0.06923040341984317, 'panel_RMSE_after_eV': 0.05191847322702555}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.0006916432513252389, 'reference_eV': -0.009491333643963493, 'panel_RMSE_before_eV': 0.05741242080863924, 'panel_RMSE_after_eV': 0.057408254569540504}, 'seconds': 9.28657221904723}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 19:38:56.794 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 9.162258451933525e-11, 'force_SSE': 2.7367929997852656, 'force_RMSE_meV_A': 70.03318465570582}, {'index': 168, 'SCF_residual': 4.548343819632539e-10, 'force_SSE': 2.1884537483514728, 'force_RMSE_meV_A': 62.79458501287823}, {'index': 123, 'SCF_residual': 6.477506725444115e-11, 'force_SSE': 1.860115690409775, 'force_RMSE_meV_A': 56.97609324456372}, {'index': 172, 'SCF_residual': 3.4435213014383237e-10, 'force_SSE': 1.7002319211524057, 'force_RMSE_meV_A': 53.36627836866604}, {'index': 147, 'SCF_residual': 2.2891991080520313e-10, 'force_SSE': 1.6919676659300873, 'force_RMSE_meV_A': 55.06541671643172}]; by SCF residual=[{'index': 29, 'SCF_residual': 4.214264838277304e-05, 'force_SSE': 0.5658402063672178, 'force_RMSE_meV_A': 45.77886486171028}, {'index': 109, 'SCF_residual': 3.552241513085641e-05, 'force_SSE': 0.2496915556411398, 'force_RMSE_meV_A': 26.78627391469669}, {'index': 222, 'SCF_residual': 2.6375264216109418e-05, 'force_SSE': 0.34607399202098105, 'force_RMSE_meV_A': 31.005106748771645}, {'index': 30, 'SCF_residual': 2.5224757229831696e-05, 'force_SSE': 0.20996054911781803, 'force_RMSE_meV_A': 27.88604782681343}, {'index': 17, 'SCF_residual': 1.7984077705868184e-05, 'force_SSE': 0.6932038948283347, 'force_RMSE_meV_A': 35.729799759361626}]
+2026-10-09 19:38:56.794 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00665491 eV^2, WF bias=-0.0100631 eV, maximum SCF residual=4.21426e-05
 2026-10-09 19:38:56.797 INFO: Epoch 40: loss=3.45192, RMSE_E_per_atom=7.1222 meV, RMSE_F=30.1106 meV/A, RMSE_dip_per_atom=0.4480 meA, RMSE_rho=0.0494 me/A^3, RMSE_EF(abs/rel)=78.8391/78.8369 meV, RMSE_ESP=92.8007 mV, RMSE_ESPvac(abs/rel)=121.5166/121.0482 mV, RMSE_WF(abs/rel)=185.1459/184.8722 meV
+2026-10-09 19:38:56.809 DEBUG: 50-step electronic residual maximum: 4.2143e-05
+2026-10-09 19:38:56.815 DEBUG: Optimizer epoch 40: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=93.526, clipped=346/346
+2026-10-09 19:38:56.815 DEBUG: Epoch timing: train=141.034s, validation=48.825s, updates=346, train/update=0.40761s, peak allocated=15128.2 MiB, backbone=CuEq
+2026-10-09 19:38:56.815 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.17063, min retained gradient=0.0083062
+2026-10-09 19:38:56.815 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 19:38:56.815 DEBUG: 50-step finite-budget validation residual 4.2143e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 19:50:53.430 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.04612711472136225, 'reference_eV': -0.3250387852457874, 'panel_RMSE_before_eV': 0.06235189072096033, 'panel_RMSE_after_eV': 0.04195292080369214}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.0010656566863955592, 'reference_eV': -0.008425676957567935, 'panel_RMSE_before_eV': 0.044645431528360646, 'panel_RMSE_after_eV': 0.0446327114589768}, 'seconds': 9.296670876967255}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 19:51:32.912 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 2.3116801657896424e-06, 'force_SSE': 2.48436070803028, 'force_RMSE_meV_A': 66.72525259141099}, {'index': 168, 'SCF_residual': 9.580161663969022e-11, 'force_SSE': 2.0813209119949474, 'force_RMSE_meV_A': 61.23828679315144}, {'index': 123, 'SCF_residual': 1.6207171715798552e-10, 'force_SSE': 1.785102831314879, 'force_RMSE_meV_A': 55.81543431127101}, {'index': 172, 'SCF_residual': 2.9413994850902014e-10, 'force_SSE': 1.6348629289033012, 'force_RMSE_meV_A': 52.33033410470181}, {'index': 147, 'SCF_residual': 7.539645435761244e-10, 'force_SSE': 1.5457944911794945, 'force_RMSE_meV_A': 52.63307917668475}]; by SCF residual=[{'index': 29, 'SCF_residual': 2.8623819943507378e-05, 'force_SSE': 0.4595968723961141, 'force_RMSE_meV_A': 41.257855476310525}, {'index': 109, 'SCF_residual': 2.7657954962845288e-05, 'force_SSE': 0.2144059364104109, 'force_RMSE_meV_A': 24.821543317722902}, {'index': 30, 'SCF_residual': 1.9323082212918674e-05, 'force_SSE': 0.20308589515549996, 'force_RMSE_meV_A': 27.425717530402142}, {'index': 222, 'SCF_residual': 1.9164616661765388e-05, 'force_SSE': 0.3683145836319064, 'force_RMSE_meV_A': 31.985872907334954}, {'index': 17, 'SCF_residual': 1.5428843271741988e-05, 'force_SSE': 0.6828360487873782, 'force_RMSE_meV_A': 35.461598268074376}]
+2026-10-09 19:51:32.913 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00639467 eV^2, WF bias=-0.00610385 eV, maximum SCF residual=2.86238e-05
 2026-10-09 19:51:32.915 INFO: Epoch 45: loss=3.27442, RMSE_E_per_atom=6.8361 meV, RMSE_F=29.3240 meV/A, RMSE_dip_per_atom=0.4362 meA, RMSE_rho=0.0479 me/A^3, RMSE_EF(abs/rel)=76.0964/76.0948 meV, RMSE_ESP=90.0041 mV, RMSE_ESPvac(abs/rel)=118.8125/118.6288 mV, RMSE_WF(abs/rel)=180.8032/180.7002 meV
+2026-10-09 19:51:32.933 DEBUG: 50-step electronic residual maximum: 2.8624e-05
+2026-10-09 19:51:32.940 DEBUG: Optimizer epoch 45: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=81.854, clipped=346/346
+2026-10-09 19:51:32.940 DEBUG: Epoch timing: train=140.991s, validation=48.808s, updates=346, train/update=0.40749s, peak allocated=15247.8 MiB, backbone=CuEq
+2026-10-09 19:51:32.940 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.18597, min retained gradient=0.014735
+2026-10-09 19:51:32.940 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 19:51:32.941 DEBUG: 50-step finite-budget validation residual 2.8624e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 20:01:02.899 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.02026251045950975, 'reference_eV': -0.34530129570529716, 'panel_RMSE_before_eV': 0.04189595641900203, 'panel_RMSE_after_eV': 0.03667017635819571}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.002490066638008839, 'reference_eV': -0.005935610319559095, 'panel_RMSE_before_eV': 0.0325435545376916, 'panel_RMSE_after_eV': 0.03244815110427685}, 'seconds': 9.310382988012861}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 20:01:42.468 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 9.323086747059506e-11, 'force_SSE': 2.322438233707148, 'force_RMSE_meV_A': 64.51415106507423}, {'index': 168, 'SCF_residual': 1.2139328431359786e-10, 'force_SSE': 2.219343872497493, 'force_RMSE_meV_A': 63.23620630844145}, {'index': 123, 'SCF_residual': 1.0626921391476696e-10, 'force_SSE': 1.757623918929633, 'force_RMSE_meV_A': 55.38417183888003}, {'index': 172, 'SCF_residual': 2.283590400109503e-10, 'force_SSE': 1.6399940402543198, 'force_RMSE_meV_A': 52.41239065233843}, {'index': 304, 'SCF_residual': 4.0480932494979527e-10, 'force_SSE': 1.5761807049259635, 'force_RMSE_meV_A': 54.02641166383626}]; by SCF residual=[{'index': 29, 'SCF_residual': 1.3217617842758989e-05, 'force_SSE': 0.48876926274565197, 'force_RMSE_meV_A': 42.547109522123826}, {'index': 30, 'SCF_residual': 8.517445828845616e-06, 'force_SSE': 0.18249242720254796, 'force_RMSE_meV_A': 25.998036051362714}, {'index': 109, 'SCF_residual': 4.9311673799429245e-06, 'force_SSE': 0.20469220309452843, 'force_RMSE_meV_A': 24.252752130507115}, {'index': 176, 'SCF_residual': 1.8208255114365857e-06, 'force_SSE': 0.6541221024856761, 'force_RMSE_meV_A': 34.70799268120943}, {'index': 75, 'SCF_residual': 1.6407391650458125e-06, 'force_SSE': 0.39224919238462785, 'force_RMSE_meV_A': 26.951574968911675}]
+2026-10-09 20:01:42.468 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00648548 eV^2, WF bias=0.000746257 eV, maximum SCF residual=1.32176e-05
 2026-10-09 20:01:42.471 INFO: Epoch 49: loss=3.31229, RMSE_E_per_atom=6.5346 meV, RMSE_F=29.0158 meV/A, RMSE_dip_per_atom=0.4307 meA, RMSE_rho=0.0494 me/A^3, RMSE_EF(abs/rel)=78.2958/78.2668 meV, RMSE_ESP=91.5684 mV, RMSE_ESPvac(abs/rel)=117.9719/117.9638 mV, RMSE_WF(abs/rel)=181.6939/181.6924 meV
+2026-10-09 20:01:42.491 DEBUG: 50-step electronic residual maximum: 1.3218e-05
+2026-10-09 20:01:42.498 DEBUG: Optimizer epoch 49: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=76.559, clipped=346/346
+2026-10-09 20:01:42.498 DEBUG: Epoch timing: train=141.161s, validation=48.910s, updates=346, train/update=0.40798s, peak allocated=14065.1 MiB, backbone=CuEq
+2026-10-09 20:01:42.498 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.19158, min retained gradient=0.012036
+2026-10-09 20:01:42.498 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 20:01:42.498 DEBUG: 50-step finite-budget validation residual 1.3218e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
 2026-10-09 20:01:43.195 INFO: Foundation feature extractor frozen=False; energy/electronic readouts remain trainable
 2026-10-09 20:01:43.195 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
 2026-10-09 20:01:43.196 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=20, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
 2026-10-09 20:01:43.196 INFO: Setting global learning rate to 0.001
+2026-10-09 20:01:43.196 DEBUG: Optimizer: AdamW (
+Parameter Group 0
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: embedding
+    weight_decay: 0.0
+
+Parameter Group 1
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: interactions_no_decay
+    weight_decay: 0.0
+
+Parameter Group 2
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: products
+    weight_decay: 0.001
+
+Parameter Group 3
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: readouts
+    weight_decay: 0.0
+
+Parameter Group 4
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: lr_source_maps
+    weight_decay: 0.0
+
+Parameter Group 5
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: field_dependent_charges_map
+    weight_decay: 0.01
+
+Parameter Group 6
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: electronic_references
+    weight_decay: 0.0
+
+Parameter Group 7
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.001
+    maximize: False
+    name: layer_feature_mixer
+    weight_decay: 0.001
+)
 2026-10-09 20:01:43.207 INFO: CoupledResponse mode=unroll_scf: 20 training steps; 50 validation/deployment steps
+2026-10-09 20:05:09.831 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.005135511076979527, 'reference_eV': -0.3504368067822767, 'panel_RMSE_before_eV': 0.03711136082621202, 'panel_RMSE_after_eV': 0.036754314418194836}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.003677455141038584, 'reference_eV': -0.0022581551785205113, 'panel_RMSE_before_eV': 0.03575055347642346, 'panel_RMSE_after_eV': 0.03556091109007561}, 'seconds': 9.360786486999132}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 20:05:49.188 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 168, 'SCF_residual': 2.3708183333193134e-10, 'force_SSE': 2.1049370541012022, 'force_RMSE_meV_A': 61.58473330914832}, {'index': 2, 'SCF_residual': 1.14893691782747e-10, 'force_SSE': 1.9540423402125515, 'force_RMSE_meV_A': 59.17658314918544}, {'index': 123, 'SCF_residual': 1.5401273312232178e-10, 'force_SSE': 1.7475734116507557, 'force_RMSE_meV_A': 55.22559495342204}, {'index': 172, 'SCF_residual': 2.9491852016061415e-10, 'force_SSE': 1.621391232783249, 'force_RMSE_meV_A': 52.11428031132399}, {'index': 175, 'SCF_residual': 3.536322346064935e-10, 'force_SSE': 1.5501558915553535, 'force_RMSE_meV_A': 46.79194078616327}]; by SCF residual=[{'index': 29, 'SCF_residual': 2.7733053470972713e-05, 'force_SSE': 0.4605113451968965, 'force_RMSE_meV_A': 41.29888103572929}, {'index': 109, 'SCF_residual': 2.7259968713888583e-05, 'force_SSE': 0.20103596334715584, 'force_RMSE_meV_A': 24.035173181155756}, {'index': 30, 'SCF_residual': 2.6498023016519046e-05, 'force_SSE': 0.18062582339486277, 'force_RMSE_meV_A': 25.864735279760442}, {'index': 69, 'SCF_residual': 1.1744807523028644e-05, 'force_SSE': 0.43149749684420297, 'force_RMSE_meV_A': 28.189620258542252}, {'index': 274, 'SCF_residual': 6.712057352253886e-06, 'force_SSE': 0.4398148454153688, 'force_RMSE_meV_A': 28.460008626217288}]
+2026-10-09 20:05:49.188 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00626933 eV^2, WF bias=2.91474e-05 eV, maximum SCF residual=2.77331e-05
 2026-10-09 20:05:49.191 INFO: Epoch 50: loss=3.21838, RMSE_E_per_atom=6.3480 meV, RMSE_F=28.7199 meV/A, RMSE_dip_per_atom=0.4304 meA, RMSE_rho=0.0486 me/A^3, RMSE_EF(abs/rel)=74.9580/74.9370 meV, RMSE_ESP=90.4343 mV, RMSE_ESPvac(abs/rel)=117.4414/117.4284 mV, RMSE_WF(abs/rel)=178.7279/178.7279 meV
+2026-10-09 20:05:49.217 DEBUG: 50-step electronic residual maximum: 2.7733e-05
+2026-10-09 20:05:49.224 DEBUG: Optimizer epoch 50: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=71.893, clipped=345/346
+2026-10-09 20:05:49.224 DEBUG: Epoch timing: train=197.273s, validation=48.755s, updates=346, train/update=0.57015s, peak allocated=14379.1 MiB, backbone=CuEq
+2026-10-09 20:05:49.224 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.19484, min retained gradient=0.020597
+2026-10-09 20:05:49.224 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 20:05:49.224 DEBUG: 50-step finite-budget validation residual 2.7733e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 20:22:21.800 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.014658214463025749, 'reference_eV': -0.3650950212453024, 'panel_RMSE_before_eV': 0.03603874486573929, 'panel_RMSE_after_eV': 0.03292306000744452}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.008163663060362198, 'reference_eV': -0.010421818238882708, 'panel_RMSE_before_eV': 0.03840733542905656, 'panel_RMSE_after_eV': 0.03752969517857747}, 'seconds': 9.313876066997182}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 20:23:01.345 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 2.2440789747696366e-06, 'force_SSE': 2.1837700616015687, 'force_RMSE_meV_A': 62.55850396741282}, {'index': 168, 'SCF_residual': 3.2681354844577015e-10, 'force_SSE': 2.1555202168179335, 'force_RMSE_meV_A': 62.32030335679347}, {'index': 123, 'SCF_residual': 7.795858125714261e-10, 'force_SSE': 1.7601569299053272, 'force_RMSE_meV_A': 55.42406609769459}, {'index': 172, 'SCF_residual': 4.368679862309932e-10, 'force_SSE': 1.623398004715858, 'force_RMSE_meV_A': 52.1465208752228}, {'index': 175, 'SCF_residual': 7.462707951599867e-10, 'force_SSE': 1.5261244805705896, 'force_RMSE_meV_A': 46.42782626457301}]; by SCF residual=[{'index': 109, 'SCF_residual': 0.0001233495689452052, 'force_SSE': 0.1895661689594843, 'force_RMSE_meV_A': 23.33945951759018}, {'index': 29, 'SCF_residual': 0.00011779456336448446, 'force_SSE': 0.46647521516376744, 'force_RMSE_meV_A': 41.565442161584514}, {'index': 30, 'SCF_residual': 9.065289925141995e-05, 'force_SSE': 0.174359802536008, 'force_RMSE_meV_A': 25.41214368032849}, {'index': 201, 'SCF_residual': 4.4864901333707685e-05, 'force_SSE': 0.9886737869688045, 'force_RMSE_meV_A': 42.09295454734366}, {'index': 17, 'SCF_residual': 4.411747972088431e-05, 'force_SSE': 0.7680478032452488, 'force_RMSE_meV_A': 37.6092099933836}]
+2026-10-09 20:23:01.346 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00613861 eV^2, WF bias=-0.0123418 eV, maximum SCF residual=0.00012335
 2026-10-09 20:23:01.348 INFO: Epoch 55: loss=3.08726, RMSE_E_per_atom=6.4598 meV, RMSE_F=28.3409 meV/A, RMSE_dip_per_atom=0.4026 meA, RMSE_rho=0.0472 me/A^3, RMSE_EF(abs/rel)=74.8919/74.8766 meV, RMSE_ESP=87.3420 mV, RMSE_ESPvac(abs/rel)=115.2780/114.7687 mV, RMSE_WF(abs/rel)=176.6575/176.2259 meV
+2026-10-09 20:23:01.368 DEBUG: 50-step electronic residual maximum: 0.00012335
+2026-10-09 20:23:01.375 DEBUG: Optimizer epoch 55: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=71.339, clipped=345/346
+2026-10-09 20:23:01.375 DEBUG: Epoch timing: train=196.996s, validation=48.889s, updates=346, train/update=0.56935s, peak allocated=15387.8 MiB, backbone=CuEq
+2026-10-09 20:23:01.375 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.21189, min retained gradient=0.012356
+2026-10-09 20:23:01.375 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 20:23:01.375 DEBUG: 50-step finite-budget validation residual 0.00012335 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 20:39:34.798 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.020537821626766616, 'reference_eV': -0.385632842872069, 'panel_RMSE_before_eV': 0.04461978224310145, 'panel_RMSE_after_eV': 0.039612155334554935}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.003391847836077312, 'reference_eV': -0.007029970402805397, 'panel_RMSE_before_eV': 0.028841225740411536, 'panel_RMSE_after_eV': 0.028641083611942383}, 'seconds': 9.311354062985629}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 20:40:14.319 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 7.836965569940624e-06, 'force_SSE': 1.9870204918783867, 'force_RMSE_meV_A': 59.673852091497906}, {'index': 168, 'SCF_residual': 6.950538200545253e-10, 'force_SSE': 1.9841620185963111, 'force_RMSE_meV_A': 59.7918614877772}, {'index': 123, 'SCF_residual': 5.3773596686568226e-11, 'force_SSE': 1.7167423538358906, 'force_RMSE_meV_A': 54.73627640183773}, {'index': 172, 'SCF_residual': 7.884957964332528e-11, 'force_SSE': 1.611208413067576, 'force_RMSE_meV_A': 51.95037596521572}, {'index': 175, 'SCF_residual': 4.837544531621774e-10, 'force_SSE': 1.5219439251504898, 'force_RMSE_meV_A': 46.364192135304684}]; by SCF residual=[{'index': 109, 'SCF_residual': 6.58516948527782e-05, 'force_SSE': 0.19508981261756334, 'force_RMSE_meV_A': 23.677054500519787}, {'index': 29, 'SCF_residual': 5.481798070981758e-05, 'force_SSE': 0.4753808073380156, 'force_RMSE_meV_A': 41.960334326688404}, {'index': 201, 'SCF_residual': 4.041952041495406e-05, 'force_SSE': 0.9037524861373515, 'force_RMSE_meV_A': 40.24460350602625}, {'index': 276, 'SCF_residual': 2.8764504380392186e-05, 'force_SSE': 0.4602242590924021, 'force_RMSE_meV_A': 28.79640427667297}, {'index': 30, 'SCF_residual': 2.7372005036385705e-05, 'force_SSE': 0.1671507536131948, 'force_RMSE_meV_A': 24.88125529859888}]
+2026-10-09 20:40:14.319 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00675322 eV^2, WF bias=-0.0106247 eV, maximum SCF residual=6.58517e-05
 2026-10-09 20:40:14.322 INFO: Epoch 60: loss=3.2312, RMSE_E_per_atom=6.2059 meV, RMSE_F=27.5812 meV/A, RMSE_dip_per_atom=0.4292 meA, RMSE_rho=0.0459 me/A^3, RMSE_EF(abs/rel)=77.3142/77.3142 meV, RMSE_ESP=89.5435 mV, RMSE_ESPvac(abs/rel)=119.0502/118.5819 mV, RMSE_WF(abs/rel)=183.4624/183.1545 meV
+2026-10-09 20:40:14.339 DEBUG: 50-step electronic residual maximum: 6.5852e-05
+2026-10-09 20:40:14.345 DEBUG: Optimizer epoch 60: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=71.673, clipped=344/346
+2026-10-09 20:40:14.345 DEBUG: Epoch timing: train=196.858s, validation=48.859s, updates=346, train/update=0.56895s, peak allocated=16194.4 MiB, backbone=CuEq
+2026-10-09 20:40:14.346 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.20352, min retained gradient=0.025737
+2026-10-09 20:40:14.346 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 20:40:14.346 DEBUG: 50-step finite-budget validation residual 6.5852e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 20:56:47.292 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.035398729502927995, 'reference_eV': -0.421031572374997, 'panel_RMSE_before_eV': 0.04682653075986381, 'panel_RMSE_after_eV': 0.030653775176689196}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.0028752067956923453, 'reference_eV': -0.009905177198497742, 'panel_RMSE_before_eV': 0.03044317214613952, 'panel_RMSE_after_eV': 0.030307093496432316}, 'seconds': 9.320805240946356}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 20:57:26.426 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 5.6422597306954314e-05, 'force_SSE': 2.1784972731297536, 'force_RMSE_meV_A': 62.482933485352966}, {'index': 168, 'SCF_residual': 1.248743726573083e-05, 'force_SSE': 2.018347424275359, 'force_RMSE_meV_A': 60.30474297865275}, {'index': 123, 'SCF_residual': 3.2547878281441456e-10, 'force_SSE': 1.7067812312041128, 'force_RMSE_meV_A': 54.577246139464904}, {'index': 172, 'SCF_residual': 6.676340931655034e-06, 'force_SSE': 1.6245111389070424, 'force_RMSE_meV_A': 52.16439576736167}, {'index': 175, 'SCF_residual': 6.500497362615931e-10, 'force_SSE': 1.5416781144487839, 'force_RMSE_meV_A': 46.663813186299436}]; by SCF residual=[{'index': 100, 'SCF_residual': 0.00020849693920205192, 'force_SSE': 0.2355542634728946, 'force_RMSE_meV_A': 25.90549686319574}, {'index': 109, 'SCF_residual': 0.00019300276531321325, 'force_SSE': 0.16714173811025002, 'force_RMSE_meV_A': 21.915573250351517}, {'index': 201, 'SCF_residual': 0.00014507161736368457, 'force_SSE': 0.9143968908206335, 'force_RMSE_meV_A': 40.480910382713994}, {'index': 30, 'SCF_residual': 0.00014304827583387636, 'force_SSE': 0.15156435891355768, 'force_RMSE_meV_A': 23.69281489096686}, {'index': 274, 'SCF_residual': 0.0001385370111526285, 'force_SSE': 0.3757917767013159, 'force_RMSE_meV_A': 26.30714517219759}]
+2026-10-09 20:57:26.426 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00654118 eV^2, WF bias=-0.00600194 eV, maximum SCF residual=0.000208497
 2026-10-09 20:57:26.429 INFO: Epoch 65: loss=3.09882, RMSE_E_per_atom=6.2174 meV, RMSE_F=27.0852 meV/A, RMSE_dip_per_atom=0.4142 meA, RMSE_rho=0.0450 me/A^3, RMSE_EF(abs/rel)=74.9317/74.9255 meV, RMSE_ESP=87.2076 mV, RMSE_ESPvac(abs/rel)=117.1060/116.8984 mV, RMSE_WF(abs/rel)=179.9929/179.8928 meV
+2026-10-09 20:57:26.445 DEBUG: 50-step electronic residual maximum: 0.0002085
+2026-10-09 20:57:26.452 DEBUG: Optimizer epoch 65: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=67.219, clipped=345/346
+2026-10-09 20:57:26.452 DEBUG: Epoch timing: train=194.558s, validation=48.482s, updates=346, train/update=0.56231s, peak allocated=16525.0 MiB, backbone=CuEq
+2026-10-09 20:57:26.452 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.21416, min retained gradient=0.025134
+2026-10-09 20:57:26.452 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 20:57:26.452 DEBUG: 50-step finite-budget validation residual 0.0002085 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 21:13:58.801 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': 0.004520331127258191, 'reference_eV': -0.4165112412477388, 'panel_RMSE_before_eV': 0.033638831358491106, 'panel_RMSE_after_eV': 0.03333373038927604}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.009830389698136393, 'reference_eV': -0.019735566896634135, 'panel_RMSE_before_eV': 0.0337407906273766, 'panel_RMSE_after_eV': 0.03227699475699742}, 'seconds': 9.326284214970656}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 21:14:38.396 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 168, 'SCF_residual': 7.36487318345018e-06, 'force_SSE': 2.148189902186327, 'force_RMSE_meV_A': 62.21424624932589}, {'index': 2, 'SCF_residual': 7.665078377790471e-05, 'force_SSE': 2.082066753987047, 'force_RMSE_meV_A': 61.084387747607686}, {'index': 123, 'SCF_residual': 6.71765421067505e-11, 'force_SSE': 1.6330011774581044, 'force_RMSE_meV_A': 53.38459323499433}, {'index': 172, 'SCF_residual': 3.432786693791101e-10, 'force_SSE': 1.6231691985952654, 'force_RMSE_meV_A': 52.14284590964093}, {'index': 175, 'SCF_residual': 3.5767817874177155e-10, 'force_SSE': 1.4789290103297281, 'force_RMSE_meV_A': 45.704297204437935}]; by SCF residual=[{'index': 109, 'SCF_residual': 0.00026973385932327343, 'force_SSE': 0.1728225833520366, 'force_RMSE_meV_A': 22.284896652838473}, {'index': 100, 'SCF_residual': 0.00025802379217076954, 'force_SSE': 0.22462457938123098, 'force_RMSE_meV_A': 25.297352956647337}, {'index': 201, 'SCF_residual': 0.00023779171636045815, 'force_SSE': 0.8981673654187494, 'force_RMSE_meV_A': 40.12005651095476}, {'index': 30, 'SCF_residual': 0.00023086617777959284, 'force_SSE': 0.15958814523005116, 'force_RMSE_meV_A': 24.311873736011076}, {'index': 276, 'SCF_residual': 0.00022710077090690173, 'force_SSE': 0.41882495201896786, 'force_RMSE_meV_A': 27.470703543726895}]
+2026-10-09 21:14:38.396 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.00637249 eV^2, WF bias=-0.0119939 eV, maximum SCF residual=0.000269734
 2026-10-09 21:14:38.399 INFO: Epoch 70: loss=3.0234, RMSE_E_per_atom=6.1570 meV, RMSE_F=26.9821 meV/A, RMSE_dip_per_atom=0.4199 meA, RMSE_rho=0.0460 me/A^3, RMSE_EF(abs/rel)=73.3688/73.3470 meV, RMSE_ESP=86.0454 mV, RMSE_ESPvac(abs/rel)=116.0680/115.6183 mV, RMSE_WF(abs/rel)=177.8657/177.4609 meV
+2026-10-09 21:14:38.409 DEBUG: 50-step electronic residual maximum: 0.00026973
+2026-10-09 21:14:38.413 DEBUG: Optimizer epoch 70: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=57.999, clipped=345/346
+2026-10-09 21:14:38.413 DEBUG: Epoch timing: train=197.570s, validation=48.939s, updates=346, train/update=0.57101s, peak allocated=15646.2 MiB, backbone=CuEq
+2026-10-09 21:14:38.413 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.24744, min retained gradient=0.031382
+2026-10-09 21:14:38.413 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 21:14:38.413 DEBUG: 50-step finite-budget validation residual 0.00026973 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 21:31:01.637 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.03499915425934012, 'reference_eV': -0.45151039550707894, 'panel_RMSE_before_eV': 0.04517548316605967, 'panel_RMSE_after_eV': 0.02856367414073082}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.003643779587751633, 'reference_eV': -0.016091787308882503, 'panel_RMSE_before_eV': 0.031364523582575035, 'panel_RMSE_after_eV': 0.031152146152035657}, 'seconds': 9.303010809991974}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
+2026-10-09 21:31:40.682 DEBUG: validation stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): by force contribution=[{'index': 2, 'SCF_residual': 2.876301186116592e-08, 'force_SSE': 2.0711199934912887, 'force_RMSE_meV_A': 60.92359621812606}, {'index': 168, 'SCF_residual': 2.8097304691221403e-10, 'force_SSE': 1.8490670190175376, 'force_RMSE_meV_A': 57.720466790542204}, {'index': 123, 'SCF_residual': 1.883338901498277e-10, 'force_SSE': 1.656798494485241, 'force_RMSE_meV_A': 53.772166491168996}, {'index': 172, 'SCF_residual': 1.0985951007236316e-05, 'force_SSE': 1.5193500603225187, 'force_RMSE_meV_A': 50.44774499831092}, {'index': 175, 'SCF_residual': 2.7297264448833403e-10, 'force_SSE': 1.4234816536885517, 'force_RMSE_meV_A': 44.83934998937547}]; by SCF residual=[{'index': 109, 'SCF_residual': 9.574462340714018e-05, 'force_SSE': 0.16858519158577753, 'force_RMSE_meV_A': 22.010002401323298}, {'index': 201, 'SCF_residual': 7.393984511811511e-05, 'force_SSE': 0.8125895891722469, 'force_RMSE_meV_A': 38.1608928621473}, {'index': 29, 'SCF_residual': 6.097865290118076e-05, 'force_SSE': 0.45465828105656764, 'force_RMSE_meV_A': 41.035588937759485}, {'index': 147, 'SCF_residual': 3.1355011457824544e-05, 'force_SSE': 1.1406656929245664, 'force_RMSE_meV_A': 45.21287151642629}, {'index': 107, 'SCF_residual': 2.5690671281025645e-05, 'force_SSE': 0.22986699694951543, 'force_RMSE_meV_A': 22.60122892182416}]
+2026-10-09 21:31:40.683 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0062751 eV^2, WF bias=-0.0173091 eV, maximum SCF residual=9.57446e-05
 2026-10-09 21:31:40.685 INFO: Epoch 75: loss=3.00731, RMSE_E_per_atom=5.8291 meV, RMSE_F=26.5313 meV/A, RMSE_dip_per_atom=0.4136 meA, RMSE_rho=0.0445 me/A^3, RMSE_EF(abs/rel)=73.1068/72.9940 meV, RMSE_ESP=85.7563 mV, RMSE_ESPvac(abs/rel)=116.7240/115.9696 mV, RMSE_WF(abs/rel)=177.8395/176.9951 meV
+2026-10-09 21:31:40.698 DEBUG: 50-step electronic residual maximum: 9.5745e-05
+2026-10-09 21:31:40.704 DEBUG: Optimizer epoch 75: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=58.314, clipped=346/346
+2026-10-09 21:31:40.704 DEBUG: Epoch timing: train=193.949s, validation=48.371s, updates=346, train/update=0.56055s, peak allocated=16252.2 MiB, backbone=CuEq
+2026-10-09 21:31:40.704 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.24148, min retained gradient=0.023855
+2026-10-09 21:31:40.704 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
+2026-10-09 21:31:40.704 DEBUG: 50-step finite-budget validation residual 9.5745e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
