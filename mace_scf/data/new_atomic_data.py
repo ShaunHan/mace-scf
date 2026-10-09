@@ -5,6 +5,7 @@
 ###########################################################################################
 
 from typing import Optional, Sequence
+from dataclasses import replace
 
 import torch.utils.data
 
@@ -44,6 +45,26 @@ def plane_fraction(properties, prefix, pbc):
     if len(open_axes) == 1 and axis != open_axes[0]:
         raise ValueError(f"{prefix}_{'xyz'[axis]}frac conflicts with the nonperiodic cell axis")
     return value
+
+
+def slab_positions(config):
+    """Select the slab image bounded by its specified dipole discontinuity.
+
+    VASP wraps coordinates even along the direction that becomes nonperiodic.
+    Rejoin that slab before constructing neighbors or electronic moments.
+    Integer lattice translations leave every Fourier observation unchanged.
+    Ordinary open structures without a specified correction plane are untouched.
+    """
+    pbc = np.asarray(config.pbc, dtype=bool)
+    if pbc.sum() != 2 or not any(config.properties.get(
+            f"dipole_correction_{axis}frac") is not None for axis in "xyz"):
+        return config.positions
+    plane = plane_fraction(config.properties, "dipole_correction", pbc)
+    axis = np.flatnonzero(~pbc)[0]
+    center = (plane + .5) % 1.
+    fractional = config.positions @ np.linalg.inv(config.cell)
+    images = np.floor(fractional[:, axis] - center + .5)
+    return config.positions - images[:, None] * config.cell[axis]
 
 
 def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
@@ -244,8 +265,8 @@ class ExtAtomicData(AtomicData):
         heads: Optional[list] = None,
         atomic_multipoles_max_l: int = 0,
     ) -> "ExtAtomicData":
-        # Canonicalize extra graph properties below, after constructing the
-        # ordinary MACE data. This also supports its empty de-batching protocol.
+        config = replace(config, positions=slab_positions(config),
+                         cell=None if config.cell is None else config.cell.copy())
         atomic_data = AtomicData.from_config(
             config, z_table, cutoff, heads=heads
         )
@@ -263,6 +284,9 @@ class ExtAtomicData(AtomicData):
             ).view(3, 3)
         )
         atomic_data.cell = cell
+        atomic_data.edge_index = torch.as_tensor(edge_index, dtype=torch.long)
+        atomic_data.shifts = torch.as_tensor(shifts, dtype=torch.get_default_dtype())
+        atomic_data.unit_shifts = torch.as_tensor(unit_shifts, dtype=torch.get_default_dtype())
 
         density_coefficients = (
             torch.tensor(

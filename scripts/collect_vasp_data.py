@@ -181,6 +181,12 @@ def collect_job(outdir):
         dipole = -np.asarray(atoms.get_dipole_moment(), dtype=float).reshape(3)
         if not np.isfinite(dipole).all():
             raise ValueError(f"Nonfinite dipole: {outdir}")
+        if np.all(np.asarray(parameters["dipol"]) == -100):
+            raise ValueError(f"Specify DIPOL in VASP to locate its correction plane: {outdir}")
+        center = float(parameters["dipol"][axis]) % 1.0
+        correction = (center + 0.5) % 1.0
+        fractional = atoms.get_scaled_positions(wrap=False)[:, axis]
+        atoms.positions -= np.floor(fractional - center + 0.5)[:, None] * atoms.cell[axis]
         atoms.pbc[axis] = False
 
     atoms.calc = None
@@ -197,14 +203,13 @@ def collect_job(outdir):
         "config_fermi_level_weight": float(slab),
         "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
     }
+    if slab:
+        atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
     data = fourier_data(outdir, atoms, parameters, axis)
     if DENSITY_SIGMAS:
         add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
     if POTENTIAL_SIGMAS:
         if slab:
-            if np.all(np.asarray(parameters["dipol"]) == -100):
-                raise ValueError(f"Specify DIPOL in VASP to locate its correction plane: {outdir}")
-            correction = float((parameters["dipol"][axis] + 0.5) % 1.0)
             add_vacuum_target(atoms, data["planar_potential"], axis, correction)
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         add_fourier_targets(atoms, data["proto_fourier_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")

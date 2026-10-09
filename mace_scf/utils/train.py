@@ -118,13 +118,6 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     best = getattr(checkpoint_handler, "best_loss", float("inf"))
     stalled = 0
     best_epoch = None
-    try:
-        from mace_scf.utils.diagnostics import runtime_inventory
-    except ModuleNotFoundError as exc:
-        if exc.name != 'mace_scf.utils.diagnostics':
-            raise
-    else:
-        runtime_inventory(model, optimizer, device, getattr(train_loader,'batch_size',None))
     for epoch in range(start_epoch, end_epoch+1):
         epoch_start = time.perf_counter()
         cuda_device = torch.device(device).type == 'cuda'
@@ -155,23 +148,16 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                                         train_loader, device)
             valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
-            logging.info("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
+            logging.debug("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
                          [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)), clipped, len(norms))
-            logging.info('Epoch timing: train=%.3fs, validation=%.3fs, updates=%d, train/update=%.5fs, peak allocated=%.1f MiB, backbone=%s',
+            logging.debug('Epoch timing: train=%.3fs, validation=%.3fs, updates=%d, train/update=%.5fs, peak allocated=%.1f MiB, backbone=%s',
                          train_seconds, time.perf_counter()-validation_start, len(norms),
                          train_seconds/max(1,len(norms)), peak_mib,
                          'CuEq' if getattr(model,'backbone_layout','mul_ir') == 'ir_mul' else 'e3nn')
-            logging.info('Optimization budget: graphs=%d/%d, updates=%d, mean retained gradient=%.5g, min retained gradient=%.5g',
+            logging.debug('Optimization budget: graphs=%d/%d, updates=%d, mean retained gradient=%.5g, min retained gradient=%.5g',
                          graphs_seen, len(train_loader.dataset), len(norms), float(np.mean(retained)), min(retained,default=1.))
-            try:
-                from mace_scf.utils.diagnostics import optimizer_budget
-            except ModuleNotFoundError as exc:
-                if exc.name != 'mace_scf.utils.diagnostics':
-                    raise
-            else:
-                optimizer_budget(optimizer, ema, len(norms))
             if hasattr(optimizer, '_device_batch_size'):
-                logging.info('Batching: optimizer graphs=%s, device graphs<=%d; one clipping/Adam/EMA update per optimizer batch',
+                logging.debug('Batching: optimizer graphs=%s, device graphs<=%d; one clipping/Adam/EMA update per optimizer batch',
                              train_loader.batch_size, optimizer._device_batch_size)
             if log_wandb:
                 import wandb
@@ -182,7 +168,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                              and model_eval_wrapper.mode in ('unroll_scf', 'shortcut_scf'))
             deployable = np.isfinite(residual) and (finite_budget or residual <= tolerance)
             if finite_budget and residual > tolerance:
-                logging.info('50-step finite-budget validation residual %.5g exceeds equilibrium tolerance %.5g; '
+                logging.debug('50-step finite-budget validation residual %.5g exceeds equilibrium tolerance %.5g; '
                              'metrics describe the exported finite trajectory, not a converged root', residual, tolerance)
             improved = valid_loss < best and deployable
             if not deployable:
@@ -195,16 +181,6 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             if improved or save_all_checkpoints:
                 checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=save_all_checkpoints)
             lr_scheduler.step(metrics=valid_loss)
-            # Optional, read-only probes. Removing diagnostics.py is supported.
-            if epoch % max(50, eval_interval) == 0:
-                try:
-                    from mace_scf.utils.diagnostics import audit_training
-                except ModuleNotFoundError as exc:
-                    if exc.name != "mace_scf.utils.diagnostics":
-                        raise
-                else:
-                    audit_training(model, model_eval_wrapper, loss_fn, ema,
-                                   train_loader, valid_loader, device, epoch, validation_metrics=metrics)
         if hasattr(checkpoint_handler, "save_progress"):
             checkpoint_handler.save_progress(CheckpointState(model,optimizer,lr_scheduler),epoch)
         if stalled >= patience:
@@ -387,7 +363,7 @@ def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, devi
                     'panel_RMSE_before_eV':float((second/weight).clamp_min(0).sqrt()),
                     'panel_RMSE_after_eV':float((second/weight-(first/weight).square()).clamp_min(0).sqrt())}
             report['seconds'] = time.perf_counter()-start
-            logging.info('Training-only scalar reference calibration %s; constants saved with the model; '
+            logging.debug('Training-only scalar reference calibration %s; constants saved with the model; '
                          'relative errors and physical fixed-Q trajectory unchanged', report)
             return report
     finally:
@@ -501,14 +477,7 @@ def _evaluate(
     scalar_objectives = {}
     scalar_metrics = {}
     wf_moments = []
-    try:
-        from mace_scf.utils.diagnostics import ValidationAudit
-    except ModuleNotFoundError as exc:
-        if exc.name != 'mace_scf.utils.diagnostics':
-            raise
-        validation_audit = None
-    else:
-        validation_audit = ValidationAudit(getattr(getattr(model,'field_dependent_charges_map',None),'density_width',1.5))
+    paired_scalar_moments = []
 
     start_time = time.time()
     for batch, output in _evaluation_batches(model,model_eval_wrapper,data_loader,device,ema):
@@ -522,8 +491,6 @@ def _evaluate(
         
         batch = batch.cpu()
         output = tensor_dict_to_device(output, device=torch.device("cpu"))
-        if validation_audit is not None:
-            validation_audit.update(batch, output)
         for function in (WeightedFermiLevel(), WeightedVacuumPotential()):
             if output.get(function.key) is not None and getattr(batch, function.key, None) is not None:
                 scalar_metrics[function.key] = scalar_metrics.get(function.key, 0.)+function.moments(batch, output).double()
@@ -577,6 +544,10 @@ def _evaluate(
                     raise FloatingPointError('Nonfinite observed workfunction error')
                 wf_moments.append(torch.stack(((difference[use]*weight[use]).sum(),
                                                (difference[use].square()*weight[use]).sum(), weight[use].sum())))
+                ef = (output['fermi_level']-batch.fermi_level)[use]
+                vac = (output['vacuum_potential']-target)[use]
+                paired_scalar_moments.append(torch.stack(((ef*weight[use]).sum(),
+                    (vac*weight[use]).sum(),(ef*vac*weight[use]).sum(),weight[use].sum())))
                 error = difference.square()
             else:
                 target, weight = vacuum_reference_weights(batch, output[key])
@@ -794,11 +765,12 @@ def _evaluate(
     aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
-    if validation_audit is not None:
-        import json
-        report=validation_audit.summary()
-        report['atomic_numbers']=model.atomic_numbers.tolist() if hasattr(model,'atomic_numbers') else None
-        logging.info('Full %s audit %s',split,json.dumps(report,allow_nan=False))
+    if 'rmse_wf_rel' in aux:
+        ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
+        logging.debug('Validation voltage: centered EF/vacuum covariance=%.6g eV^2, '
+                      'WF bias=%.6g eV, maximum SCF residual=%.6g',
+                      float(product/weight-ef*vac/weight.square()),
+                      aux.get('wf_bias',0.),aux.get('scf_residual_max',0.))
     return avg_loss, aux
 
 
@@ -823,7 +795,7 @@ def valid_err_log(
         if 'rmse_wf_abs' in eval_metrics:
             pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
-        logging.info('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
+        logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch
     logger.log(eval_metrics)

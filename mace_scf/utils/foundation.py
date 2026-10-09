@@ -167,8 +167,9 @@ def accelerate_backbone(model, device):
 def calibration_loader(loader, maximum=64):
     """Deterministic, evenly spaced training panel; validation is never read."""
     n = len(loader.dataset)
-    indices = torch.linspace(0, n-1, min(n, maximum)).round().long().unique().tolist()
-    return torch_geometric.dataloader.DataLoader([loader.dataset[i] for i in indices], batch_size=1, shuffle=False)
+    indices = torch.linspace(0, n-1, min(n, maximum)).round().long().unique().tolist() if maximum is not None else range(n)
+    return torch_geometric.dataloader.DataLoader([loader.dataset[i] for i in indices],
+        batch_size=1, shuffle=False, generator=torch.Generator().manual_seed(0))
 
 
 def condition_energy(model, loader, device):
@@ -198,7 +199,7 @@ def condition_energy(model, loader, device):
             with torch.no_grad():
                 model.fermi_level_offset.add_(shift.to(model.fermi_level_offset))
             b = b+shift*torch.cat(charges).double()
-            logging.info("Training-only EF reference initialization: offset correction %.6g eV", float(shift))
+            logging.debug("Training-only EF reference initialization: offset correction %.6g eV", float(shift))
         use = (w>0)&torch.isfinite(b)
         if bool(use.any()):
             a, b, w = a[use], b[use], w[use].sqrt()
@@ -208,14 +209,14 @@ def condition_energy(model, loader, device):
             with torch.no_grad():
                 e0 = model.atomic_energies_fn.atomic_energies
                 e0.add_(delta.to(e0).reshape_as(e0))
-            logging.info("Training-only total-energy reference: %.6g -> %.6g eV/atom on %d graphs", float(b.square().mean().sqrt()), float((b-a@delta).square().mean().sqrt()), len(b))
+            logging.debug("Training-only total-energy reference: %.6g -> %.6g eV/atom on %d graphs", float(b.square().mean().sqrt()), float((b-a@delta).square().mean().sqrt()), len(b))
     finally:
         for p, flag in zip(model.parameters(), states):
             p.requires_grad_(flag)
 
 
 def condition_readouts(model, loader, device, fit_forces=True):
-    """Restore v366's fixed readout units and local-force initialization.
+    """Condition transferred readouts in fixed, rotation-invariant feature units.
 
     Fit a single nonnegative local energy scale on training forces when a
     foundation is transferred. Fold that scale into its output weights before
@@ -274,7 +275,7 @@ def condition_readouts(model, loader, device, fit_forces=True):
                     for parameter in output.parameters():
                         if id(parameter) not in seen:
                             parameter.mul_(scale);seen.add(id(parameter))
-                logging.info('Training-only foundation force scale: %.6g; local F RMSE %.6g -> %.6g eV/A; folded into readout weights',
+                logging.debug('Training-only foundation force scale: %.6g; local F RMSE %.6g -> %.6g eV/A; folded into readout weights',
                     float(scale),float(((pp-2*py+yy)/force_count).clamp_min(0).sqrt()),
                     float(((scale.square()*pp-2*scale*py+yy)/force_count).clamp_min(0).sqrt()))
             # A shared energy head must use one unit set across all layers.
@@ -302,7 +303,7 @@ def condition_readouts(model, loader, device, fit_forces=True):
                     seen.add(id(first))
                 expanded=torch.cat([value.expand(mul*ir.dim) for (mul,ir),value in zip(rep,unit)])
                 model.readout_feature_units[index].copy_(expanded)
-            logging.info('Fixed training-geometry readout units by layer/irrep: %s; initial energy function preserved by inverse weight transformation',
+            logging.debug('Fixed training-geometry readout units by layer/irrep: %s; initial energy function preserved by inverse weight transformation',
                          [unit.tolist() for unit in units])
     finally:
         for hook in hooks:hook.remove()

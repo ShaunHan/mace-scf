@@ -1,4 +1,4 @@
-# v373: neutral-reference response; optional proto only restores spatial observations.
+# v374: intact slab images; neutral-reference response; optional spatial proto observer.
 heads:
   default:
     arrays_keys:
@@ -60,7 +60,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch_v373
+checkpoints_dir: checkpoints_IrO2_scratch_v374
 compute_forces: true
 train_schedule:
   0:

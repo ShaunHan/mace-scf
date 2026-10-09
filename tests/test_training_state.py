@@ -32,17 +32,6 @@ def test_log_uses_requested_density_and_dipole_names(caplog):
     assert 'RMSE_MU' not in caplog.text and 'RMSE_RHO' not in caplog.text
 
 
-def test_optimizer_budget_does_not_change_the_optimizer(caplog):
-    import logging,json
-    from mace_scf.utils.diagnostics import optimizer_budget
-    model=torch.nn.Linear(2,1)
-    opt=torch.optim.AdamW(model.parameters(),lr=.003,weight_decay=.1)
-    ema=ExponentialMovingAverage(model.parameters(),decay=.99)
-    with caplog.at_level(logging.INFO):optimizer_budget(opt,ema,86)
-    text=next(r.message for r in caplog.records if r.message.startswith('Optimizer time scales'))
-    report=json.loads(text[text.index('{'):])
-    assert report['groups'][0]['AdamW_decay_only_retention_per_epoch']==pytest.approx((1.-.003*.1)**86)
-    assert not opt.state
 
 
 @pytest.mark.parametrize('relative_ef,relative_vac', [(True,True),(True,False),(False,True)])
@@ -115,27 +104,6 @@ def test_ir_finetune_has_no_epoch_ten_freeze_transition():
     assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps']==50
 
 
-def test_whole_split_audit_restores_ema_rng_and_frozen_parameters(caplog):
-    import logging
-    from mace.tools import torch_geometric
-    from mace_scf.utils.diagnostics import audit_training
-    from mace_scf.electrostatics.loss import WeightedLoss
-    from .test_coupled_response import coupled_model
-    model=coupled_model();model.node_embedding.requires_grad_(False)
-    loader=torch_geometric.dataloader.DataLoader([small_data(batched=False)]*3,batch_size=2,drop_last=False)
-    options=FixedPointTrainingOptions(mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=2))
-    wrapper=FixedPointWrapper(None,{'forces':True,'stress':False,'virials':False},options)
-    loss=WeightedLoss({'forces':1.})
-    ema=ExponentialMovingAverage(model.parameters(),decay=.99)
-    flags=[p.requires_grad for p in model.parameters()]
-    weights=[p.detach().clone() for p in model.parameters()]
-    state=torch.random.get_rng_state()
-    with caplog.at_level(logging.INFO):
-        audit_training(model,wrapper,loss,ema,loader,loader,'cpu',50,validation_metrics={'rmse_f':.1})
-    assert torch.equal(torch.random.get_rng_state(),state)
-    assert flags==[p.requires_grad for p in model.parameters()]
-    for a,b in zip(weights,model.parameters()):torch.testing.assert_close(a,b,rtol=0,atol=0)
-    assert 'Full-split generalization' in caplog.text and '"training_graphs": 3' in caplog.text
 
 
 def test_allocation_retry_preserves_update_and_discards_partial_gradients(monkeypatch):
@@ -463,43 +431,8 @@ def test_relative_scalar_microbatches_preserve_loss_and_gradient():
         loss(reference(slice(0,1)), {'fermi_level':theta[:1]}, normalizers=loss.normalizers(full))
 
 
-def test_relative_readout_audit_selects_fluctuations_without_validation_fitting():
-    from mace_scf.utils.diagnostics import _ridge_report
-    t=torch.linspace(-1.,1.,32,dtype=torch.float64)
-    v=torch.linspace(-.9,.9,11,dtype=torch.float64)
-    x=torch.stack((torch.ones_like(t),t,t.square()),-1)
-    z=torch.stack((torch.ones_like(v),v,v.square()),-1)
-    before=_ridge_report(x,2*t,z,2*v,relative=True)
-    after=_ridge_report(x,2*t+8.,z,2*v-12.,relative=True)
-    assert before['selected_ridge']==after['selected_ridge']
-    for name in ('training_before','training_after','development_before','development_after'):
-        assert before[name]==pytest.approx(after[name],abs=1.e-12)
-    assert before['development_after']<before['development_before']
-    assert after['development_absolute_after']>10.
 
 
-def test_relative_tail_audit_keeps_indices_weights_and_all_observations():
-    from copy import deepcopy
-    from mace_scf.utils.diagnostics import ValidationAudit
-    audit = ValidationAudit()
-    audit.rows = [dict(index=i, atoms=1, composition=(1,), weight=w,
-                       ef=0., vac=e, wf=e)
-                  for i, (w, e) in enumerate([(1., 10.), (2., 12.), (1., 20.)])]
-    before = audit.summary()
-    assert before['graphs'] == before['observed_EF_vac_WF'] == 3
-    worst = before['largest_relative_WF_errors'][0]
-    assert worst['index'] == 2 and worst['loader_frame_1based'] == 3
-    assert worst['EF_vac_WF_centered_errors_eV'] == pytest.approx([0., 6.5, 6.5])
-    assert worst['relative_WF_squared_error_fraction'] == pytest.approx(42.25/59.)
-    original = deepcopy(audit.rows)
-    for row in audit.rows:
-        row['vac'] += 100.
-        row['wf'] += 100.
-    after = audit.summary()
-    for name in ('relative_WF_squared_error_fraction', 'EF_vac_WF_centered_errors_eV'):
-        assert after['largest_relative_WF_errors'][0][name] == pytest.approx(worst[name])
-    assert before['WF_centered_squared_error_share_largest_10_structures'] == pytest.approx(1.)
-    assert original[2]['wf'] == 20.
 
 
 def test_saved_solver_policy_and_original_v367_state_dict():

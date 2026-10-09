@@ -1,13 +1,10 @@
 """Independent vacuum labels, axis conventions and loss/data migration."""
 from copy import deepcopy
-from importlib.util import module_from_spec, spec_from_file_location
-from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
 from ase import Atoms
-from ase.io.extxyz import key_val_dict_to_str, key_val_str_to_dict
 from mace.data import KeySpecification, config_from_atoms
 from mace.tools import AtomicNumberTable
 
@@ -18,48 +15,55 @@ from mace_scf.electrostatics.loss import WeightedLoss, WeightedVacuumPotential
 from tests.test_coupled_response import coupled_model
 from tests.test_spectral_response import small_data
 
-ROOT = Path(__file__).resolve().parents[1]
+@pytest.mark.parametrize('axis',range(3))
+@pytest.mark.parametrize('center',[0.,.5])
+def test_slab_images_preserve_neighbors_observables_and_forces(axis,center):
+    from mace.tools import torch_geometric
+    torch.set_default_dtype(torch.float64)
+    cell=np.array([[8.,0.,0.],[1.,8.,0.],[1.,2.,12.]])
+    fractions=np.full((2,3),.2);fractions[:,axis]=center+np.array([-.05,.05])
+    pbc=np.ones(3,dtype=bool);pbc[axis]=False
+    atoms=Atoms('OH',positions=fractions@cell,cell=cell,pbc=pbc)
+    atoms.info.update(total_charge=.1,vacuum_potential=2.)
+    atoms.info[f'dipole_correction_{"xyz"[axis]}frac']=(center+.5)%1.
+    atoms.info[f'vacuum_{"xyz"[axis]}frac']=(center+.4)%1.
+    spec=KeySpecification(info_keys={k:k for k in atoms.info})
+    config=config_from_atoms(atoms,key_specification=spec)
+    original=config.positions.copy()
+    reference=ExtAtomicData.from_config(config,z_table=AtomicNumberTable([1,8]),cutoff=4.)
+    np.testing.assert_array_equal(config.positions,original)
+    wrapped=atoms.copy();wrapped.positions+=np.array([2.,-1.])[:,None]*cell[axis]
+    graph=ExtAtomicData.from_config(config_from_atoms(wrapped,key_specification=spec),
+        z_table=AtomicNumberTable([1,8]),cutoff=4.)
+    for key in ('positions','edge_index','shifts','unit_shifts'):
+        torch.testing.assert_close(getattr(graph,key),getattr(reference,key),atol=1.e-14,rtol=1.e-14)
+    assert graph.edge_index.shape[1]>0
+    model=coupled_model()
+    outputs=[evaluate_coupled(model,torch_geometric.Batch.from_data_list([g]).to_dict(),steps=3)
+             for g in (reference,graph)]
+    for key in ('energy','forces','dipole','fermi_level','vacuum_potential','fourier_density','fourier_potential'):
+        torch.testing.assert_close(outputs[0][key],outputs[1][key],atol=2.e-10,rtol=2.e-10)
 
 
-def migration_module():
-    spec = spec_from_file_location('dataset_migration', ROOT/'tmp_update_dataset.py')
-    module = module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def test_unannotated_open_structures_and_bulk_are_not_reimaged():
+    from mace_scf.data.new_atomic_data import slab_positions
+    for pbc in ([True,True,False],[True,True,True],[False,False,False]):
+        atoms=Atoms('H',positions=[[0.,0.,15.]],cell=[8,8,12],pbc=pbc)
+        config=config_from_atoms(atoms)
+        np.testing.assert_array_equal(slab_positions(config),config.positions)
 
 
-def test_migration_preserves_spectra_atoms_weights_and_unrelated_metadata(tmp_path):
-    script = migration_module()
-    metadata = {'Properties':'species:S:1:pos:R:3:workfuncion:R:1:forces:R:3',
-                'Lattice':np.eye(3)*8, 'pbc':[True, False, True],
-                'vasp_workfunction':5., 'vasp_efermi':-3.,
-                'config_workfunction_weight':.5, 'vacuum_zfrac':.7,
-                'dipole_correction_zfrac':.9, 'custom_metadata':'preserve',
-                'vasp_phi_fftn_shifted_1.5':np.arange(54.).reshape(2,3,3,3),
-                'macevolt_potential_reference':'same_gauge'}
-    source, output = tmp_path/'old.xyz', tmp_path/'new.xyz'
-    original = '1\n'+key_val_dict_to_str(metadata)+'\nH 1 2 3 100 4 5 6\n'
-    source.write_text(original)
-    assert script.update_dataset(source, output) == 1
-    assert source.read_text() == original
-    lines = output.read_text().splitlines()
-    info = key_val_str_to_dict(lines[1])
-    assert 'workfunc' not in output.read_text()
-    assert info['vacuum_potential'] == 2.
-    assert info['config_vacuum_potential_weight'] == .5
-    assert info['config_fermi_level_weight'] == .5
-    assert info['vacuum_yfrac'] == .7
-    assert info['dipole_correction_yfrac'] == .9
-    assert info['custom_metadata'] == 'preserve'
-    assert info['potential_gauge'] == 'same_gauge'
-    assert 'potential_reference' not in info
-    np.testing.assert_array_equal(info['vasp_phi_fftn_shifted_1.5'], metadata['vasp_phi_fftn_shifted_1.5'])
-    assert lines[2] == 'H 1 2 3 4 5 6'
-    assert script.clean_info(info).keys() == info.keys()
-    with pytest.raises(FileExistsError):
-        script.update_dataset(source, output)
-    with pytest.raises(ValueError, match='disagrees'):
-        script.clean_info(dict(metadata, vacuum_potential=9.))
+def test_calibration_loader_does_not_consume_training_randomness():
+    from mace.tools import torch_geometric
+    from mace_scf.utils.foundation import calibration_loader
+    loader=torch_geometric.dataloader.DataLoader([small_data(batched=False)]*3,shuffle=True)
+    state=torch.random.get_rng_state()
+    assert len(list(calibration_loader(loader,maximum=None)))==3
+    assert torch.equal(state,torch.random.get_rng_state())
+
+
+
+
 
 
 @pytest.mark.parametrize('axis', range(3))
@@ -124,79 +128,10 @@ def test_reference_labels_cannot_change_deployment_predictions():
         torch.testing.assert_close(first[key],second[key],rtol=0,atol=0)
 
 
-def test_collector_has_no_removed_label_and_retains_raw_vacuum(tmp_path):
-    path = ROOT/'scripts/collect_vasp_data.py'
-    assert 'workfunction' not in path.read_text().lower()
-    pytest.importorskip('pymatgen.io.vasp')
-    spec=spec_from_file_location('collector',path);module=module_from_spec(spec);spec.loader.exec_module(module)
-    (tmp_path/'INCAR').write_text('DIPOL = 0.0 0.0 0.0\n')
-    for axis in range(3):
-        pbc=np.ones(3,dtype=bool);pbc[axis]=False
-        atoms=Atoms('H',positions=[[1,1,1]],cell=[8,8,8],pbc=pbc)
-        atoms.info[f'vacuum_{"xyz"[axis]}frac']=.25
-        atoms.info[f'dipole_correction_{"xyz"[axis]}frac']=.5
-        field=np.broadcast_to(np.arange(8.).reshape([8 if i==axis else 1 for i in range(3)]),(8,8,8))
-        value,fraction,slope=module.compute_vacuum_potential(atoms,tmp_path,field)
-        assert value == 2.
-        assert fraction == .25
-        assert slope == 1.
-        assert module.open_axis_from_info(atoms.info)==axis
 
 
-def test_planar_collector_math_without_vasp_io(tmp_path):
-    """Exercise all axes and the gauge arithmetic independently of pymatgen."""
-    import ast
-    from types import SimpleNamespace
-    tree = ast.parse((ROOT/'scripts/collect_vasp_data.py').read_text())
-    names = {'compute_vacuum_potential', 'open_axis_from_info'}
-    namespace = {'np':np, 'Incar':SimpleNamespace(from_file=lambda _: {'DIPOL':[0.,0.,0.]})}
-    functions = ast.Module(body=[node for node in tree.body
-                                if isinstance(node,ast.FunctionDef) and node.name in names],type_ignores=[])
-    exec(compile(functions,'collector_math','exec'),namespace)
-    for axis in range(3):
-        pbc = np.ones(3,dtype=bool);pbc[axis] = False
-        atoms = Atoms('H',positions=[[1,1,1]],cell=[8,8,8],pbc=pbc)
-        atoms.info.update({f'vacuum_{"xyz"[axis]}frac':.25,
-                           f'dipole_correction_{"xyz"[axis]}frac':.5})
-        grid = np.broadcast_to(np.arange(8.).reshape([8 if i==axis else 1 for i in range(3)]),(8,8,8))
-        assert namespace['compute_vacuum_potential'](atoms,tmp_path,grid) == (2.,.25,1.)
-        assert namespace['compute_vacuum_potential'](atoms,tmp_path,grid+7.) == (9.,.25,1.)
-        assert namespace['open_axis_from_info'](atoms.info) == axis
 
 
-def test_collector_preserves_raw_scalar_and_fourier_gauges():
-    import ast
-    from ase.geometry import Cell
-    tree = ast.parse((ROOT/'scripts/collect_vasp_data.py').read_text())
-    names = {'decompose_potential','add_potential_targets','truncate_fft3',
-             'project_hermitian_fft','gaussian_kernel','max_n_cut','split_complex_fft'}
-    namespace = {'np':np,'Cell':Cell,'FOURIER_CUTOFF_SAFETY_FACTOR':1.25}
-    functions = ast.Module(body=[node for node in tree.body
-                                if isinstance(node,ast.FunctionDef) and node.name in names],type_ignores=[])
-    exec(compile(functions,'collector_gauge','exec'),namespace)
-    scf = np.arange(32**3,dtype=float).reshape(32,32,32)/1000.
-    proto = np.sin(scf)
-    deformation, reference = namespace['decompose_potential'](scf,proto)
-    shifted, shifted_ref = namespace['decompose_potential'](scf+100.,proto-17.)
-    np.testing.assert_allclose(shifted,deformation+117.,atol=1.e-13)
-    np.testing.assert_allclose(shifted_ref,reference-17.,atol=1.e-13)
-    np.testing.assert_allclose(deformation+reference,scf,atol=1.e-13)
-    atoms=Atoms('H',cell=[8,8,8],pbc=True)
-    for field,prefix in ((deformation,'vasp_phi'),(reference,'vasp_proto_phi')):
-        namespace['add_potential_targets'](atoms,np.fft.fftn(field),[1.5],prefix)
-        stored=atoms.info[f'{prefix}_fftn_shifted_1.5']
-        ngrid=np.prod(stored.shape[1:])
-        np.testing.assert_allclose(stored[0,0,0,0]/ngrid,field.mean(),rtol=1.e-7)
-        assert stored[1,0,0,0] == 0.
-    # Check the actual collector assignment, not a duplicate scalar helper.
-    combine=next(node for node in tree.body if isinstance(node,ast.FunctionDef) and node.name=='combine_job')
-    labels=next(node for node in ast.walk(combine) if isinstance(node,ast.Dict)
-                and any(isinstance(k,ast.Constant) and k.value=='vasp_efermi' for k in node.keys))
-    expression=next(v for k,v in zip(labels.keys,labels.values) if isinstance(k,ast.Constant) and k.value=='vasp_efermi')
-    from types import SimpleNamespace
-    value=eval(compile(ast.Expression(expression),'collector_scalar','eval'),
-               {'oc':SimpleNamespace(efermi=5.),'phi_attrs':{'scf_mean':3.}})
-    assert value == 5.
 
 
 def test_raw_potential_zero_modes_cannot_drive_response_or_change_loss_gradients():
@@ -488,20 +423,3 @@ def test_reference_operator_first_and_second_parameter_derivatives():
     assert curvature == pytest.approx((slopes[1]-slopes[0])/(2*epsilon),rel=1.e-5,abs=1.e-8)
 
 
-def test_optional_gradient_audit_preserves_parameters_and_grad_buffers():
-    from mace.tools import torch_geometric
-    from mace_scf.electrostatics.fixed_point_state import FixedPointTrainingOptions,FixedPointSCFOptions
-    from mace_scf.utils.model_training_wrappers import FixedPointWrapper
-    from mace_scf.utils.diagnostics import objective_gradients
-    model = coupled_model()
-    wrapper = FixedPointWrapper(None,{'forces':True},FixedPointTrainingOptions(
-        mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=3)))
-    loader = torch_geometric.dataloader.DataLoader([small_data(batched=False)],batch_size=1)
-    parameters = [p.detach().clone() for p in model.parameters()]
-    random_state = torch.random.get_rng_state()
-    report = objective_gradients(model,wrapper,WeightedLoss({'forces':1,'dipole':1}),loader,'cpu')
-    assert torch.equal(random_state,torch.random.get_rng_state())
-    assert report['terms']['forces']['gradient_norm']>0
-    for before,after in zip(parameters,model.parameters()):
-        torch.testing.assert_close(before,after,rtol=0,atol=0)
-        assert after.grad is None

@@ -186,6 +186,7 @@ def main() -> None:
         drop_last=False,
         pin_memory=args.pin_memory,
         num_workers=args.num_workers,
+        generator=torch.Generator().manual_seed(args.valid_set_seed),
     )
 
     if args.compute_avg_num_neighbors:

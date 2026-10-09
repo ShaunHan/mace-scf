@@ -616,7 +616,8 @@ def initialize_response(model, loader, device):
     """Fit only training-set feature scales and frozen proto form factors."""
     from mace.tools import torch_geometric
     loader = torch_geometric.dataloader.DataLoader(loader.dataset,
-        batch_size=getattr(loader,'batch_size',1) or 1,shuffle=False,drop_last=False)
+        batch_size=getattr(loader,'batch_size',1) or 1,shuffle=False,drop_last=False,
+        generator=torch.Generator().manual_seed(0))
     response = model.field_dependent_charges_map
     response.spectral_cutoff.copy_(model.kspace_cutoff)
     norms = torch.zeros_like(response.feature_norms)
@@ -662,7 +663,7 @@ def initialize_response(model, loader, device):
         response.proto_coefficients.copy_(solution.reshape_as(response.proto_coefficients))
         response.proto_fitted.fill_(True)
         error = (square-2*solution@rhs+solution@(gram@solution)).clamp_min(0)
-        logging.info("Frozen training-only proto fit: spectral component RMS %.6g eV, observations %d", float((error/observations).sqrt()), observations)
+        logging.debug("Frozen training-only proto fit: spectral component RMS %.6g eV, observations %d", float((error/observations).sqrt()), observations)
     logging.info("Electronic response %s: %d coarse + %d regular coefficients per atom; deployment uses %d steps", type(response).__name__, response.coarse_dim, response.state_irreps.dim-response.coarse_dim, int(response.deployment_steps))
 
 
@@ -686,8 +687,9 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
         # k=0 limit is a reference estimate, not an observed absolute zero.
         response.vacuum_reference_integrals.copy_(-response.proto_coefficients[:,0])
     from .loss import vacuum_reference_weights
+    from mace_scf.utils.foundation import calibration_loader
     designs, targets, weights = [], [], []
-    for batch in loader:
+    for batch in calibration_loader(loader, maximum=None):
         batch = batch.to(device)
         label, weight = vacuum_reference_weights(batch, batch.total_charge)
         weight = weight*batch.fourier_potential_weight
@@ -718,7 +720,7 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
                                   rcond=1.e-10, driver='gelsd').solution.to(x)/scale
     response.vacuum_reference_integrals.copy_(solution)
     residual = ((x@solution-y).square()*w).sum()/w.sum()
-    logging.info('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g eV; '
+    logging.debug('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g eV; '
                  'shared EF/vacuum gauge, fitted independently of optional spatial proto data',relative,len(y),float(residual.sqrt()))
 
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:

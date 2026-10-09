@@ -1519,7 +1519,7 @@ def initialize_reference(model, loader, device, options, loss_config):
             scores.append({'fraction':fraction,'loss':score})
             if score<best_score:best,best_score=candidate.clone(),score
         put(best)
-        logging.info('Training-only cold reference fit: rank=%d/%d; scalar gauges follow the configured relative/absolute objectives; candidates=%s',int(keep.sum()),size,scores)
+        logging.debug('Training-only cold reference fit: rank=%d/%d; scalar gauges follow the configured relative/absolute objectives; candidates=%s',int(keep.sum()),size,scores)
     except Exception:
         put(original)
         raise
