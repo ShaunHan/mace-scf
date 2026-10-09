@@ -1,170 +1,32 @@
-2026-10-09 14:16:55.934 INFO: MACE version: 0.3.16
-2026-10-09 14:16:56.206 INFO: CUDA version: 12.8, CUDA device: 0
-2026-10-09 14:16:56.206 INFO: Configuration: Namespace(config='config.yaml', name='fit_0', seed=7777, work_dir='.', log_dir='./logs', model_dir='.', checkpoints_dir='checkpoints_IrO2_finetune', results_dir='./results', downloads_dir='./downloads', device='cuda', default_dtype='float64', distributed=False, launcher='slurm', log_level='INFO', plot=True, plot_frequency=0, plot_interaction_e=False, r_max=6.0, radial_type='bessel', num_radial_basis=8, num_cutoff_basis=5, pair_repulsion=False, distance_transform='None', apply_cutoff=True, use_last_readout_only=False, use_embedding_readout=False, interaction='RealAgnosticResidualInteractionBlock', interaction_first='RealAgnosticResidualInteractionBlock', max_ell=3, correlation=3, use_reduced_cg=False, use_so3=False, use_agnostic_product=False, num_interactions=2, MLP_irreps='64x0e', radial_MLP='[64, 64, 64]', hidden_irreps='64x0e + 64x1o', edge_irreps=None, use_edge_irreps_first=False, num_channels=None, max_L=None, gate='silu', num_recursion_steps=1, field_si=False, add_local_electron_energy=False, fixedpoint_update_config=None, scaling='rms_forces_scaling', avg_num_neighbors=1, compute_avg_num_neighbors=True, compute_stress=False, compute_forces=True, train_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train.xyz', valid_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_valid.xyz', valid_fraction=0.1, test_file=None, test_dir=None, multi_processed_test=False, num_workers=0, pin_memory=True, atomic_numbers=None, mean=None, std=None, statistics_file=None, les_arguments=None, E0s='{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}', pseudolabel_replay=False, pseudolabel_replay_compute_stress=False, foundation_filter_elements=True, multiheads_finetuning=True, foundation_head=None, weight_pt_head=1.0, real_pt_data_ratio_threshold=0.1, num_samples_pt=10000, force_mh_ft_lr=False, subselect_pt='random', filter_type_pt='none', allow_random_padding_pt=True, pt_train_file=None, pt_valid_file=None, foundation_model_elements=False, keep_isolated_atoms=False, lora=False, lora_rank=4, lora_alpha=1.0, energy_key=None, forces_key=None, virials_key=None, stress_key=None, dipole_key=None, polarizability_key=None, head_key=None, charges_key=None, elec_temp_key=None, total_spin_key=None, total_charge_key=None, embedding_specs=None, skip_evaluate_heads='pt_head', forces_weight=100.0, swa_forces_weight=100.0, energy_weight=1.0, swa_energy_weight=1000.0, virials_weight=1.0, swa_virials_weight=10.0, stress_weight=1.0, swa_stress_weight=10.0, dipole_weight=1.0, swa_dipole_weight=1.0, swa_polarizability_weight=1.0, polarizability_weight=1.0, config_type_weights={'slab': 1.0, 'bulk': 1.0}, huber_delta=0.01, beta=0.9, beta1_schedulefree=0.9, beta2_schedulefree=0.98, batch_size=4, valid_batch_size=4, lr=0.001, swa_lr=0.001, weight_decay=0.001, lr_params_factors='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}', freeze=None, scheduler='none', lr_factor=0.8, scheduler_patience=50, lr_scheduler_gamma=0.9993, swa=False, start_swa=None, lbfgs=False, ema=True, ema_decay=0.99, max_num_epochs=500, patience=1000, foundation_model='/fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model', foundation_model_kwargs='{}', foundation_model_readout=True, eval_interval=5, keep_checkpoints=True, save_all_checkpoints=True, save_cpu=True, clip_grad=10.0, dry_run=False, enable_cueq=True, only_cueq=False, enable_oeq=False, wandb=False, wandb_dir=None, wandb_project='', wandb_entity='', wandb_name='', wandb_log_hypers=['num_channels', 'max_L', 'correlation', 'lr', 'swa_lr', 'weight_decay', 'batch_size', 'max_num_epochs', 'start_swa', 'energy_weight', 'forces_weight'], amsgrad=False, atomic_multipoles_key=None, electrostatic_potentials_key=None, external_field_key=None, fermi_level_key=None, include_local_electron_energy=False, atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5, kspace_cutoff_factor=1.0, atomic_formal_charges='{}', formal_charges_from_data=False, field_feature_max_l=1, field_feature_widths='[1.5, 3.0]', dont_include_pbc_corrections=False, include_electrostatic_self_interaction=True, valid_set_seed=7777, quadrupole_feature_corrections=False, electrostatic_pbc_method='mixed_periodic', static_bond_transfer_block='OxidationDependentSymmetricPredictionSourceBlock', oxidation_state_mixer='SumOxidationStateMixer', return_electrostatic_potentials=False, train_schedule=[{'name': 'stage1', 'start': 0, 'end': 49, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage2', 'start': 50, 'end': 449, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=20, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage3', 'start': 450, 'end': 500, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=50, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}], fixed_point_update_config={'type': <class 'mace_scf.electrostatics.coupled.CoupledResponse'>, 'potential_widths': [1.5, 3.0]}, field_readout_config={'type': <class 'mace_scf.electrostatics.field_blocks.StrictQuadraticFieldEnergyReadout'>}, field_block_weight_decay=0.01, local_charges_weight_decay=0.0, field_feature_norms='None', fermi_level_offset=None, field_norm_factor=1.0, oxidation_state_range='(-6.0, 6.0)', polarizable_charges=False, beta_two=0.999, log_on_test_sets=False, scf_convergence_summary=False, use_linear_final_readout=False, include_field_si=False, use_linear_local_charges=False, atom_density_scaling='None', allow_low_density_pbc=False, override_pbc_checks=False, low_density_pbc_max_volume_per_atom=100.0, wandb_watch='off', wandb_watch_log_freq=50, debug_log_grad_summary=False, fixedpoint_initial_charge_head_scale=0.01, heads={'default': {'arrays_keys': {'forces': 'vasp_forces'}, 'info_keys': {'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}}}, error_table='ElectrostaticRMSE', compute_polarizability=True, restart_latest=False, model='FixedPoint', optimizer='adamw', qeq_charges='autograd', train_hardness=False, read_enegs=False, read_hardness=False, enegs_key=None, default_hardness=2.0)
-2026-10-09 14:16:56.206 INFO: Using the key specifications to parse data:
-2026-10-09 14:16:56.207 INFO: KeySpecification(info_keys={'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}, arrays_keys={'forces': 'vasp_forces'})
-2026-10-09 14:18:02.761 DEBUG: Loading training file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train.xyz
-2026-10-09 14:18:28.958 INFO: Training set 1/1 [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
-2026-10-09 14:18:29.007 INFO: Total Training set [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
-2026-10-09 14:18:35.614 INFO: Validation set 1/1 [dipole components: 330, dipole_correction_zfrac: 330, dipole_weight: 350, energy: 350, external_field: 350, fermi_level: 330, fourier_density: 350, fourier_potential: 350, fourier_proto_potential: 350, total_charge: 350, vacuum_zfrac: 330, vacuum_potential: 330, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 350, forces: 350]
-2026-10-09 14:18:35.630 INFO: Total Validation set [dipole components: 330, dipole_correction_zfrac: 330, dipole_weight: 350, energy: 350, external_field: 350, fermi_level: 330, fourier_density: 350, fourier_potential: 350, fourier_proto_potential: 350, total_charge: 350, vacuum_zfrac: 330, vacuum_potential: 330, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 350, forces: 350]
-2026-10-09 14:18:35.644 INFO: Total number of configurations: train=1384, valid=350, tests=[]
-2026-10-09 14:18:35.684 INFO: AtomicNumberTable: (1, 8, 77)
-2026-10-09 14:18:35.702 INFO: Isolated Atomic Energies (E0s) not in training file, using command line argument
-2026-10-09 14:18:47.260 INFO: Atomic energies: [-1.20639624, -1.98686083, -1.75921356]
-2026-10-09 14:18:49.087 INFO: Average number of neighbors: 73.78193549865908
-2026-10-09 14:18:49.116 INFO: computed Fermi level offset -1.7218048201989287
-2026-10-09 14:18:49.132 INFO: using Fermi level offset -1.7218048201989287
-2026-10-09 14:18:49.149 INFO: using normalization for field features None
-2026-10-09 14:18:49.168 INFO: using atom density scaling factors [1. 1. 1.]
-2026-10-09 14:18:49.200 INFO: Building model
-2026-10-09 14:18:49.216 INFO: Hidden irreps: 64x0e + 64x1o
-2026-10-09 14:18:50.873 INFO: Rescaled initial FixedPoint charge heads by 0.01 to keep initial charge predictions small
-2026-10-09 14:18:50.997 INFO: Foundation: exact module adoption, 83 species retained, native neighbour normalization preserved
-2026-10-09 14:18:55.709 DEBUG: Training-only foundation force scale: 0.17811; local F RMSE 1.29197 -> 0.821119 eV/A; folded into readout weights
-2026-10-09 14:18:55.710 DEBUG: Fixed training-geometry readout units by layer/irrep: [[1.0044714994337371, 1.0000380556506199], [2.724467859937836, 1.0994442255913506]]; initial energy function preserved by inverse weight transformation
-2026-10-09 14:18:59.980 DEBUG: Frozen training-only proto fit: spectral component RMS 7.38218e-05 eV, observations 772776
-2026-10-09 14:18:59.981 INFO: Electronic response CoupledResponse: 4 coarse + 8 regular coefficients per atom; deployment uses 50 steps
-2026-10-09 14:19:08.757 DEBUG: Training-only atomic vacuum reference: relative=True, labels=1307, residual_RMSE=0.00276677 eV; shared EF/vacuum gauge, fitted independently of optional spatial proto data
-2026-10-09 14:19:09.849 INFO: SCF CUDA linear algebra: cuSOLVER/cuBLAS selected (process-wide); exact cached matrix-solve derivatives; torch=2.9.1+cu128 CUDA=12.8
-2026-10-09 14:19:57.831 DEBUG: Training-only cold reference fit: rank=8/9; scalar gauges follow the configured relative/absolute objectives; candidates=[{'fraction': 0.0, 'loss': 2061.060685391499}, {'fraction': 1.0, 'loss': 1972.474264398063}, {'fraction': 0.5, 'loss': 1994.3978207506398}, {'fraction': 0.25, 'loss': 2022.1381911780022}]
-2026-10-09 14:19:59.678 INFO: Coupled response: neutral reference, screened moment seed, 2 local potential channels, Gaussian receiver widths [1.5, 0.0, 3.0]; fixed Q is enforced without measured EF
-2026-10-09 14:20:08.960 DEBUG: Training-only EF reference initialization: offset correction -0.905514 eV
-2026-10-09 14:20:08.961 DEBUG: Training-only total-energy reference: 3.93092 -> 0.0396593 eV/atom on 64 graphs
-2026-10-09 14:20:08.977 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
-2026-10-09 14:20:08.986 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
-2026-10-09 14:20:08.993 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(512, 512)],[(1, 512)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.04]
-2026-10-09 14:20:09.008 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1
-2026-10-09 14:20:09.009 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
-2026-10-09 14:20:09.009 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
-2026-10-09 14:20:09.010 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
-2026-10-09 14:20:09.011 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
-2026-10-09 14:20:09.013 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512: got uv,iu,iv sizes=262144,512,2048 num_segments=1,1,2 num_paths=1 i={1, 3} u=512 v=512
-2026-10-09 14:20:09.075 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}: got uv,iu,iv sizes=1048576,512,9728 num_segments=1,1,4 num_paths=1 i={1, 3, 5, 7} u=512 v={512, 2048}
-2026-10-09 14:20:09.115 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}: got uv,iu,iv sizes=1835008,8192,9728 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v={512, 2048}
-2026-10-09 14:20:09.178 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512: got uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
-2026-10-09 14:20:10.366 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(23,)],[(16,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 23, 1) c.nnz=276]: got ,,,, sizes=23,16,16,16,1 num_segments=23,16,16,16,1 num_paths=276
-2026-10-09 14:20:10.573 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(4,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 4, 1) c.nnz=16]: got ,,, sizes=4,16,16,1 num_segments=4,16,16,1 num_paths=16
-2026-10-09 14:20:10.575 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 1) c.nnz=1]: got ,, sizes=1,16,1 num_segments=1,16,1 num_paths=1
-2026-10-09 14:20:10.629 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(51,)],[(16,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 51, 3) c.nnz=1554]: got ,,,, sizes=51,16,16,16,3 num_segments=51,16,16,16,3 num_paths=1554
-2026-10-09 14:20:10.640 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(6,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 6, 3) c.nnz=70]: got ,,, sizes=6,16,16,3 num_segments=6,16,16,3 num_paths=70
-2026-10-09 14:20:10.641 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 3) c.nnz=3]: got ,, sizes=1,16,3 num_segments=1,16,3 num_paths=3
-2026-10-09 14:20:10.759 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.760 DEBUG: Normalized paths for operand 2 in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1
-2026-10-09 14:20:10.760 DEBUG: Flattened aiw in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got ,, sizes=2,16,4 num_segments=2,16,4 num_paths=4
-2026-10-09 14:20:10.761 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
-2026-10-09 14:20:10.761 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.761 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.877 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.877 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.878 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.878 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.880 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.880 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.884 DEBUG: Normalized paths for operand 3 in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}
-2026-10-09 14:20:10.885 DEBUG: Flattened abiw in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got ,,, sizes=7,16,16,4 num_segments=7,16,16,4 num_paths=86
-2026-10-09 14:20:10.886 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
-2026-10-09 14:20:10.886 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
-2026-10-09 14:20:10.887 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.887 DEBUG: _reduced_tensor_product_basis (0e, 0e, 0e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.888 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
-2026-10-09 14:20:10.889 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.890 DEBUG: _reduced_tensor_product_basis (1o, 1o, 1o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.890 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1e, 2e, 1o})
-2026-10-09 14:20:10.892 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
-2026-10-09 14:20:10.892 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.894 DEBUG: _reduced_tensor_product_basis (2e, 2e, 2e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.894 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3o, 1o, 2o, 2e})
-2026-10-09 14:20:10.897 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
-2026-10-09 14:20:10.897 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
-2026-10-09 14:20:10.899 DEBUG: _reduced_tensor_product_basis (3o, 3o, 3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
-2026-10-09 14:20:10.899 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3e, 3o, 2e, 4e})
-2026-10-09 14:20:10.948 DEBUG: Normalized paths for operand 4 in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}
-2026-10-09 14:20:10.973 DEBUG: Flattened abciw in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got ,,,, sizes=20,16,16,16,4 num_segments=20,16,16,16,4 num_paths=1949
-2026-10-09 14:20:11.689 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
-2026-10-09 14:20:11.719 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
-2026-10-09 14:20:11.742 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(83, 512)],[(1, 83)],[(1, 512)] paths=[op0[0]*op1[0]*op2[0]*0.11]
-2026-10-09 14:20:11.757 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128: got uv,iu,iv sizes=131072,2048,512 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=128
-2026-10-09 14:20:11.780 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1
-2026-10-09 14:20:11.782 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
-2026-10-09 14:20:11.783 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
-2026-10-09 14:20:11.785 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
-2026-10-09 14:20:11.787 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
-2026-10-09 14:20:11.789 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
-2026-10-09 14:20:11.812 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}: got uv,iu,iv sizes=327680,512,9728 num_segments=2,2,4 num_paths=2 i={1, 3, 5, 7} u=128 v={512, 2048}
-2026-10-09 14:20:11.831 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}: got uv,iu,iv sizes=1048576,5120,9728 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=128 v={512, 2048}
-2026-10-09 14:20:11.893 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512: got uv,iu,iv sizes=1048576,8192,8192 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=512 v=512
-2026-10-09 14:20:11.954 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512: got uv,iu,iv sizes=524288,2048,2048 num_segments=2,2,2 num_paths=2 i={1, 3} u=512 v=512
-2026-10-09 14:20:11.983 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.0.bias
-2026-10-09 14:20:11.983 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.7.bias
-2026-10-09 14:20:11.983 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.9.weight
-2026-10-09 14:20:11.983 DEBUG: Transferring additional key: interactions.0.density_fn.net.3.weight
-2026-10-09 14:20:11.983 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.0.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.4.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring key products.1.linear.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.linear_1.weight after adapting shape (1835008,) → (1, 1835008) -> torch.Size([1, 1835008])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.1.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.skip_tp.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.4.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.4.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.0.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.0.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.3.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.source_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.target_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.7.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.6.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.3.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.9.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.density_fn.net.3.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.beta
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.target_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.skip_tp.weight after adapting shape (262144,) → (1, 262144) -> torch.Size([1, 262144])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.3.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.linear_2.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.linear_up.weight after adapting shape (262144,) → (1, 262144) -> torch.Size([1, 262144])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.linear_up.weight after adapting shape (131072,) → (1, 131072) -> torch.Size([1, 131072])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.density_fn.net.0.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.3.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.4.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.1.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.1.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.beta
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.1.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.0.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.7.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.alpha
-2026-10-09 14:20:11.984 DEBUG: Transferring key products.0.linear.weight after adapting shape (524288,) → (1, 524288) -> torch.Size([1, 524288])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.density_fn.net.1.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.linear_2.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.linear_1.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.3.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.source_embedding.weight after adapting shape (42496,) → (1, 42496) -> torch.Size([1, 42496])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.3.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.9.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.0.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.6.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.9.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.net.6.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.6.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.1.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.1.linear_res.weight after adapting shape (327680,) → (1, 327680) -> torch.Size([1, 327680])
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.density_fn.net.0.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.0.density_fn.net.1.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.density_fn.net.1.bias
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.alpha
-2026-10-09 14:20:11.984 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.net.7.weight
-2026-10-09 14:20:11.984 DEBUG: Transferring key interactions.0.linear_res.weight after adapting shape (1048576,) → (1, 1048576) -> torch.Size([1, 1048576])
-2026-10-09 14:20:11.988 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1
-2026-10-09 14:20:11.989 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=2048,512,16,8192 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=512 v=1: got uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1
-2026-10-09 14:20:11.989 DEBUG: Squeezed uv,u,v,uv sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512 v=1 to u,u,,u sizes=2048,512,16,8192 num_segments=4,1,16,16 num_paths=16 u=512
-2026-10-09 14:20:11.992 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1
-2026-10-09 14:20:11.994 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=1280,512,16,5120 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=128 v=1: got uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1
-2026-10-09 14:20:11.996 DEBUG: Squeezed uv,u,v,uv sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128 v=1 to u,u,,u sizes=1280,512,16,5120 num_segments=10,4,16,40 num_paths=86 u=128
-2026-10-09 14:20:11.999 INFO: CuEquivariance ACTIVE: 2 interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=True; electronic response/readouts retain their original coordinates
-2026-10-09 14:20:12.031 INFO: No external LR schedule: the learning rate follows the explicit training stages.
-2026-10-09 14:20:12.048 INFO: restart_latest is False; starting from initialized model and optimizer.
-2026-10-09 14:20:12.075 INFO: FixedPointCore(
+2026-10-09 17:48:42.061 INFO: MACE version: 0.3.16
+2026-10-09 17:48:42.327 INFO: CUDA version: 12.8, CUDA device: 0
+2026-10-09 17:48:42.327 INFO: Configuration: Namespace(config='config.yaml', name='fit_0', seed=7777, work_dir='.', log_dir='./logs', model_dir='.', checkpoints_dir='checkpoints_IrO2_finetune_noproto', results_dir='./results', downloads_dir='./downloads', device='cuda', default_dtype='float64', distributed=False, launcher='slurm', log_level='INFO', plot=True, plot_frequency=0, plot_interaction_e=False, r_max=6.0, radial_type='bessel', num_radial_basis=8, num_cutoff_basis=5, pair_repulsion=False, distance_transform='None', apply_cutoff=True, use_last_readout_only=False, use_embedding_readout=False, interaction='RealAgnosticResidualInteractionBlock', interaction_first='RealAgnosticResidualInteractionBlock', max_ell=3, correlation=3, use_reduced_cg=False, use_so3=False, use_agnostic_product=False, num_interactions=2, MLP_irreps='64x0e', radial_MLP='[64, 64, 64]', hidden_irreps='64x0e + 64x1o', edge_irreps=None, use_edge_irreps_first=False, num_channels=None, max_L=None, gate='silu', num_recursion_steps=1, field_si=False, add_local_electron_energy=False, fixedpoint_update_config=None, scaling='rms_forces_scaling', avg_num_neighbors=1, compute_avg_num_neighbors=True, compute_stress=False, compute_forces=True, train_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train.xyz', valid_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_valid.xyz', valid_fraction=0.1, test_file=None, test_dir=None, multi_processed_test=False, num_workers=0, pin_memory=True, atomic_numbers=None, mean=None, std=None, statistics_file=None, les_arguments=None, E0s='{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}', pseudolabel_replay=False, pseudolabel_replay_compute_stress=False, foundation_filter_elements=True, multiheads_finetuning=True, foundation_head=None, weight_pt_head=1.0, real_pt_data_ratio_threshold=0.1, num_samples_pt=10000, force_mh_ft_lr=False, subselect_pt='random', filter_type_pt='none', allow_random_padding_pt=True, pt_train_file=None, pt_valid_file=None, foundation_model_elements=False, keep_isolated_atoms=False, lora=False, lora_rank=4, lora_alpha=1.0, energy_key=None, forces_key=None, virials_key=None, stress_key=None, dipole_key=None, polarizability_key=None, head_key=None, charges_key=None, elec_temp_key=None, total_spin_key=None, total_charge_key=None, embedding_specs=None, skip_evaluate_heads='pt_head', forces_weight=100.0, swa_forces_weight=100.0, energy_weight=1.0, swa_energy_weight=1000.0, virials_weight=1.0, swa_virials_weight=10.0, stress_weight=1.0, swa_stress_weight=10.0, dipole_weight=1.0, swa_dipole_weight=1.0, swa_polarizability_weight=1.0, polarizability_weight=1.0, config_type_weights={'slab': 1.0, 'bulk': 1.0}, huber_delta=0.01, beta=0.9, beta1_schedulefree=0.9, beta2_schedulefree=0.98, batch_size=4, valid_batch_size=4, lr=0.001, swa_lr=0.001, weight_decay=0.001, lr_params_factors='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}', freeze=None, scheduler='none', lr_factor=0.8, scheduler_patience=50, lr_scheduler_gamma=0.9993, swa=False, start_swa=None, lbfgs=False, ema=True, ema_decay=0.99, max_num_epochs=500, patience=1000, foundation_model='/fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model', foundation_model_kwargs='{}', foundation_model_readout=True, eval_interval=5, keep_checkpoints=True, save_all_checkpoints=True, save_cpu=True, clip_grad=10.0, dry_run=False, enable_cueq=True, only_cueq=False, enable_oeq=False, wandb=False, wandb_dir=None, wandb_project='', wandb_entity='', wandb_name='', wandb_log_hypers=['num_channels', 'max_L', 'correlation', 'lr', 'swa_lr', 'weight_decay', 'batch_size', 'max_num_epochs', 'start_swa', 'energy_weight', 'forces_weight'], amsgrad=False, atomic_multipoles_key=None, electrostatic_potentials_key=None, external_field_key=None, fermi_level_key=None, include_local_electron_energy=False, atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5, kspace_cutoff_factor=1.0, atomic_formal_charges='{}', formal_charges_from_data=False, field_feature_max_l=1, field_feature_widths='[1.5, 3.0]', dont_include_pbc_corrections=False, include_electrostatic_self_interaction=True, valid_set_seed=7777, quadrupole_feature_corrections=False, electrostatic_pbc_method='mixed_periodic', static_bond_transfer_block='OxidationDependentSymmetricPredictionSourceBlock', oxidation_state_mixer='SumOxidationStateMixer', return_electrostatic_potentials=False, train_schedule=[{'name': 'stage1', 'start': 0, 'end': 49, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage2', 'start': 50, 'end': 449, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=20, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}, {'name': 'stage3', 'start': 450, 'end': 500, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100}, 'vacuum_potential': {'weight': 100, 'relative': True}, 'fermi_level': {'weight': 100, 'relative': True}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='unroll_scf', scf=FixedPointSCFOptions(num_scf_steps=50, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve='inverse', fixedpoint_scf_stability=False, reference_conditioning='none')}], fixed_point_update_config={'type': <class 'mace_scf.electrostatics.coupled.CoupledResponse'>, 'potential_widths': [1.5, 3.0]}, field_readout_config={'type': <class 'mace_scf.electrostatics.field_blocks.StrictQuadraticFieldEnergyReadout'>}, field_block_weight_decay=0.01, local_charges_weight_decay=0.0, field_feature_norms='None', fermi_level_offset=None, field_norm_factor=1.0, oxidation_state_range='(-6.0, 6.0)', polarizable_charges=False, beta_two=0.999, log_on_test_sets=False, scf_convergence_summary=False, use_linear_final_readout=False, include_field_si=False, use_linear_local_charges=False, atom_density_scaling='None', allow_low_density_pbc=False, override_pbc_checks=False, low_density_pbc_max_volume_per_atom=100.0, wandb_watch='off', wandb_watch_log_freq=50, debug_log_grad_summary=False, fixedpoint_initial_charge_head_scale=0.01, heads={'default': {'arrays_keys': {'forces': 'vasp_forces'}, 'info_keys': {'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}}}, error_table='ElectrostaticRMSE', compute_polarizability=True, restart_latest=False, model='FixedPoint', optimizer='adamw', qeq_charges='autograd', train_hardness=False, read_enegs=False, read_hardness=False, enegs_key=None, default_hardness=2.0)
+2026-10-09 17:48:42.327 INFO: Using the key specifications to parse data:
+2026-10-09 17:48:42.327 INFO: KeySpecification(info_keys={'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted_1.5', 'fourier_potential': 'vasp_phi_fftn_shifted_1.5', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted_1.5', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'stress': 'none', 'head': 'head'}, arrays_keys={'forces': 'vasp_forces'})
+2026-10-09 17:50:14.334 INFO: Training set 1/1 [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
+2026-10-09 17:50:14.357 INFO: Total Training set [dipole components: 1307, dipole_correction_zfrac: 1307, dipole_weight: 1384, energy: 1384, external_field: 1384, fermi_level: 1307, fourier_density: 1384, fourier_potential: 1384, fourier_proto_potential: 1384, total_charge: 1384, vacuum_zfrac: 1307, vacuum_potential: 1307, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 1384, forces: 1384]
+2026-10-09 17:50:20.885 INFO: Validation set 1/1 [dipole components: 330, dipole_correction_zfrac: 330, dipole_weight: 350, energy: 350, external_field: 350, fermi_level: 330, fourier_density: 350, fourier_potential: 350, fourier_proto_potential: 350, total_charge: 350, vacuum_zfrac: 330, vacuum_potential: 330, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 350, forces: 350]
+2026-10-09 17:50:20.886 INFO: Total Validation set [dipole components: 330, dipole_correction_zfrac: 330, dipole_weight: 350, energy: 350, external_field: 350, fermi_level: 330, fourier_density: 350, fourier_potential: 350, fourier_proto_potential: 350, total_charge: 350, vacuum_zfrac: 330, vacuum_potential: 330, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, stress: 0, head: 350, forces: 350]
+2026-10-09 17:50:20.886 INFO: Total number of configurations: train=1384, valid=350, tests=[]
+2026-10-09 17:50:20.909 INFO: AtomicNumberTable: (1, 8, 77)
+2026-10-09 17:50:20.909 INFO: Isolated Atomic Energies (E0s) not in training file, using command line argument
+2026-10-09 17:50:32.410 INFO: Atomic energies: [-1.20639624, -1.98686083, -1.75921356]
+2026-10-09 17:50:34.258 INFO: Average number of neighbors: 73.78193549865908
+2026-10-09 17:50:34.271 INFO: computed Fermi level offset -1.7218048201989287
+2026-10-09 17:50:34.272 INFO: using Fermi level offset -1.7218048201989287
+2026-10-09 17:50:34.272 INFO: using normalization for field features None
+2026-10-09 17:50:34.272 INFO: using atom density scaling factors [1. 1. 1.]
+2026-10-09 17:50:34.272 INFO: Building model
+2026-10-09 17:50:34.272 INFO: Hidden irreps: 64x0e + 64x1o
+2026-10-09 17:50:35.912 INFO: Rescaled initial FixedPoint charge heads by 0.01 to keep initial charge predictions small
+2026-10-09 17:50:36.018 INFO: Foundation: exact module adoption, 83 species retained, native neighbour normalization preserved
+2026-10-09 17:50:44.973 INFO: Electronic response CoupledResponse: 4 coarse + 8 regular coefficients per atom; deployment uses 50 steps
+2026-10-09 17:50:54.968 INFO: SCF CUDA linear algebra: cuSOLVER/cuBLAS selected (process-wide); exact cached matrix-solve derivatives; torch=2.9.1+cu128 CUDA=12.8
+2026-10-09 17:51:45.337 INFO: Coupled response: neutral reference, screened moment seed, 2 local potential channels, Gaussian receiver widths [1.5, 0.0, 3.0]; fixed Q is enforced without measured EF
+2026-10-09 17:51:57.476 INFO: CuEquivariance ACTIVE: 2 interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=True; electronic response/readouts retain their original coordinates
+2026-10-09 17:51:57.494 INFO: No external LR schedule: the learning rate follows the explicit training stages.
+2026-10-09 17:51:57.495 INFO: restart_latest is False; starting from initialized model and optimizer.
+2026-10-09 17:51:57.495 INFO: FixedPointCore(
   (node_embedding): LinearNodeEmbeddingBlock(
     (linear): Linear(83x0e -> 512x0e | 42496 weights)
   )
@@ -649,8 +511,8 @@
     )
   )
 )
-2026-10-09 14:20:12.097 INFO: Number of parameters: 10574661
-2026-10-09 14:20:12.112 INFO: Optimizer: AdamW (
+2026-10-09 17:51:57.500 INFO: Number of parameters: 10574661
+2026-10-09 17:51:57.500 INFO: Optimizer: AdamW (
 Parameter Group 0
     amsgrad: False
     betas: (0.9, 0.999)
@@ -763,138 +625,30 @@ Parameter Group 7
     name: layer_feature_mixer
     weight_decay: 0.001
 )
-2026-10-09 14:20:12.127 INFO: Foundation feature extractor frozen=False; energy/electronic readouts remain trainable
-2026-10-09 14:20:12.145 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
-2026-10-09 14:20:12.162 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
-2026-10-09 14:20:12.183 INFO: Setting global learning rate to 0.001
-2026-10-09 14:20:12.198 DEBUG: Optimizer: AdamW (
-Parameter Group 0
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: embedding
-    weight_decay: 0.0
-
-Parameter Group 1
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: interactions_no_decay
-    weight_decay: 0.0
-
-Parameter Group 2
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: products
-    weight_decay: 0.001
-
-Parameter Group 3
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: readouts
-    weight_decay: 0.0
-
-Parameter Group 4
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: lr_source_maps
-    weight_decay: 0.0
-
-Parameter Group 5
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: field_dependent_charges_map
-    weight_decay: 0.01
-
-Parameter Group 6
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: electronic_references
-    weight_decay: 0.0
-
-Parameter Group 7
-    amsgrad: False
-    betas: (0.9, 0.999)
-    capturable: False
-    decoupled_weight_decay: True
-    differentiable: False
-    eps: 1e-08
-    foreach: None
-    fused: None
-    lr: 0.001
-    maximize: False
-    name: layer_feature_mixer
-    weight_decay: 0.001
-)
-2026-10-09 14:20:12.209 INFO: CoupledResponse mode=unroll_scf: 12 training steps; 50 validation/deployment steps
-2026-10-09 14:24:50.810 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': 0.18343541462564802, 'reference_eV': 0.18343541462564802, 'panel_RMSE_before_eV': 0.25749290769841415, 'panel_RMSE_after_eV': 0.18070430591466444}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': 0.020083007967362034, 'reference_eV': 0.020083007967362034, 'panel_RMSE_before_eV': 0.27739769020789795, 'panel_RMSE_after_eV': 0.2766697513709437}, 'seconds': 9.725978066009702}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
-2026-10-09 14:25:46.603 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0325673 eV^2, WF bias=0.0711402 eV, maximum SCF residual=4.45477e-15
-2026-10-09 14:25:46.606 INFO: Epoch 0: loss=26.0782, RMSE_E_per_atom=27.2976 meV, RMSE_F=82.3845 meV/A, RMSE_dip_per_atom=2.0550 meA, RMSE_rho=0.1247 me/A^3, RMSE_EF(abs/rel)=208.2411/206.3613 meV, RMSE_ESP=290.0440 mV, RMSE_ESPvac(abs/rel)=311.9317/308.9225 mV, RMSE_WF(abs/rel)=456.3043/450.7246 meV
-2026-10-09 14:25:46.639 DEBUG: 50-step electronic residual maximum: 4.4548e-15
-2026-10-09 14:25:46.645 DEBUG: Optimizer epoch 0: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=662.25, clipped=346/346
-2026-10-09 14:25:46.645 DEBUG: Epoch timing: train=268.885s, validation=65.562s, updates=346, train/update=0.77712s, peak allocated=15277.9 MiB, backbone=CuEq
-2026-10-09 14:25:46.646 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.024604, min retained gradient=0.0017693
-2026-10-09 14:25:46.646 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
-2026-10-09 14:37:59.326 DEBUG: Training-only scalar reference calibration {'fermi_level': {'observed_training_graphs': 61, 'shift_eV': -0.03873731001646905, 'reference_eV': 0.14469810460917898, 'panel_RMSE_before_eV': 0.11660200540085448, 'panel_RMSE_after_eV': 0.1099793093094736}, 'vacuum_potential': {'observed_training_graphs': 61, 'shift_eV': -0.04350668718349542, 'reference_eV': -0.02342367921613339, 'panel_RMSE_before_eV': 0.16780858255399456, 'panel_RMSE_after_eV': 0.16207062827390495}, 'seconds': 9.676581400999567}; constants saved with the model; relative errors and physical fixed-Q trajectory unchanged
-2026-10-09 14:38:39.952 DEBUG: Validation voltage: centered EF/vacuum covariance=-0.0136291 eV^2, WF bias=-0.00624349 eV, maximum SCF residual=6.39157e-05
-2026-10-09 14:38:39.955 INFO: Epoch 5: loss=7.41194, RMSE_E_per_atom=14.7175 meV, RMSE_F=46.4162 meV/A, RMSE_dip_per_atom=0.7228 meA, RMSE_rho=0.0836 me/A^3, RMSE_EF(abs/rel)=120.6480/120.5723 meV, RMSE_ESP=137.7390 mV, RMSE_ESPvac(abs/rel)=168.9958/168.6683 mV, RMSE_WF(abs/rel)=265.1111/265.0376 meV
-2026-10-09 14:38:39.972 DEBUG: 50-step electronic residual maximum: 6.3916e-05
-2026-10-09 14:38:39.985 DEBUG: Optimizer epoch 5: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=355.23, clipped=346/346
-2026-10-09 14:38:39.985 DEBUG: Epoch timing: train=143.815s, validation=50.336s, updates=346, train/update=0.41565s, peak allocated=14081.6 MiB, backbone=CuEq
-2026-10-09 14:38:39.985 DEBUG: Optimization budget: graphs=1384/1384, updates=346, mean retained gradient=0.052406, min retained gradient=0.0016252
-2026-10-09 14:38:39.985 DEBUG: Batching: optimizer graphs=4, device graphs<=4; one clipping/Adam/EMA update per optimizer batch
-2026-10-09 14:38:39.985 DEBUG: 50-step finite-budget validation residual 6.3916e-05 exceeds equilibrium tolerance 1e-06; metrics describe the exported finite trajectory, not a converged root
+2026-10-09 17:51:57.500 INFO: Foundation feature extractor frozen=False; energy/electronic readouts remain trainable
+2026-10-09 17:51:57.500 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
+2026-10-09 17:51:57.500 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=12, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-09 17:51:57.500 INFO: Setting global learning rate to 0.001
+2026-10-09 17:51:57.512 INFO: CoupledResponse mode=unroll_scf: 12 training steps; 50 validation/deployment steps
+2026-10-09 17:57:30.611 INFO: Epoch 0: loss=26.0477, RMSE_E_per_atom=26.6702 meV, RMSE_F=81.5360 meV/A, RMSE_dip_per_atom=2.1404 meA, RMSE_rho=0.1238 me/A^3, RMSE_EF(abs/rel)=208.6910/207.0798 meV, RMSE_ESP=290.6714 mV, RMSE_ESPvac(abs/rel)=310.5008/308.2590 mV, RMSE_WF(abs/rel)=454.4707/450.0650 meV
+2026-10-09 18:10:22.387 INFO: Epoch 5: loss=7.34424, RMSE_E_per_atom=14.6507 meV, RMSE_F=46.1716 meV/A, RMSE_dip_per_atom=0.6922 meA, RMSE_rho=0.0801 me/A^3, RMSE_EF(abs/rel)=120.5662/120.4934 meV, RMSE_ESP=136.5056 mV, RMSE_ESPvac(abs/rel)=168.5866/168.2976 mV, RMSE_WF(abs/rel)=264.5012/264.4402 meV
+2026-10-09 18:23:12.822 INFO: Epoch 10: loss=5.7054, RMSE_E_per_atom=12.0600 meV, RMSE_F=40.2256 meV/A, RMSE_dip_per_atom=0.5962 meA, RMSE_rho=0.0656 me/A^3, RMSE_EF(abs/rel)=107.3779/107.2585 meV, RMSE_ESP=118.3769 mV, RMSE_ESPvac(abs/rel)=150.0451/150.0137 mV, RMSE_WF(abs/rel)=236.0760/236.0676 meV
+2026-10-09 18:35:56.368 INFO: Epoch 15: loss=4.88367, RMSE_E_per_atom=9.7616 meV, RMSE_F=36.6829 meV/A, RMSE_dip_per_atom=0.5531 meA, RMSE_rho=0.0605 me/A^3, RMSE_EF(abs/rel)=99.4268/99.4267 meV, RMSE_ESP=111.1186 mV, RMSE_ESPvac(abs/rel)=139.5801/138.2487 mV, RMSE_WF(abs/rel)=219.6963/218.8640 meV
+2026-10-09 18:48:34.761 INFO: Epoch 20: loss=4.08804, RMSE_E_per_atom=8.6900 meV, RMSE_F=34.6627 meV/A, RMSE_dip_per_atom=0.4839 meA, RMSE_rho=0.0569 me/A^3, RMSE_EF(abs/rel)=90.8812/90.8636 meV, RMSE_ESP=100.0920 mV, RMSE_ESPvac(abs/rel)=127.1237/126.3133 mV, RMSE_WF(abs/rel)=199.1143/198.7190 meV
+2026-10-09 19:01:09.729 INFO: Epoch 25: loss=4.09515, RMSE_E_per_atom=8.3769 meV, RMSE_F=33.2988 meV/A, RMSE_dip_per_atom=0.4846 meA, RMSE_rho=0.0539 me/A^3, RMSE_EF(abs/rel)=87.6218/87.6132 meV, RMSE_ESP=102.5457 mV, RMSE_ESPvac(abs/rel)=129.2041/128.8737 mV, RMSE_WF(abs/rel)=199.6375/199.4770 meV
+2026-10-09 19:13:44.763 INFO: Epoch 30: loss=3.85658, RMSE_E_per_atom=7.6258 meV, RMSE_F=32.0621 meV/A, RMSE_dip_per_atom=0.4796 meA, RMSE_rho=0.0548 me/A^3, RMSE_EF(abs/rel)=85.9522/85.8855 meV, RMSE_ESP=98.8841 mV, RMSE_ESPvac(abs/rel)=125.2366/125.1995 mV, RMSE_WF(abs/rel)=194.2052/194.2049 meV
+2026-10-09 19:26:20.083 INFO: Epoch 35: loss=3.39535, RMSE_E_per_atom=7.4199 meV, RMSE_F=31.2398 meV/A, RMSE_dip_per_atom=0.4464 meA, RMSE_rho=0.0524 me/A^3, RMSE_EF(abs/rel)=77.0257/77.0188 meV, RMSE_ESP=92.6624 mV, RMSE_ESPvac(abs/rel)=118.5439/118.4104 mV, RMSE_WF(abs/rel)=180.4559/180.3329 meV
+2026-10-09 19:38:56.797 INFO: Epoch 40: loss=3.45192, RMSE_E_per_atom=7.1222 meV, RMSE_F=30.1106 meV/A, RMSE_dip_per_atom=0.4480 meA, RMSE_rho=0.0494 me/A^3, RMSE_EF(abs/rel)=78.8391/78.8369 meV, RMSE_ESP=92.8007 mV, RMSE_ESPvac(abs/rel)=121.5166/121.0482 mV, RMSE_WF(abs/rel)=185.1459/184.8722 meV
+2026-10-09 19:51:32.915 INFO: Epoch 45: loss=3.27442, RMSE_E_per_atom=6.8361 meV, RMSE_F=29.3240 meV/A, RMSE_dip_per_atom=0.4362 meA, RMSE_rho=0.0479 me/A^3, RMSE_EF(abs/rel)=76.0964/76.0948 meV, RMSE_ESP=90.0041 mV, RMSE_ESPvac(abs/rel)=118.8125/118.6288 mV, RMSE_WF(abs/rel)=180.8032/180.7002 meV
+2026-10-09 20:01:42.471 INFO: Epoch 49: loss=3.31229, RMSE_E_per_atom=6.5346 meV, RMSE_F=29.0158 meV/A, RMSE_dip_per_atom=0.4307 meA, RMSE_rho=0.0494 me/A^3, RMSE_EF(abs/rel)=78.2958/78.2668 meV, RMSE_ESP=91.5684 mV, RMSE_ESPvac(abs/rel)=117.9719/117.9638 mV, RMSE_WF(abs/rel)=181.6939/181.6924 meV
+2026-10-09 20:01:43.195 INFO: Foundation feature extractor frozen=False; energy/electronic readouts remain trainable
+2026-10-09 20:01:43.195 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density options: reference=farfield, fourier_potential_weight=100, vacuum_potential_weight=100, vacuum_potential options: relative=True, fermi_level_weight=100, fermi_level options: relative=True, )
+2026-10-09 20:01:43.196 INFO: FixedPointWrapper: mode=unroll_scf, scf_options=FixedPointSCFOptions(num_scf_steps=20, scf_tolerance=1e-06, mixing_parameter=0.5, constant_charge=True, use_autograd_forces=True, initial_density='local_guess', initial_fermi_level='zero'), linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-09 20:01:43.196 INFO: Setting global learning rate to 0.001
+2026-10-09 20:01:43.207 INFO: CoupledResponse mode=unroll_scf: 20 training steps; 50 validation/deployment steps
+2026-10-09 20:05:49.191 INFO: Epoch 50: loss=3.21838, RMSE_E_per_atom=6.3480 meV, RMSE_F=28.7199 meV/A, RMSE_dip_per_atom=0.4304 meA, RMSE_rho=0.0486 me/A^3, RMSE_EF(abs/rel)=74.9580/74.9370 meV, RMSE_ESP=90.4343 mV, RMSE_ESPvac(abs/rel)=117.4414/117.4284 mV, RMSE_WF(abs/rel)=178.7279/178.7279 meV
+2026-10-09 20:23:01.348 INFO: Epoch 55: loss=3.08726, RMSE_E_per_atom=6.4598 meV, RMSE_F=28.3409 meV/A, RMSE_dip_per_atom=0.4026 meA, RMSE_rho=0.0472 me/A^3, RMSE_EF(abs/rel)=74.8919/74.8766 meV, RMSE_ESP=87.3420 mV, RMSE_ESPvac(abs/rel)=115.2780/114.7687 mV, RMSE_WF(abs/rel)=176.6575/176.2259 meV
+2026-10-09 20:40:14.322 INFO: Epoch 60: loss=3.2312, RMSE_E_per_atom=6.2059 meV, RMSE_F=27.5812 meV/A, RMSE_dip_per_atom=0.4292 meA, RMSE_rho=0.0459 me/A^3, RMSE_EF(abs/rel)=77.3142/77.3142 meV, RMSE_ESP=89.5435 mV, RMSE_ESPvac(abs/rel)=119.0502/118.5819 mV, RMSE_WF(abs/rel)=183.4624/183.1545 meV
+2026-10-09 20:57:26.429 INFO: Epoch 65: loss=3.09882, RMSE_E_per_atom=6.2174 meV, RMSE_F=27.0852 meV/A, RMSE_dip_per_atom=0.4142 meA, RMSE_rho=0.0450 me/A^3, RMSE_EF(abs/rel)=74.9317/74.9255 meV, RMSE_ESP=87.2076 mV, RMSE_ESPvac(abs/rel)=117.1060/116.8984 mV, RMSE_WF(abs/rel)=179.9929/179.8928 meV
+2026-10-09 21:14:38.399 INFO: Epoch 70: loss=3.0234, RMSE_E_per_atom=6.1570 meV, RMSE_F=26.9821 meV/A, RMSE_dip_per_atom=0.4199 meA, RMSE_rho=0.0460 me/A^3, RMSE_EF(abs/rel)=73.3688/73.3470 meV, RMSE_ESP=86.0454 mV, RMSE_ESPvac(abs/rel)=116.0680/115.6183 mV, RMSE_WF(abs/rel)=177.8657/177.4609 meV
+2026-10-09 21:31:40.685 INFO: Epoch 75: loss=3.00731, RMSE_E_per_atom=5.8291 meV, RMSE_F=26.5313 meV/A, RMSE_dip_per_atom=0.4136 meA, RMSE_rho=0.0445 me/A^3, RMSE_EF(abs/rel)=73.1068/72.9940 meV, RMSE_ESP=85.7563 mV, RMSE_ESPvac(abs/rel)=116.7240/115.9696 mV, RMSE_WF(abs/rel)=177.8395/176.9951 meV
