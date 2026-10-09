@@ -365,8 +365,14 @@ class AtomicPotentialResponse(nn.Module):
                                      electronic_reference,target)
         computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True,include_dipole=False)
         scalars, polar = computed[:2]
-        chemical_level=attrs@self.species_level+scalars[...,0]
-        chemical_level = chemical_level + p0[..., 0]
+        # With a learned completion potential, use ONE nonlinear electronic
+        # drive. Its evolving total field acts on the positive quadratic charge
+        # response; the geometry supplies the local electronegativity contrasts.
+        # A second field-dependent contrast would add an unscreened susceptibility
+        # on top of that same potential and defeat the exact moment solve.
+        # Density-only models retain their original field-dependent response.
+        chemical_level = (electronic_reference[...,0] if self.source_channels else
+                          attrs@self.species_level+scalars[...,0]+p0[...,0])
         softness=electronic_reference[...,1]
         levels=chemical_level+potential[...,0]
         reference_charge = torch.zeros_like(p0[..., 0])

@@ -809,3 +809,26 @@ def test_finite_safety_checks_include_intermediate_proposals(checkpointed):
         return proposal
     with pytest.raises(SCFNumericalError,match='step=3, graph=1'):
         unroll_steps(update,initial,(),12,.5,checkpointed)
+
+@pytest.mark.parametrize('local_energy', [False, True])
+@pytest.mark.parametrize('functional', [False, True])
+def test_nonlinear_potential_has_an_exact_screened_charge_block(local_energy, functional):
+    """The nonlinear completion may change; it must not add a second charge law."""
+    from mace_scf.electrostatics.coupled import prepare_coupled
+    model = coupled_model(local_energy=local_energy)
+    data = small_data()
+    with torch.no_grad():
+        # A strong field-dependent NN must not destroy the linear charge solve.
+        model.field_dependent_charges_map.scalar_out.weight[0].mul_(100.)
+    local = model.local_part(data, compute_force=False)
+    geometry, initial, args, update, _ = prepare_coupled(model, data, local, functional=functional)
+    state = initial+torch.randn_like(initial)*.1
+    solved = update(state, *args)
+    raw = update.raw(solved, *args)
+    torch.testing.assert_close(raw[..., :4], solved[..., :4], atol=2.e-11, rtol=2.e-11)
+    torch.testing.assert_close(solved[..., 0].sum(-1), data['total_charge'], atol=1.e-12, rtol=0.)
+    # Charge screening must not remove the nonlinear total-field potential map.
+    assert (raw[..., 4:]-solved[..., 4:]).abs().max() > 1.e-8
+    defect = (raw[..., :4]-solved[..., :4]).square().sum()
+    gradient = torch.autograd.grad(defect, model.field_dependent_charges_map.scalar_out.weight)[0]
+    assert gradient.abs().max()<1.e-16

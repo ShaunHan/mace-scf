@@ -527,6 +527,8 @@ def _evaluate(
     scalar_metrics = {}
     wf_moments = []
     paired_scalar_moments = []
+    debug_stability = logging.getLogger().isEnabledFor(logging.DEBUG)
+    force_outliers, residual_outliers, graph_offset = [], [], 0
 
     start_time = time.time()
     for batch, output in _evaluation_batches(model,model_eval_wrapper,data_loader,device,ema):
@@ -607,6 +609,22 @@ def _evaluate(
             voltage_errors[key].append(torch.stack(((error[use]*weight[use]).sum(),weight[use].sum())))
         if output.get("scf_residual") is not None:
             scf_residuals.append(output["scf_residual"].max())
+            if debug_stability:
+                # Reuse observations already on CPU. A small state residual
+                # alone does not certify a well-conditioned force derivative.
+                sums = torch.full((batch.num_graphs,), float('nan'))
+                if output.get('forces') is not None and batch.forces is not None:
+                    sums = scatter_sum((batch.forces-output['forces']).square().sum(-1),
+                                       batch.batch, dim=0, dim_size=batch.num_graphs)
+                    sums = sums.masked_fill(batch.weight*batch.forces_weight<=0, float('nan'))
+                counts = batch.ptr[1:]-batch.ptr[:-1]
+                rows = [{'index':graph_offset+i, 'SCF_residual':float(output['scf_residual'][i]),
+                         'force_SSE':float(sums[i]), 'force_RMSE_meV_A':float(1000*(sums[i]/(3*counts[i])).sqrt())}
+                        for i in range(batch.num_graphs)]
+                residual_outliers = sorted(residual_outliers+rows, key=lambda x:x['SCF_residual'], reverse=True)[:5]
+                force_outliers = sorted(force_outliers+[x for x in rows if np.isfinite(x['force_SSE'])],
+                                        key=lambda x:x['force_SSE'], reverse=True)[:5]
+        graph_offset += batch.num_graphs
 
         if output.get("energy") is not None and batch.energy is not None:
             observed = batch.weight*batch.energy_weight > 0
@@ -814,6 +832,9 @@ def _evaluate(
     aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
+        if debug_stability:
+            logging.debug('%s stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): '
+                          'by force contribution=%s; by SCF residual=%s', split, force_outliers, residual_outliers)
     if 'rmse_wf_rel' in aux:
         ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
         logging.debug('Validation voltage: centered EF/vacuum covariance=%.6g eV^2, '

@@ -578,3 +578,31 @@ def test_resume_old_archives_preserves_best_when_retention_is_enabled(tmp_path,o
     deployment=CheckpointHandler(directory=str(tmp_path),tag='old',keep=True,deployment=True)
     assert deployment.load_latest(state,device='cpu')==2
     torch.testing.assert_close(model.weight,torch.full_like(model.weight,2.))
+
+def test_stability_outliers_are_debug_only_and_do_not_change_metrics(caplog):
+    import logging
+    from mace.tools import torch_geometric
+    from mace_scf.electrostatics.loss import WeightedLoss
+    graphs = [small_data(charge=float(i+1), batched=False) for i in range(3)]
+    for graph in graphs:
+        graph.forces.zero_()
+        graph.forces_weight.fill_(1.)
+    def wrapper(model, data, **kwargs):
+        charge = data['total_charge']
+        return {'energy':charge*0., 'forces':charge[data['batch'], None].expand(-1, 3),
+                'scf_residual':.1/charge}
+    def check(level, batch_size):
+        caplog.clear()
+        loader = torch_geometric.dataloader.DataLoader(graphs, batch_size=batch_size, shuffle=False)
+        with caplog.at_level(level):
+            result = evaluate(torch.nn.Linear(1,1), wrapper, WeightedLoss({'forces':1}), None, loader, 'cpu')
+        messages = [record.getMessage() for record in caplog.records if 'stability outliers' in record.getMessage()]
+        return result, messages
+    before, quiet = check(logging.INFO, 3)
+    after, debug = check(logging.DEBUG, 2)
+    assert not quiet and len(debug)==1
+    assert before[0]==pytest.approx(after[0])
+    assert before[1]['rmse_f']==pytest.approx(after[1]['rmse_f'])
+    assert "by force contribution=[{'index': 2" in debug[0]
+    assert "by SCF residual=[{'index': 0" in debug[0]
+    assert 'zero-based evaluation order' in debug[0]
