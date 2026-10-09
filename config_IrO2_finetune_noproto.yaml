@@ -55,7 +55,8 @@ patience: 1000
 max_num_epochs: 500
 restart_latest: false
 save_cpu: true
-keep_checkpoints: false
+keep_checkpoints: true
+save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
 checkpoints_dir: checkpoints_IrO2_finetune_noproto

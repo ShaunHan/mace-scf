@@ -700,6 +700,64 @@ def _stopping_residual(function, state, args, proposal):
     physical = getattr(function, "convergence_residual", None)
     return proposal-state if physical is None else physical(state,*args)
 
+
+def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
+    """Differentiate a finite, two-history convex residual-mixing trajectory.
+
+    Each step evaluates the same screened constitutive map once. The next
+    state is a convex combination of the last two ordinarily mixed proposals,
+    minimizing their linear residual estimate independently for each graph.
+    This suppresses oscillatory feedback without extrapolating outside those
+    proposals, changing the charge law, or changing the requested step count.
+    It is not a convergence theorem for an arbitrary nonlinear learned map.
+
+    Mixing weights remain in autograd, including force-loss derivatives.
+    A precision-scaled ridge retains the preceding mixing weight when the
+    secant becomes unresolved; resetting it to zero at a root would restore
+    the unstable ordinary iteration in its derivatives. Padding adds zeros
+    and does not alter this numerical scale.
+    """
+    limit = _trajectory_scale(initial)
+    axes = tuple(range(1, initial.ndim))
+    floor = torch.finfo(initial.dtype).eps * initial.detach().square().sum(axes, keepdim=True).clamp_min(1.)
+    proposal = function(initial, *args)
+    _check_trajectory(proposal, limit, 1, 'finite-step proposal')
+    residual = proposal-initial
+    state = initial+mixing*residual
+    previous = state
+    weight = torch.zeros_like(floor)
+    block_size = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
+    for start in range(1, int(steps), block_size):
+        length = min(block_size, int(steps)-start)
+        def advance(value, old_proposal, old_residual, weight, *fixed, count=length, offset=start):
+            peaks = []
+            for iteration in range(count):
+                proposed = function(value, *fixed)
+                peaks.append(proposed.detach().abs().amax(axes))
+                current = proposed-value
+                mixed = value+mixing*current
+                difference = current-old_residual
+                weight = (((current*difference).sum(axes, keepdim=True)+floor*weight)
+                          / (difference.square().sum(axes, keepdim=True)+floor)).clamp(0., 1.)
+                value = (1.-weight)*mixed+weight*old_proposal
+                old_proposal, old_residual = mixed, current
+            # Check EVERY proposal before observations/backward, with one
+            # host synchronization per block instead of one per SCF step.
+            peaks = torch.stack(peaks)
+            invalid = (~torch.isfinite(peaks)) | (peaks > limit)
+            if bool(invalid.any()):
+                iteration, graph = invalid.nonzero()[0].tolist()
+                raise SCFNumericalError('finite-step proposal SCF numerical runaway '
+                    f'at step={offset+iteration+1}, graph={graph}: '
+                    f'max|state|={float(peaks[iteration,graph]):.6e}, '
+                    f'fixed initial-scale precision budget={float(limit):.6e}. '
+                    'No state was clipped or substituted.')
+            return value, old_proposal, old_residual, weight
+        state, previous, residual, weight = (checkpoint(advance, state, previous, residual, weight, *args,
+            use_reentrant=False, preserve_rng_state=False) if checkpointed else
+            advance(state, previous, residual, weight, *args))
+    return state
+
 def _norm(x):
     return torch.linalg.vector_norm(x.reshape(-1))
 
@@ -1266,23 +1324,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                 options=RootOptions(max_steps=int(steps), mixing=mixing, tolerance=tolerance,
                                     linear_tolerance=min(1.e-9,tolerance*.01)))
         else:
-            state = initial
-            limit = _trajectory_scale(initial)
-            # Unroll stores the actual trajectory. Shortcut checkpoints short
-            # blocks, with the same complete first/second derivatives. Do not
-            # force recomputation onto every unroll force-training evaluation.
-            checkpointed = training and mode == 'shortcut_scf'
-            block_size = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
-            for start in range(0, int(steps), block_size):
-                length = min(block_size, int(steps)-start)
-                def advance(value, *fixed, count=length, offset=start):
-                    for iteration in range(count):
-                        proposal = update(value, *fixed)
-                        _check_trajectory(proposal, limit, offset+iteration+1, 'finite-step proposal')
-                        value = value+mixing*(proposal-value)
-                    return value
-                state = (checkpoint(advance, state, *args, use_reentrant=False, preserve_rng_state=False)
-                         if checkpointed else advance(state, *args))
+            state = unroll_steps(update, initial, args, int(steps), mixing,
+                                 checkpointed=training and mode == 'shortcut_scf')
             info = state.new_tensor([steps, 0., 0.])
         response, spectral = evaluate(state, *args, screened=False, include_energy=True)
         proposal, mu = response[:2]

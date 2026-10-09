@@ -755,3 +755,57 @@ def test_finite_trajectory_stress_matches_strained_energy():
         energies.append(evaluate_coupled(model,shifted,steps=4,compute_force=False)['energy'])
     volume=torch.linalg.det(data['cell'].reshape(3,3)).abs()
     torch.testing.assert_close((energies[1]-energies[0])/(2*epsilon*volume),result['stress'][:,0,0],atol=1.e-8,rtol=2.e-5)
+
+
+@pytest.mark.parametrize('checkpointed', [False, True])
+def test_finite_residual_mixing_removes_affine_oscillation(checkpointed):
+    from mace_scf.electrostatics.coupled import unroll_steps
+    initial = torch.zeros(2, 3, 4, dtype=torch.float64)
+    drive = torch.ones_like(initial, requires_grad=True)
+    slope = torch.tensor([-4., .7], dtype=initial.dtype)[:, None, None]
+    def function(x, b):
+        return slope*x+b
+    result = unroll_steps(function, initial, (drive,), 100, .5, checkpointed)
+    root = drive/(1.-slope)
+    torch.testing.assert_close(result, root, atol=1.e-6, rtol=1.e-6)
+    gradient = torch.autograd.grad(result.square().sum(), drive, create_graph=True)[0]
+    torch.testing.assert_close(gradient, 2*drive/(1.-slope).square(), atol=1.e-4, rtol=1.e-5)
+    assert torch.isfinite(torch.autograd.grad(gradient.sum(), drive)[0]).all()
+    ordinary = initial
+    for _ in range(50):
+        ordinary = ordinary+.5*(function(ordinary, drive)-ordinary)
+    assert ordinary[0].abs().max()>1.e7
+
+
+def test_residual_mixing_exact_budget_padding_and_derivatives():
+    from mace_scf.electrostatics.coupled import unroll_steps
+    torch.manual_seed(375)
+    x = torch.randn(1, 2, 4, dtype=torch.float64)*.01
+    b = torch.randn_like(x, requires_grad=True)
+    calls = []
+    def function(z, value):
+        calls.append(1)
+        return -2.*torch.tanh(z)+value
+    result = unroll_steps(function, x, (b,), 12, .5)
+    assert len(calls)==12
+    padded = unroll_steps(function, torch.nn.functional.pad(x,(0,0,0,3)),
+                         (torch.nn.functional.pad(b,(0,0,0,3)),), 12, .5)
+    torch.testing.assert_close(result,padded[:,:2],rtol=1.e-12,atol=1.e-12)
+    fn = lambda value: unroll_steps(function, x, (value,), 5, .5)
+    assert torch.autograd.gradcheck(fn,(b,),eps=1.e-6,atol=2.e-6,rtol=2.e-4)
+    assert torch.autograd.gradgradcheck(fn,(b,),eps=1.e-6,atol=2.e-5,rtol=2.e-3)
+
+
+
+@pytest.mark.parametrize('checkpointed',[False,True])
+def test_finite_safety_checks_include_intermediate_proposals(checkpointed):
+    from mace_scf.electrostatics.coupled import unroll_steps, SCFNumericalError
+    initial=torch.zeros(2,2,4,dtype=torch.float64)
+    count=[0]
+    def update(x):
+        count[0]+=1
+        proposal=torch.zeros_like(x)
+        if count[0]==3:proposal[1,0,0]=1.e12
+        return proposal
+    with pytest.raises(SCFNumericalError,match='step=3, graph=1'):
+        unroll_steps(update,initial,(),12,.5,checkpointed)

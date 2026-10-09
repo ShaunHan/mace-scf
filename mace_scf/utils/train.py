@@ -34,11 +34,44 @@ class CheckpointHandler(NativeCheckpointHandler):
         self.ema, self.deployment = ema, deployment
         self.progress_path = Path(kwargs["directory"])/"resume"/(kwargs["tag"]+".pt")
         self.best_loss = float("inf")
+        self.best_epoch = None
+
+    def _mark_best(self, epoch):
+        path = self.progress_path.with_suffix('.best')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pending = path.with_suffix('.best.tmp')
+        pending.write_text(str(epoch), encoding='utf-8')
+        os.replace(pending, path)
+
+    def _best_path(self, swa=False):
+        from pathlib import Path
+        directory = Path(self.io.directory)
+        marker = self.progress_path.with_suffix('.best')
+        if marker.exists():
+            epoch = int(marker.read_text(encoding='utf-8'))
+            return directory/self.io._get_checkpoint_filename(epoch, self.io.swa_start)
+        # One-time recovery for existing runs. Older archives recorded the
+        # running best loss: its first occurrence is the improving epoch.
+        # mmap reads metadata without allocating archived optimizer tensors.
+        records = [self.io._parse_checkpoint_path(p) for p in self.io._list_file_paths()]
+        records = sorted((r for r in records if r and r.tag == self.io.tag and r.swa == swa),
+                         key=lambda r: r.epochs)
+        best, loss = None, float('inf')
+        for record in records:
+            value = torch.load(record.path, map_location='cpu', weights_only=False, mmap=True)
+            epoch = value.get('best_epoch', record.epochs)
+            if epoch is not None and value.get('best_loss', float('inf')) < loss:
+                best, loss = epoch, value['best_loss']
+        if best is None:
+            return None
+        self._mark_best(best)
+        return directory/self.io._get_checkpoint_filename(best, self.io.swa_start)
 
     def _checkpoint(self,state):
         value = self.builder.create_checkpoint(state)
         value["ema"] = None if self.ema is None else self.ema.state_dict()
         value["best_loss"] = self.best_loss
+        value["best_epoch"] = self.best_epoch
         value["python_rng"] = random.getstate()
         value["numpy_rng"] = np.random.get_state()
         value["torch_rng"] = torch.random.get_rng_state()
@@ -54,6 +87,10 @@ class CheckpointHandler(NativeCheckpointHandler):
         temporary = path.with_suffix('.tmp')
         torch.save(self._checkpoint(state), temporary)
         os.replace(temporary, path)
+        if self.best_epoch == epochs:
+            # Retaining every validation checkpoint must not make export pick
+            # the last (possibly worse) epoch instead of the validated best.
+            self._mark_best(epochs)
         # Commit the new checkpoint before removing its predecessor.
         if not self.io.keep and self.io.old_path and not keep_last:
             previous = Path(self.io.old_path)
@@ -76,7 +113,7 @@ class CheckpointHandler(NativeCheckpointHandler):
             value=torch.load(self.progress_path,map_location=device,weights_only=False)
             epoch=value["epoch"]
         else:
-            path=self.io._get_latest_checkpoint_path(swa=swa)
+            path = self._best_path(swa) if self.deployment else self.io._get_latest_checkpoint_path(swa=swa)
             if path is None:
                 return None
             logging.info("Loading checkpoint: %s", path)
@@ -88,6 +125,11 @@ class CheckpointHandler(NativeCheckpointHandler):
                              'Keep the original enable_cueq setting to resume, or start a fresh CuEq run in a new checkpoint directory; Adam moments cannot be relabeled.')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         self.best_loss=value.get("best_loss",float("inf"))
+        self.best_epoch=value.get("best_epoch")
+        if 'best_epoch' not in value and np.isfinite(self.best_loss):
+            best_path = self._best_path(swa)
+            if best_path is not None:
+                self.best_epoch = self.io._parse_checkpoint_path(best_path).epochs
         if self.ema is not None and value.get("ema") is not None:
             self.ema.load_state_dict(value["ema"])
         if self.deployment:
@@ -144,9 +186,15 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             validation_start = time.perf_counter()
             if hasattr(optimizer, "eval"):
                 optimizer.eval()
-            calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
-                                        train_loader, device)
-            valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
+            try:
+                calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
+                                            train_loader, device)
+                valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
+            except Exception:
+                if save_all_checkpoints:
+                    checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=True)
+                    logging.exception('Validation failed; retained epoch %d for diagnosis. The best checkpoint is unchanged.',epoch)
+                raise
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
             logging.debug("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
                          [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)), clipped, len(norms))
@@ -175,6 +223,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 logging.warning('50-step validation residual %.5g exceeds %.5g; keeping the previous deployable best checkpoint', residual, tolerance)
             if improved:
                 best, best_epoch, stalled = valid_loss, epoch, 0
+                checkpoint_handler.best_epoch = epoch
             else:
                 stalled += eval_interval
             checkpoint_handler.best_loss = best

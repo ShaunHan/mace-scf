@@ -245,6 +245,7 @@ def test_raw_resume_and_ema_deployment_are_distinct(tmp_path):
     state = CheckpointState(model, optimizer, scheduler)
     handler = CheckpointHandler(directory=str(tmp_path), tag='resume_test', keep=False, ema=ema)
     handler.best_loss = .4
+    handler.best_epoch = 2
     handler.save(state, 2)
     handler.save_progress(state, 2)
     random_next = random.random(), np.random.rand(), torch.rand(1)
@@ -504,3 +505,76 @@ def test_finite_validation_can_report_an_unconverged_state(tmp_path):
     atoms.calc = MACEFixedPointSCF(str(path), device='cpu', ignore_nonconverged=False)
     with pytest.raises(RuntimeError, match='Electronic residual'):
         atoms.get_potential_energy()
+
+
+@pytest.mark.parametrize('keep',[False,True])
+def test_archived_bad_epochs_do_not_replace_best_deployment(tmp_path,keep):
+    model=torch.nn.Linear(1,1,bias=False)
+    optimizer=torch.optim.AdamW(model.parameters(),lr=.003)
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    state=CheckpointState(model,optimizer,scheduler)
+    handler=CheckpointHandler(directory=str(tmp_path),tag='archive',keep=keep)
+    with torch.no_grad():model.weight.fill_(2.)
+    handler.best_epoch=2;handler.best_loss=.1
+    handler.save(state,2,keep_last=True)
+    with torch.no_grad():model.weight.fill_(5.)
+    handler.save(state,5,keep_last=True)
+    handler.save_progress(state,5)
+    assert len(list(tmp_path.glob('*.pt')))==2
+    deployment=CheckpointHandler(directory=str(tmp_path),tag='archive',keep=keep,deployment=True)
+    assert deployment.load_latest(state,device='cpu')==2
+    torch.testing.assert_close(model.weight,torch.full_like(model.weight,2.))
+    resume=CheckpointHandler(directory=str(tmp_path),tag='archive',keep=keep)
+    assert resume.load_latest(state,device='cpu')==5
+    assert resume.best_epoch==2
+    torch.testing.assert_close(model.weight,torch.full_like(model.weight,5.))
+
+
+
+def test_validation_exception_archives_failed_epoch(tmp_path,monkeypatch):
+    import importlib
+    module=importlib.import_module('mace_scf.utils.train')
+    model=torch.nn.Linear(1,1,bias=False)
+    optimizer=torch.optim.AdamW(model.parameters(),lr=.003)
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    handler=CheckpointHandler(directory=str(tmp_path),tag='failed',keep=True)
+    monkeypatch.setattr(module,'take_step',lambda *a,**k:(0.,{'grad_norm_before_clip':1.,'gradient_retained':1.,'graphs':1,'grad_clip_applied':False}))
+    monkeypatch.setattr(module,'calibrate_scalar_references',lambda *a,**k:None)
+    def fail(*a,**k):raise RuntimeError('test SCF failure')
+    monkeypatch.setattr(module,'evaluate',fail)
+    with pytest.raises(RuntimeError,match='test SCF failure'):
+        module.train(model,None,None,[None],[None],optimizer,scheduler,0,0,10,handler,None,5,'cpu','ElectrostaticRMSE',save_all_checkpoints=True)
+    paths=list(tmp_path.glob('*.pt'))
+    assert len(paths)==1 and 'epoch-0' in paths[0].name
+    saved=torch.load(paths[0],weights_only=False)
+    assert saved['best_epoch'] is None and saved['best_loss']==float('inf')
+    assert not handler.progress_path.with_suffix('.best').exists()
+    deployment=CheckpointHandler(directory=str(tmp_path),tag='failed',keep=True,deployment=True)
+    assert deployment.load_latest(CheckpointState(model,optimizer,scheduler),device='cpu') is None
+
+
+@pytest.mark.parametrize('old_archive_all',[False,True])
+def test_resume_old_archives_preserves_best_when_retention_is_enabled(tmp_path,old_archive_all):
+    model=torch.nn.Linear(1,1,bias=False)
+    optimizer=torch.optim.AdamW(model.parameters(),lr=.003)
+    scheduler=torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    state=CheckpointState(model,optimizer,scheduler)
+    handler=CheckpointHandler(directory=str(tmp_path),tag='old',keep=True)
+    # The previous release saved running best_loss but no best_epoch marker.
+    for epoch in ([0,2,5] if old_archive_all else [2]):
+        with torch.no_grad():model.weight.fill_(float(epoch))
+        value=handler.builder.create_checkpoint(state)
+        value['best_loss']=.2 if epoch==0 else .1
+        torch.save(value,tmp_path/f'old_epoch-{epoch}.pt')
+    with torch.no_grad():model.weight.fill_(5.)
+    value=handler.builder.create_checkpoint(state)
+    value.update(best_loss=.1,epoch=5)
+    handler.progress_path.parent.mkdir(parents=True)
+    torch.save(value,handler.progress_path)
+    assert handler.load_latest(state,device='cpu')==5
+    assert handler.best_epoch==2
+    with torch.no_grad():model.weight.fill_(10.)
+    handler.save(state,10,keep_last=True)
+    deployment=CheckpointHandler(directory=str(tmp_path),tag='old',keep=True,deployment=True)
+    assert deployment.load_latest(state,device='cpu')==2
+    torch.testing.assert_close(model.weight,torch.full_like(model.weight,2.))
