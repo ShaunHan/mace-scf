@@ -404,6 +404,46 @@ def test_checkpointed_gradient_and_converged_root_parity():
                 torch.testing.assert_close(a,b,atol=2.e-6,rtol=2.e-5)
 
 
+@pytest.mark.parametrize('mixing', [.25, .5])
+def test_damped_fifty_step_shortcut_keeps_force_and_parameter_derivatives(mixing):
+    model = coupled_model()
+    parameters = [p for p in model.parameters() if p.requires_grad]
+    results = []
+    for mode in ('unroll_scf', 'shortcut_scf'):
+        out = evaluate_coupled(model, small_data(), steps=50, mixing=mixing,
+                               training=True, mode=mode)
+        objective = out['forces'].square().sum()+out['workfunction'].square().sum()
+        gradients = torch.autograd.grad(objective, parameters, allow_unused=True)
+        results.append((out, gradients))
+    for key in ('energy', 'forces', 'fermi_level', 'vacuum_potential', 'fourier_potential'):
+        torch.testing.assert_close(results[0][0][key], results[1][0][key], atol=1.e-12, rtol=1.e-12)
+    for first, second in zip(results[0][1], results[1][1]):
+        if first is None:
+            assert second is None
+        else:
+            torch.testing.assert_close(first, second, atol=1.e-10, rtol=1.e-9)
+
+
+def test_nonfinite_scalar_observation_is_rejected():
+    from mace_scf.electrostatics.coupled import SCFNumericalError
+    model = coupled_model()
+    model.field_dependent_charges_map.scalar_reference[0] = float('nan')
+    with pytest.raises(SCFNumericalError, match='fermi_level'):
+        evaluate_coupled(model, small_data(), steps=3)
+
+
+def test_nonfinite_force_is_rejected_even_with_finite_state(monkeypatch):
+    from mace_scf.electrostatics.coupled import SCFNumericalError
+    model = coupled_model()
+    original = torch.autograd.grad
+    def invalid_derivative(*args, **kwargs):
+        return tuple(torch.full_like(value, float('inf')) if value is not None else None
+                     for value in original(*args, **kwargs))
+    monkeypatch.setattr(torch.autograd, 'grad', invalid_derivative)
+    with pytest.raises(SCFNumericalError, match='forces'):
+        evaluate_coupled(model, small_data(), steps=3)
+
+
 @pytest.mark.parametrize('local_energy',[False,True])
 def test_force_matches_finite_energy_derivative(local_energy):
     model=coupled_model(local_energy=local_energy)

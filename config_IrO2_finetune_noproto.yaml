@@ -1,4 +1,4 @@
-# v374: intact slab images; neutral-reference response; optional spatial proto observer.
+# v374 hotfix: train and deploy the same 50-step SCF trajectory; retain mixing 0.5.
 heads:
   default:
     arrays_keys:
@@ -59,7 +59,7 @@ save_cpu: true
 keep_checkpoints: false
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_finetune_noproto_v374
+checkpoints_dir: checkpoints_IrO2_finetune_noproto_v374_hotfix
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 # Train the transferred backbone continuously; no epoch-10 unfreeze.
@@ -84,9 +84,9 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
-        num_scf_steps: 12
+        num_scf_steps: 50
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -112,9 +112,9 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
-        num_scf_steps: 24
+        num_scf_steps: 50
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -140,7 +140,7 @@ train_schedule:
         weight: 100
         relative: true
     fixed_point_training_options:
-      mode: unroll_scf
+      mode: shortcut_scf
       scf:
         num_scf_steps: 50
         constant_charge: true

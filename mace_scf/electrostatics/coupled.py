@@ -1332,7 +1332,19 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                                                   condition_density=reference_conditioning!='fermi_level')
             if reference is not None:
                 output['reference_response'] = reference
-        return apply_scalar_reference(output, r)
+        output = apply_scalar_reference(output, r)
+        # A finite iterate does not imply finite derivatives of its trajectory.
+        # Reject invalid observables before loss/Adam, metrics or MD consume them.
+        checked = {key: output[key] for key in ('energy', 'forces', 'stress',
+                                               'fermi_level', 'vacuum_potential')
+                   if output[key] is not None}
+        with torch.no_grad():
+            finite = torch.stack([torch.isfinite(value).all() for value in checked.values()])
+            if not bool(finite.all()):
+                invalid = [key for key, valid in zip(checked, finite.tolist()) if not valid]
+                raise SCFNumericalError(f'Nonfinite coupled SCF observations: {invalid}. '
+                                        'No value was clipped or substituted; check the SCF trajectory and mixing.')
+        return output
 
 
 def apply_scalar_reference(output, response):

@@ -150,6 +150,14 @@ class FixedPointWrapper:
                                  type(response).__name__, self.mode, self.scf_options.num_scf_steps,
                                  int(response.deployment_steps))
                     self._logged_spectral_policy = True
+                    if (getattr(response, 'coupled', False)
+                            and self.mode in ('unroll_scf', 'shortcut_scf')
+                            and self.scf_options.num_scf_steps < int(response.deployment_steps)):
+                        logging.warning('Coupled SCF trains %d updates but validates/exports %d. '
+                                        'The untrained iteration tail can amplify errors and force derivatives. '
+                                        'Use the deployment step count in training; shortcut_scf preserves '
+                                        'the full unrolled derivatives with activation checkpointing.',
+                                        self.scf_options.num_scf_steps, int(response.deployment_steps))
                     if getattr(response, 'coupled', False):
                         logging.info('Observation convention: RMSE_ESP is the real-space error of the retained '
                                      'deformation spectrum after uniform-offset alignment (k=0 excluded); '
