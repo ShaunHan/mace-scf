@@ -90,10 +90,10 @@ def vector_asinh(vector):
     return vector * torch.where(squared < threshold, series, ratio)
 
 def sample_spectrum(total, geometry):
-    """Gaussian-projected v and -grad(v), both in electron-energy convention.
+    """Gaussian samples of v and its negative gradient in electron-energy units.
 
-    -grad(v) is an electron-energy gradient, NOT the electrical field -grad(phi).
-    This explicit distinction avoids a hidden electron/positive-charge sign flip.
+    The gradient is a field descriptor, not the total nuclear force. Electrical
+    potential has the opposite sign to electron potential energy.
     """
     cosine, sine, wave, _, _, _, receiver, *_ = geometry
     re = total[..., 0, None] * receiver
@@ -135,6 +135,14 @@ class EmptyProjection(nn.Module):
         return x[..., :0]
 
 class AtomicPotentialResponse(nn.Module):
+    """Shared density/potential response with positive local susceptibilities.
+
+    Charge softness is the bare susceptibility of the conditional charge law;
+    the fixed-Q projection and electrostatic coupling give its full response.
+    Dipole softness times density_width**2 is the dipole polarizability in
+    charge-number units. Only charges, dipoles and potential amplitudes recur.
+    The common Fermi level is one pooled readout, not an extra atomic state.
+    """
     electrochemical_reference = True
 
     def __init__(self, scalar_channels, vector_channels, num_elements,
@@ -232,12 +240,15 @@ class AtomicPotentialResponse(nn.Module):
         ds,dv=transported.split((v.shape[-1],e.shape[-2]*3),-1)
         dv=dv.reshape_as(e)
         div,grad=angular_differences(neighborhood,v,e)
-        e,dv,grad=vector_asinh(e),vector_asinh(dv),vector_asinh(grad)
-        scalar=chemical+self.state_scalar(torch.asinh(v))
-        embedded=vector+self.state_vector(e.transpose(-1,-2)).transpose(-1,-2)
-        scalar=scalar+self.neighbor_scalar(torch.asinh(ds))+self.neighbor_divergence(torch.asinh(div))
-        embedded=embedded+self.neighbor_vector(dv.transpose(-1,-2)).transpose(-1,-2)
-        embedded=embedded+self.neighbor_gradient(grad.transpose(-1,-2)).transpose(-1,-2)
+        # Combine the same projections before their linear maps. This keeps
+        # every feature and parameter while reducing small recurrent kernels.
+        scalar_weight=torch.cat((self.state_scalar.weight,self.neighbor_scalar.weight,
+                                 self.neighbor_divergence.weight),-1)
+        vector_weight=torch.cat((self.state_vector.weight,self.neighbor_vector.weight,
+                                 self.neighbor_gradient.weight),-1)
+        scalar=chemical+F.linear(torch.asinh(torch.cat((v,ds,div),-1)),scalar_weight)
+        polar=vector_asinh(torch.cat((e,dv,grad),-2))
+        embedded=vector+F.linear(polar.transpose(-1,-2),vector_weight).transpose(-1,-2)
         return scalar,embedded
 
     def potential_coordinates(self, potential, mask, electronic_reference, target):
@@ -300,23 +311,6 @@ class AtomicPotentialResponse(nn.Module):
         if return_hidden:
             result += (hidden,)
         return result
-
-    def chemical_levels(self, raw_level, hidden, attrs, softness, mask):
-        """Split local contrasts and the uniform level in the same KKT law.
-
-        chi_i = raw_i - <raw>_s + <chi_common>_s,
-        mu = <chi_common>_s + <v>_s - Q/sum(s).
-        A common-readout change shifts mu without changing any charge. Field
-        and geometry derivatives through the shared features remain attached.
-        This conditional multiplier is not asserted to equal dE/dN_e.
-        """
-        common_readout = self.common_level
-        if common_readout is None:
-            return raw_level
-        weights = softness * mask
-        weights = weights / weights.sum(-1, keepdim=True)
-        reference = attrs @ self.species_level + common_readout(hidden).squeeze(-1)
-        return raw_level + (weights * (reference - raw_level)).sum(-1, keepdim=True)
 
     def geometry_reference_features(self, chemical, vector):
         """The shared local electronic representation with no applied field.
@@ -383,9 +377,10 @@ class AtomicPotentialResponse(nn.Module):
         # Keep it out of the charge calculation instead of adding/subtracting
         # a large common value through every atom and every recurrent step.
         if observe_chemical_level and self.common_level is not None:
-            shifted = self.chemical_levels(chemical_level, computed[-1], attrs, softness, mask)
-            mu = mu+(f*(shifted-chemical_level)).sum(-1)
-            chemical_level = shifted
+            common = self.common_level((f[...,None]*computed[-1]).sum(1)).squeeze(-1)
+            common = common+(f*(attrs@self.species_level)).sum(-1)
+            mu = common+(f*potential[...,0]).sum(-1)-target/response
+            chemical_level = chemical_level+(common-(f*chemical_level).sum(-1))[:,None]
             levels = chemical_level+potential[...,0]
         induced=-reference_offset[...,-3:-2]*self.density_width*field[...,0,:]
         proposal=torch.cat((q[...,None],p0[...,1:4]/self.density_width+induced,
@@ -709,39 +704,29 @@ def _stopping_residual(function, state, args, proposal):
     return proposal-state if physical is None else physical(state,*args)
 
 
-def residual_mixing_weight(current, previous, old_weight, floor):
-    """Residual-scaled regularization of the two-history least-squares fit.
+def secant_relaxation(displacement, residual_change, previous, mixing, floor):
+    """Smooth step reduction for a large local residual slope, per graph.
 
-    Minimize ||r-w*(r-r_old)||^2 + (||r||^2+||r_old||^2)*w^2
-    + floor*(w-w_old)^2 on [0,1]. The Gram trace controls the conditioning
-    when consecutive residuals become parallel, even far from a root.
-    A machine-precision floor alone leaves almost coincident residuals with
-    arbitrarily sensitive history weights and hence spurious force spikes.
-    All residual derivatives remain attached, including double backward.
+    Away from roundoff this is mixing/sqrt(1+(mixing*L)**2), where
+    L=||delta residual||/||delta state||. The configured mixing is an upper
+    bound. Retain the preceding step when the secant is unresolved instead
+    of restoring a potentially unstable large step at a root. Every derivative
+    remains attached; no residual/state clipping or extra map evaluation.
     """
-    axes = tuple(range(1, current.ndim))
-    difference = current-previous
-    scale = (current.square()+previous.square()).sum(axes, keepdim=True)
-    numerator = (current*difference).sum(axes, keepdim=True)+floor*old_weight
-    denominator = difference.square().sum(axes, keepdim=True)+scale+floor
-    return (numerator/denominator).clamp(0., 1.)
+    axes = tuple(range(1, displacement.ndim))
+    dx = displacement.square().sum(axes, keepdim=True)
+    dr = residual_change.square().sum(axes, keepdim=True)
+    return torch.sqrt((mixing**2*dx+floor*previous.square()) /
+                      (dx+mixing**2*dr+floor))
 
 
 def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
-    """Differentiate a finite, two-history convex residual-mixing trajectory.
+    """Differentiate a finite trajectory with smooth secant relaxation.
 
-    Each step evaluates the same screened constitutive map once. The next
-    state is a convex combination of the last two ordinarily mixed proposals,
-    regularizing their linear residual estimate independently for each graph.
-    This suppresses oscillatory feedback without extrapolating outside those
-    proposals, changing the charge law, or changing the requested step count.
-    It is not a convergence theorem for an arbitrary nonlinear learned map.
-
-    Mixing weights remain in autograd, including force-loss derivatives.
-    A precision-scaled ridge retains the preceding mixing weight when the
-    secant becomes unresolved; resetting it to zero at a root would restore
-    the unstable ordinary iteration in its derivatives. Padding adds zeros
-    and does not alter this numerical scale.
+    The same physical map is evaluated exactly once per requested update.
+    A large measured residual slope reduces the numerical step, preserving
+    charge and fixed points. The method is not a convergence theorem for an
+    arbitrary learned map, nor a guarantee of monotonic validation errors.
     """
     limit = _trajectory_scale(initial)
     axes = tuple(range(1, initial.ndim))
@@ -750,21 +735,21 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
     _check_trajectory(proposal, limit, 1, 'finite-step proposal')
     residual = proposal-initial
     state = initial+mixing*residual
-    previous = state
-    weight = torch.zeros_like(floor)
+    previous = initial
+    weight = torch.full_like(floor, mixing)
     block_size = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
     for start in range(1, int(steps), block_size):
         length = min(block_size, int(steps)-start)
-        def advance(value, old_proposal, old_residual, weight, *fixed, count=length, offset=start):
+        def advance(value, old_state, old_residual, weight, *fixed, count=length, offset=start):
             peaks = []
             for iteration in range(count):
                 proposed = function(value, *fixed)
                 peaks.append(proposed.detach().abs().amax(axes))
                 current = proposed-value
-                mixed = value+mixing*current
-                weight = residual_mixing_weight(current, old_residual, weight, floor)
-                value = (1.-weight)*mixed+weight*old_proposal
-                old_proposal, old_residual = mixed, current
+                weight = secant_relaxation(value-old_state, current-old_residual,
+                                          weight, mixing, floor)
+                old_state, old_residual = value, current
+                value = value+weight*current
             # Check EVERY proposal before observations/backward, with one
             # host synchronization per block instead of one per SCF step.
             peaks = torch.stack(peaks)
@@ -776,7 +761,7 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
                     f'max|state|={float(peaks[iteration,graph]):.6e}, '
                     f'fixed initial-scale precision budget={float(limit):.6e}. '
                     'No state was clipped or substituted.')
-            return value, old_proposal, old_residual, weight
+            return value, old_state, old_residual, weight
         state, previous, residual, weight = (checkpoint(advance, state, previous, residual, weight, *args,
             use_reentrant=False, preserve_rng_state=False) if checkpointed else
             advance(state, previous, residual, weight, *args))

@@ -17,6 +17,37 @@ from mace_scf.electrostatics.loss import WeightedLoss, WeightedFourierPotential,
 from tests.test_spectral_response import small_model, small_data
 
 
+def test_combined_field_projections_preserve_first_and_second_derivatives():
+    from mace_scf.electrostatics.coupled import (
+        AtomicPotentialResponse, transport_difference, angular_differences, vector_asinh,
+    )
+    torch.manual_seed(378)
+    r=AtomicPotentialResponse(8,4,2,field_channels=3,width=8).double()
+    names=('state_scalar','state_vector','neighbor_scalar','neighbor_vector',
+           'neighbor_divergence','neighbor_gradient')
+    with torch.no_grad():
+        for name in names:getattr(r,name).weight.normal_(std=.1)
+    v=torch.randn(2,3,3,dtype=torch.float64,requires_grad=True)
+    e=torch.randn(2,3,3,3,dtype=torch.float64,requires_grad=True)
+    op=torch.randn(2,3,3,4,dtype=torch.float64,requires_grad=True)
+    chem=torch.randn(2,3,8,dtype=torch.float64)
+    vec=torch.randn(2,3,4,3,dtype=torch.float64)
+    ds=transport_difference(op[...,0],v);dv=transport_difference(op[...,0],e)
+    div,grad=angular_differences(op,v,e)
+    expected=(chem+r.state_scalar(torch.asinh(v))+r.neighbor_scalar(torch.asinh(ds))+r.neighbor_divergence(torch.asinh(div)),
+              vec+r.state_vector(vector_asinh(e).transpose(-1,-2)).transpose(-1,-2)
+              +r.neighbor_vector(vector_asinh(dv).transpose(-1,-2)).transpose(-1,-2)
+              +r.neighbor_gradient(vector_asinh(grad).transpose(-1,-2)).transpose(-1,-2))
+    actual=r.state_embedding(None,chem,vec,v,e,op)
+    inputs=(v,e,op,*(getattr(r,name).weight for name in names))
+    def derivatives(output):
+        first=torch.autograd.grad(sum(x.square().sum() for x in output),inputs,create_graph=True,retain_graph=True)
+        second=torch.autograd.grad(sum(x.square().sum() for x in first),inputs,retain_graph=True)
+        return (*first,*second)
+    for a,b in zip((*actual,*derivatives(actual)),(*expected,*derivatives(expected))):
+        torch.testing.assert_close(a,b,atol=1.e-9,rtol=1.e-10)
+
+
 def test_fused_angular_transport_has_the_same_first_and_second_derivatives():
     from mace_scf.electrostatics.coupled import angular_transport
     torch.manual_seed(370)
@@ -602,20 +633,11 @@ def test_common_chemical_level_is_charge_null_direction():
     model=coupled_model();data=small_data()
     a=evaluate_coupled(model,data,steps=50)
     with torch.no_grad():
-        model.field_dependent_charges_map.species_level.add_(.5)
-    # Species shifts also change the field descriptor's driving reference, so
-    # test the exact KKT null direction at fixed shared hidden features.
-    r=model.field_dependent_charges_map
-    raw=torch.tensor([[.3,.1,-.2]]);hidden=torch.randn(1,3,64)
-    attrs=data['node_attrs'][None];soft=torch.tensor([[.01,.02,.03]]);mask=torch.ones_like(raw)
-    left=r.chemical_levels(raw,hidden,attrs,soft,mask)
-    with torch.no_grad():r.species_level.add_(.5)
-    right=r.chemical_levels(raw,hidden,attrs,soft,mask)
-    from mace_scf.electrostatics.coupled import charge_closure
-    q,mu,*_=charge_closure(torch.zeros_like(raw),left,soft,torch.tensor([.1]),mask)
-    q1,mu1,*_=charge_closure(torch.zeros_like(raw),right,soft,torch.tensor([.1]),mask)
-    torch.testing.assert_close(q,q1,atol=1.e-15,rtol=0.)
-    torch.testing.assert_close(mu1-mu,torch.tensor([.5]))
+        model.field_dependent_charges_map.common_level.weight.add_(.5)
+    b=evaluate_coupled(model,small_data(),steps=50)
+    for key in ('energy','forces','density_coefficients','fourier_potential','vacuum_potential'):
+        torch.testing.assert_close(a[key],b[key],atol=0.,rtol=0.)
+    assert (a['fermi_level']-b['fermi_level']).abs().max()>1.e-6
 
 
 def test_cached_linear_solve_second_derivative():
@@ -792,11 +814,12 @@ def test_finite_trajectory_stress_matches_strained_energy():
 
 
 @pytest.mark.parametrize('checkpointed', [False, True])
-def test_finite_residual_mixing_removes_affine_oscillation(checkpointed):
+@pytest.mark.parametrize('unstable_slope', [-4., -12.])
+def test_finite_residual_mixing_removes_affine_oscillation(checkpointed, unstable_slope):
     from mace_scf.electrostatics.coupled import unroll_steps
     initial = torch.zeros(2, 3, 4, dtype=torch.float64)
     drive = torch.ones_like(initial, requires_grad=True)
-    slope = torch.tensor([-4., .7], dtype=initial.dtype)[:, None, None]
+    slope = torch.tensor([unstable_slope, .7], dtype=initial.dtype)[:, None, None]
     def function(x, b):
         return slope*x+b
     result = unroll_steps(function, initial, (drive,), 100, .5, checkpointed)
@@ -830,24 +853,19 @@ def test_residual_mixing_exact_budget_padding_and_derivatives():
     assert torch.autograd.gradgradcheck(fn,(b,),eps=1.e-6,atol=2.e-5,rtol=2.e-3)
 
 
-def test_history_fit_stays_conditioned_for_nearly_coincident_residuals():
-    from mace_scf.electrostatics.coupled import residual_mixing_weight
-    # A small secant does not establish a small physical residual. Dividing
-    # only by its squared norm amplifies derivatives by its inverse size.
-    current = torch.tensor([[[1., 0.]]], dtype=torch.float64, requires_grad=True)
-    previous = torch.tensor([[[1.-1.e-12, 1.e-5]]], dtype=torch.float64, requires_grad=True)
-    floor = torch.full((1,1,1), torch.finfo(current.dtype).eps, dtype=current.dtype)
-    function = lambda r, old: residual_mixing_weight(r, old, floor*0., floor)
-    weight = function(current, previous)
-    first = torch.autograd.grad(weight.sum(), (current, previous), create_graph=True)
-    assert max(float(d.detach().abs().max()) for d in first) < 1.
-    second = torch.autograd.grad(sum(d.square().sum() for d in first), (current, previous))
-    assert all(torch.isfinite(d).all() for d in second)
-    # Scaling the physical state or adding padded atoms cannot change the fit.
-    torch.testing.assert_close(function(current*10., previous*10.), weight, atol=1.e-14, rtol=1.e-10)
-    for r, old in ((current+.2, previous),):
-        assert torch.autograd.gradcheck(function, (r, old), eps=1.e-6, atol=2.e-6)
-        assert torch.autograd.gradgradcheck(function, (r, old), eps=1.e-6, atol=2.e-5)
+def test_secant_relaxation_preserves_unresolved_step_and_derivatives():
+    from mace_scf.electrostatics.coupled import secant_relaxation
+    dx=torch.tensor([[[.1,.2]]],dtype=torch.float64,requires_grad=True)
+    dr=torch.tensor([[[-1.,-.5]]],dtype=torch.float64,requires_grad=True)
+    floor=torch.full((1,1,1),torch.finfo(dx.dtype).eps,dtype=dx.dtype)
+    previous=torch.full_like(floor,.2)
+    function=lambda x,r: secant_relaxation(x,r,previous,.5,floor)
+    weight=function(dx,dr)
+    assert 0.<float(weight.detach())<.5
+    torch.testing.assert_close(function(dx*0.,dr*0.),previous,atol=0.,rtol=0.)
+    torch.testing.assert_close(function(dx*10.,dr*10.),weight,atol=1.e-14,rtol=1.e-10)
+    assert torch.autograd.gradcheck(function,(dx,dr),eps=1.e-6,atol=2.e-6)
+    assert torch.autograd.gradgradcheck(function,(dx,dr),eps=1.e-6,atol=2.e-5)
 
 
 
