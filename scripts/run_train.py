@@ -87,6 +87,17 @@ def build_lr_scheduler(optimizer, args):
     return LRScheduler(optimizer, args)
 
 
+def _resume_training(args, tag, state, ema, device):
+    """Restore the latest available stage, including across an added warmup."""
+    for stage in reversed(args.train_schedule):
+        handler = CheckpointHandler(ema=ema, directory=args.checkpoints_dir,
+            tag=tag+"_"+stage["name"], keep=args.keep_checkpoints)
+        epoch = handler.load_latest(state=state, swa=False, device=device)
+        if epoch is not None:
+            return epoch+1
+    return 0
+
+
 def main() -> None:
     args = mace_scf.utils.extended_arg_parser().parse_args()
     check_config_conflicts(args)
@@ -260,22 +271,8 @@ def main() -> None:
     # find most recent epoch
     start_epoch = 0
     if args.restart_latest:
-        for stage_number, train_stage in enumerate(args.train_schedule):
-            checkpoint_handler_stage = CheckpointHandler(
-                ema=ema,
-                directory=args.checkpoints_dir,
-                tag=tag+"_"+train_stage["name"],
-                keep=args.keep_checkpoints,
-            )
-            latest_checkpoint_epoch = checkpoint_handler_stage.load_latest(
-                state=tools.CheckpointState(model, optimizer, lr_scheduler),
-                swa=False,
-                device=device,
-            )
-            if latest_checkpoint_epoch is not None:
-                start_epoch = latest_checkpoint_epoch+1
-            else:
-                break
+        start_epoch = _resume_training(args, tag,
+            tools.CheckpointState(model, optimizer, lr_scheduler), ema, device)
     else:
         logging.info("restart_latest is False; starting from initialized model and optimizer.")
 

@@ -315,12 +315,15 @@ def condition_readouts(model, loader, device, fit_forces=True):
 
 
 def set_foundation_stage(model, frozen):
-    """Train new heads before unfreezing the transferred feature extractor."""
+    """Train new heads before unfreezing the complete feature extractor."""
     if not isinstance(frozen,bool):
         raise TypeError('freeze_foundation_backbone must be bool')
     if not hasattr(model,'foundation_element_map'):
         if frozen:raise ValueError('freeze_foundation_backbone requires foundation_model')
         return
-    for name in ('node_embedding','interactions','products'):
+    # The transferred mixer is part of the electronic feature extractor too.
+    # Updating it while the message-passing layers are frozen still changes
+    # every mixed scalar/vector coordinate seen by the new electronic heads.
+    for name in ('node_embedding','interactions','products','layer_feature_mixer'):
         getattr(model,name).requires_grad_(not frozen)
     logging.info('Foundation feature extractor frozen=%s; energy/electronic readouts remain trainable',frozen)

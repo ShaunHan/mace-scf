@@ -128,15 +128,81 @@ def test_scalar_reference_calibration_uses_training_ema_and_preserves_state(rela
     for a,b in zip(raw,model.parameters()):torch.testing.assert_close(a,b,atol=0.,rtol=0.)
 
 
-def test_ir_finetune_has_no_epoch_ten_freeze_transition():
+def test_ir_finetune_protects_transferred_features_during_head_initialization():
     from pathlib import Path
     import yaml
-    config=yaml.safe_load((Path(__file__).parents[1]/'config_IrO2_finetune.yaml').read_text())
-    stages=list(config['train_schedule'].values())
-    assert stages[0]['start']==0 and stages[0]['end']==49
-    assert all(not stage.get('freeze_foundation_backbone',False) for stage in stages)
-    assert all(stage['lr']>=.001 for stage in stages)
-    assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps']==50
+    for path in Path(__file__).parents[1].glob('config_IrO2_finetune*.yaml'):
+        config=yaml.safe_load(path.read_text())
+        stages=list(config['train_schedule'].values())
+        assert stages[0]['start']==0 and stages[0]['end']==9
+        assert stages[0]['freeze_foundation_backbone'] is True
+        assert stages[1]['start']==10 and stages[1]['end']==49
+        assert all(not stage.get('freeze_foundation_backbone',False) for stage in stages[1:])
+        assert all(stage['lr']>=.001 for stage in stages)
+        assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps']==50
+
+
+@pytest.mark.parametrize('cueq', [False, True])
+def test_frozen_foundation_preserves_mixed_features_and_unfreezes_in_place(cueq):
+    from copy import deepcopy
+    from mace_scf.utils.foundation import install_foundation, set_foundation_stage
+    from .test_coupled_response import coupled_model
+    model = coupled_model()
+    install_foundation(model, deepcopy(model))
+    if cueq:
+        pytest.importorskip('cuequivariance_torch')
+        from mace_scf.utils.foundation import accelerate_backbone
+        accelerate_backbone(model, 'cpu')
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.001, weight_decay=.01)
+    parameter_ids = [id(p) for p in model.parameters()]
+    set_foundation_stage(model, True)
+    reference = model.local_part(small_data(), compute_force=False).all_layer_feats.detach().clone()
+    for _ in range(3):
+        optimizer.zero_grad(set_to_none=True)
+        local = model.local_part(small_data(), compute_force=False)
+        (local.energies.square().sum()+local.all_layer_feats.square().mean()).backward()
+        optimizer.step()
+        actual = model.local_part(small_data(), compute_force=False).all_layer_feats
+        torch.testing.assert_close(actual, reference, rtol=0., atol=0.)
+    head = next(model.readouts.parameters())
+    assert optimizer.state[head]['step'] == 3
+    assert all(p.grad is None for p in model.layer_feature_mixer.parameters())
+    set_foundation_stage(model, False)
+    assert parameter_ids == [id(p) for p in model.parameters()]
+    assert optimizer.state[head]['step'] == 3
+    optimizer.zero_grad(set_to_none=True)
+    local = model.local_part(small_data(), compute_force=False)
+    (local.energies.square().sum()+local.all_layer_feats.square().mean()).backward()
+    assert all(p.grad is not None for p in model.layer_feature_mixer.parameters())
+    optimizer.step()
+    changed = model.local_part(small_data(), compute_force=False).all_layer_feats
+    assert not torch.equal(changed, reference)
+    assert optimizer.state[head]['step'] == 4
+
+
+def test_resume_finds_existing_training_after_a_new_warmup_stage(monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    path = Path(__file__).parents[1]/'scripts'/'run_train.py'
+    spec = importlib.util.spec_from_file_location('scf_run_train', path)
+    run_train = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(run_train)
+    args = SimpleNamespace(train_schedule=[{'name':name} for name in ('heads','stage1','stage2')],
+                           checkpoints_dir='unused', keep_checkpoints=True)
+    calls = []
+    state, ema = object(), object()
+    class Handler:
+        def __init__(self, **kwargs):
+            self.tag = kwargs['tag']
+            assert kwargs['ema'] is ema
+        def load_latest(self, **kwargs):
+            assert kwargs['state'] is state
+            calls.append(self.tag)
+            return 49 if self.tag == 'fit_stage1' else None
+    monkeypatch.setattr(run_train, 'CheckpointHandler', Handler)
+    assert run_train._resume_training(args, 'fit', state, ema, 'cpu') == 50
+    assert calls == ['fit_stage2', 'fit_stage1']
 
 
 
