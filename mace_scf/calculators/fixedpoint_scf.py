@@ -1,4 +1,5 @@
 import warnings
+from copy import deepcopy
 from typing import Optional
 
 import numpy as np
@@ -8,6 +9,7 @@ from ase.calculators.calculator import Calculator, all_changes
 import mace.data
 import mace.tools
 import mace_scf.data
+from mace_scf.data.new_atomic_data import COUNTER_CHARGE_KEYS
 from mace.tools import torch_geometric, torch_tools, utils
 from mace_scf.electrostatics.fixed_point_options import (
     validate_fixed_point_scf_options,
@@ -326,6 +328,7 @@ class MACEFixedPointSCF(Calculator):
                 "external_field": external_field_key,
                 "fermi_level": fermi_level_key,
                 "total_charge": total_charge_key,
+                **{key: key for key in COUNTER_CHARGE_KEYS},
                 **{f"{prefix}_{axis}frac": f"{prefix}_{axis}frac"
                    for prefix in ("vacuum", "dipole_correction") for axis in "xyz"},
             },
@@ -340,6 +343,14 @@ class MACEFixedPointSCF(Calculator):
             key_specification=self.keyspec,
             head_name=self.head,
         )
+        profile = (config.properties.get("counter_charge_center") is not None or
+                   any(config.properties.get(f"counter_charge_{axis}frac") is not None for axis in "xyz"))
+        if self.compensating_jellium:
+            if profile:
+                raise ValueError("Specify a Gaussian counter charge or compensating_jellium, not both")
+            config.properties["counter_charge"] = 0.
+        elif profile and config.properties.get("counter_charge_width") is None:
+            config.properties["counter_charge_width"] = self.counter_charge_width
         data_loader = torch_geometric.dataloader.DataLoader(
             dataset=[
                 mace_scf.data.ExtAtomicData.from_config(
@@ -418,10 +429,6 @@ class MACEFixedPointSCF(Calculator):
             if self.compensating_jellium:
                 batch_dict["counter_charge"] = -batch_dict["total_charge"]
                 batch_dict["counter_slab_bounds"] = batch_dict["positions"].new_tensor(self.jellium_slab_bounds).reshape(1,2)
-            elif "counter_charge_center" in self.atoms.info:
-                batch_dict["counter_charge"] = batch_dict["positions"].new_tensor(self.atoms.info.get("counter_charge", 0.)).reshape(1)
-                batch_dict["counter_charge_center"] = batch_dict["positions"].new_tensor(self.atoms.info["counter_charge_center"]).reshape(1,3)
-                batch_dict["counter_charge_width"] = batch_dict["positions"].new_tensor([self.counter_charge_width])
             return self.runner.eval(self.model,batch_dict,compute_force=True)
         if self.compiled_evaluator is not None:
             return self.compiled_evaluator.evaluate(batch_dict)
@@ -585,16 +592,26 @@ class MACEFixedPointSCF(Calculator):
             output["fermi_level"].detach().cpu().item()
         )
 
+    def _control_keys(self):
+        return (self.total_charge_key, self.external_field_key, self.fermi_level_key,
+                *[f"{prefix}_{axis}frac" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
+                *COUNTER_CHARGE_KEYS)
+
     def check_state(self, atoms, tol=1.e-15):
         changes = super().check_state(atoms, tol=tol)
         if self.atoms is not None:
-            for key in (self.total_charge_key, self.external_field_key, self.fermi_level_key, *[f"{prefix}_{axis}frac" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"], "counter_charge", "counter_charge_center"):
+            for key in self._control_keys():
                 if not np.array_equal(np.asarray(atoms.info.get(key)), np.asarray(self.atoms.info.get(key))):
                     changes.append(key)
         return changes
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         Calculator.calculate(self, atoms, system_changes=system_changes)
+        # ASE shallow-copies info. Snapshot mutable controls so an in-place
+        # source-center or applied-field change cannot reuse stale observables.
+        for key in self._control_keys():
+            if key in self.atoms.info:
+                self.atoms.info[key] = deepcopy(self.atoms.info[key])
 
         batch = self._build_batch(atoms)
         restart_state = self._resolve_restart_state(atoms, batch)

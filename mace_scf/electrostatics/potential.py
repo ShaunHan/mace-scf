@@ -219,8 +219,15 @@ class SpectralGeometry:
         # An absent counter-charge has no energy/force graph through proto.
         self.counter = torch.zeros_like(self.proto)
         self.counter_energy = torch.zeros_like(self.volume)
-        if "counter_charge" in data:
+        counter_width = data.get("counter_charge_width")
+        has_counter = ("counter_slab_bounds" in data or
+                       (counter_width is not None and bool((counter_width > 0).any())))
+        if "counter_charge" in data and not has_counter and bool((data["counter_charge"] != 0).any()):
+            raise ValueError("A nonzero counter charge requires a specified spatial profile")
+        if "counter_charge" in data and has_counter:
             counter = data["counter_charge"].reshape(-1)
+            if not bool(torch.isfinite(counter).all()):
+                raise ValueError("Counter charges must be finite")
             if "counter_slab_bounds" in data:
                 bounds = data["counter_slab_bounds"].reshape(-1, 2)
                 width = bounds[:, 1]-bounds[:, 0]
@@ -235,10 +242,18 @@ class SpectralGeometry:
             else:
                 center = data["counter_charge_center"].reshape(-1, 3)
                 width = data["counter_charge_width"].reshape(-1)
-                if bool((width<=0).any()):
+                if not bool(torch.isfinite(width).all()) or bool(((width<=0) & (counter!=0)).any()) or bool((width<0).any()):
                     raise ValueError("Counter-charge Gaussian widths must be positive")
+                width = torch.where(width > 0, width, 1.)
                 phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
                 profile = torch.exp(-.5*self.k2*width[:, None].square())
+                fraction = data.get("counter_charge_fraction", counter.new_full(counter.shape, -1.)).reshape(-1)
+                sheet = fraction >= 0.
+                if bool((sheet & (~self.slab | (fraction >= 1.))).any()):
+                    raise ValueError("Counter-charge sheet fractions need a slab and a value in [0, 1)")
+                phase_counter = torch.where(sheet[:, None], -2*math.pi*self.order*fraction[:, None], phase_counter)
+                planar = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
+                profile = profile*torch.where(sheet[:, None], planar, True)
             self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
             counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
             self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)

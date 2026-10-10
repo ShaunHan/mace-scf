@@ -796,6 +796,26 @@ def test_residual_mixing_exact_budget_padding_and_derivatives():
     assert torch.autograd.gradgradcheck(fn,(b,),eps=1.e-6,atol=2.e-5,rtol=2.e-3)
 
 
+def test_history_fit_stays_conditioned_for_nearly_coincident_residuals():
+    from mace_scf.electrostatics.coupled import residual_mixing_weight
+    # A small secant does not establish a small physical residual. Dividing
+    # only by its squared norm amplifies derivatives by its inverse size.
+    current = torch.tensor([[[1., 0.]]], dtype=torch.float64, requires_grad=True)
+    previous = torch.tensor([[[1.-1.e-12, 1.e-5]]], dtype=torch.float64, requires_grad=True)
+    floor = torch.full((1,1,1), torch.finfo(current.dtype).eps, dtype=current.dtype)
+    function = lambda r, old: residual_mixing_weight(r, old, floor*0., floor)
+    weight = function(current, previous)
+    first = torch.autograd.grad(weight.sum(), (current, previous), create_graph=True)
+    assert max(float(d.detach().abs().max()) for d in first) < 1.
+    second = torch.autograd.grad(sum(d.square().sum() for d in first), (current, previous))
+    assert all(torch.isfinite(d).all() for d in second)
+    # Scaling the physical state or adding padded atoms cannot change the fit.
+    torch.testing.assert_close(function(current*10., previous*10.), weight, atol=1.e-14, rtol=1.e-10)
+    for r, old in ((current+.2, previous),):
+        assert torch.autograd.gradcheck(function, (r, old), eps=1.e-6, atol=2.e-6)
+        assert torch.autograd.gradgradcheck(function, (r, old), eps=1.e-6, atol=2.e-5)
+
+
 
 @pytest.mark.parametrize('checkpointed',[False,True])
 def test_finite_safety_checks_include_intermediate_proposals(checkpointed):

@@ -28,6 +28,42 @@ import numpy as np
 
 
 _ATOMIC_DATA_PARAMETERS = inspect.signature(AtomicData.__init__).parameters
+COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charge_width",
+                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
+
+
+def counter_charge_data(properties, pbc):
+    """Read a prescribed Gaussian source, independently of electronic labels.
+
+    One axis fraction defines a Gaussian sheet along the open cell direction.
+    A Cartesian center instead defines a localized three-dimensional Gaussian.
+    Zero width is an internal marker for an absent source, never a user width.
+    """
+    charge = float(properties.get("counter_charge") or 0.)
+    center = properties.get("counter_charge_center")
+    plane = any(properties.get(f"counter_charge_{axis}frac") is not None for axis in "xyz")
+    if not np.isfinite(charge):
+        raise ValueError("counter_charge must be finite, in elementary charge units")
+    if plane and center is not None:
+        raise ValueError("Use a counter-charge plane fraction or a Cartesian center, not both")
+    fraction, width = -1., 0.
+    if plane or center is not None:
+        width = properties.get("counter_charge_width")
+        width = 1. if width is None else float(width)
+        if not np.isfinite(width) or width <= 0.:
+            raise ValueError("counter_charge_width must be a positive finite Gaussian sigma in Angstrom")
+        if plane:
+            if np.asarray(pbc, dtype=bool).sum() != 2:
+                raise ValueError("A counter-charge sheet requires exactly one nonperiodic cell direction")
+            fraction = plane_fraction(properties, "counter_charge", pbc)
+    elif charge != 0. or properties.get("counter_charge_width") is not None:
+        raise ValueError("A counter charge requires counter_charge_center or counter_charge_xfrac/yfrac/zfrac")
+    center = np.zeros(3) if center is None else np.asarray(center, dtype=float)
+    if center.shape != (3,) or not np.isfinite(center).all():
+        raise ValueError("counter_charge_center must contain three finite Cartesian coordinates")
+    return {key: torch.as_tensor(value, dtype=torch.get_default_dtype()) for key, value in {
+        "counter_charge": charge, "counter_charge_center": center[None],
+        "counter_charge_width": width, "counter_charge_fraction": fraction}.items()}
 
 def plane_fraction(properties, prefix, pbc):
     """Read one fractional cell-axis plane, consistent with slab periodicity."""
@@ -86,6 +122,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
         "potcar_match_key",
         "vacuum_potential_weight_key",
+        *[f"{key}_key" for key in COUNTER_CHARGE_KEYS],
     ]
     arrays = [
         "forces_key",
@@ -94,7 +131,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "hardness_key",
         "atomic_multipoles_key",
     ]
-    info_keys = {}
+    info_keys = {key: keyspec.info_keys.get(key, key) for key in COUNTER_CHARGE_KEYS}
     arrays_keys = {}
     for key in infos:
         if key in keydict:
@@ -132,6 +169,10 @@ class ExtAtomicData(AtomicData):
     vacuum_fraction: torch.Tensor
     dipole_correction_fraction: torch.Tensor
     potcar_match: torch.Tensor
+    counter_charge: torch.Tensor
+    counter_charge_center: torch.Tensor
+    counter_charge_width: torch.Tensor
+    counter_charge_fraction: torch.Tensor
 
     def __init__(
         self,
@@ -190,6 +231,8 @@ class ExtAtomicData(AtomicData):
         vacuum_fraction = kwargs.pop("vacuum_fraction", None)
         dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
         potcar_match = kwargs.pop("potcar_match", None)
+        counter = {key: kwargs.pop(key, None) for key in
+                   ("counter_charge", "counter_charge_center", "counter_charge_width", "counter_charge_fraction")}
         # MACE-develop added required, optional-valued magnetic targets.
         for key in ("magforces_weight", "magmom", "magforces"):
             if key in _ATOMIC_DATA_PARAMETERS:
@@ -252,6 +295,7 @@ class ExtAtomicData(AtomicData):
             "vacuum_fraction": vacuum_fraction,
             "dipole_correction_fraction": dipole_correction_fraction,
             "potcar_match": potcar_match,
+            **counter,
         }
         for key, value in data.items():
             setattr(self, key, value)
@@ -579,4 +623,5 @@ class ExtAtomicData(AtomicData):
             vacuum_fraction=vacuum_fraction,
             dipole_correction_fraction=dipole_correction_fraction,
             potcar_match=potcar_match,
+            **counter_charge_data(config.properties, pbc),
         )

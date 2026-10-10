@@ -709,12 +709,30 @@ def _stopping_residual(function, state, args, proposal):
     return proposal-state if physical is None else physical(state,*args)
 
 
+def residual_mixing_weight(current, previous, old_weight, floor):
+    """Residual-scaled regularization of the two-history least-squares fit.
+
+    Minimize ||r-w*(r-r_old)||^2 + (||r||^2+||r_old||^2)*w^2
+    + floor*(w-w_old)^2 on [0,1]. The Gram trace controls the conditioning
+    when consecutive residuals become parallel, even far from a root.
+    A machine-precision floor alone leaves almost coincident residuals with
+    arbitrarily sensitive history weights and hence spurious force spikes.
+    All residual derivatives remain attached, including double backward.
+    """
+    axes = tuple(range(1, current.ndim))
+    difference = current-previous
+    scale = (current.square()+previous.square()).sum(axes, keepdim=True)
+    numerator = (current*difference).sum(axes, keepdim=True)+floor*old_weight
+    denominator = difference.square().sum(axes, keepdim=True)+scale+floor
+    return (numerator/denominator).clamp(0., 1.)
+
+
 def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
     """Differentiate a finite, two-history convex residual-mixing trajectory.
 
     Each step evaluates the same screened constitutive map once. The next
     state is a convex combination of the last two ordinarily mixed proposals,
-    minimizing their linear residual estimate independently for each graph.
+    regularizing their linear residual estimate independently for each graph.
     This suppresses oscillatory feedback without extrapolating outside those
     proposals, changing the charge law, or changing the requested step count.
     It is not a convergence theorem for an arbitrary nonlinear learned map.
@@ -744,9 +762,7 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
                 peaks.append(proposed.detach().abs().amax(axes))
                 current = proposed-value
                 mixed = value+mixing*current
-                difference = current-old_residual
-                weight = (((current*difference).sum(axes, keepdim=True)+floor*weight)
-                          / (difference.square().sum(axes, keepdim=True)+floor)).clamp(0., 1.)
+                weight = residual_mixing_weight(current, old_residual, weight, floor)
                 value = (1.-weight)*mixed+weight*old_proposal
                 old_proposal, old_residual = mixed, current
             # Check EVERY proposal before observations/backward, with one
