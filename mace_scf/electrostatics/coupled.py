@@ -704,29 +704,50 @@ def _stopping_residual(function, state, args, proposal):
     return proposal-state if physical is None else physical(state,*args)
 
 
-def secant_relaxation(displacement, residual_change, previous, mixing, floor):
-    """Smooth step reduction for a large local residual slope, per graph.
+def residual_mixing_weight(current, previous, old_weight, floor):
+    """Residual-scaled regularization of the two-history least-squares fit.
 
-    Away from roundoff this is mixing/sqrt(1+(mixing*L)**2), where
-    L=||delta residual||/||delta state||. The configured mixing is an upper
-    bound. Retain the preceding step when the secant is unresolved instead
-    of restoring a potentially unstable large step at a root. Every derivative
-    remains attached; no residual/state clipping or extra map evaluation.
+    Minimize ||r-w*(r-r_old)||^2 + (||r||^2+||r_old||^2)*w^2
+    + floor*(w-w_old)^2 on [0,1]. The Gram trace controls the conditioning
+    when consecutive residuals become parallel, even far from a root.
+    A machine-precision floor alone leaves almost coincident residuals with
+    arbitrarily sensitive history weights and hence spurious force spikes.
+    All residual derivatives remain attached, including double backward.
+    """
+    axes = tuple(range(1, current.ndim))
+    difference = current-previous
+    scale = (current.square()+previous.square()).sum(axes, keepdim=True)
+    numerator = (current*difference).sum(axes, keepdim=True)+floor*old_weight
+    denominator = difference.square().sum(axes, keepdim=True)+scale+floor
+    return (numerator/denominator).clamp(0., 1.)
+
+
+def secant_relaxation(displacement, residual_change, previous, mixing, floor):
+    """Retain the requested step for resolved, mild response slopes.
+
+    The dimensionless secant ratio is r=mixing**2*||dr||**2/||dx||**2.
+    A C2 positive-part transition leaves r<=1 untouched and approaches the
+    inverse secant norm for large r. This restores ordinary mixed proposals
+    where safe, rather than damping every finite electronic update. Retain
+    the previous step when the secant is unresolved at floating precision.
     """
     axes = tuple(range(1, displacement.ndim))
     dx = displacement.square().sum(axes, keepdim=True)
-    dr = residual_change.square().sum(axes, keepdim=True)
+    dr = mixing**2*residual_change.square().sum(axes, keepdim=True)
+    excess = (dr-dx).clamp_min(0.)
+    stabilizer = excess*(excess/(dr+floor)).square()
     return torch.sqrt((mixing**2*dx+floor*previous.square()) /
-                      (dx+mixing**2*dr+floor))
+                      (dx+stabilizer+floor))
 
 
 def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
-    """Differentiate a finite trajectory with smooth secant relaxation.
+    """Differentiate the earlier two-history trajectory with a slope safeguard.
 
-    The same physical map is evaluated exactly once per requested update.
-    A large measured residual slope reduces the numerical step, preserving
-    charge and fixed points. The method is not a convergence theorem for an
-    arbitrary learned map, nor a guarantee of monotonic validation errors.
+    Preserve the original convex residual mixing and requested step for mild
+    local response. Reduce only an overly stiff mixed proposal using its
+    measured secant. Both history coefficients and the safeguard remain in
+    autograd, including force derivatives. Evaluate the physical map exactly
+    once per requested step; neither the charge law nor its fixed point changes.
     """
     limit = _trajectory_scale(initial)
     axes = tuple(range(1, initial.ndim))
@@ -735,23 +756,26 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
     _check_trajectory(proposal, limit, 1, 'finite-step proposal')
     residual = proposal-initial
     state = initial+mixing*residual
-    previous = initial
-    weight = torch.full_like(floor, mixing)
+    previous_state, previous_proposal = initial, state
+    weight = torch.zeros_like(floor)
+    relaxation = torch.full_like(floor, mixing)
     block_size = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
     for start in range(1, int(steps), block_size):
         length = min(block_size, int(steps)-start)
-        def advance(value, old_state, old_residual, weight, *fixed, count=length, offset=start):
+        def advance(value, old_state, old_proposal, old_residual, weight, relaxation,
+                    *fixed, count=length, offset=start):
             peaks = []
             for iteration in range(count):
                 proposed = function(value, *fixed)
                 peaks.append(proposed.detach().abs().amax(axes))
                 current = proposed-value
-                weight = secant_relaxation(value-old_state, current-old_residual,
-                                          weight, mixing, floor)
-                old_state, old_residual = value, current
-                value = value+weight*current
-            # Check EVERY proposal before observations/backward, with one
-            # host synchronization per block instead of one per SCF step.
+                relaxation = secant_relaxation(value-old_state, current-old_residual,
+                                               relaxation, mixing, floor)
+                mixed = value+relaxation*current
+                weight = residual_mixing_weight(current, old_residual, weight, floor)
+                old_state = value
+                value = (1.-weight)*mixed+weight*old_proposal
+                old_proposal, old_residual = mixed, current
             peaks = torch.stack(peaks)
             invalid = (~torch.isfinite(peaks)) | (peaks > limit)
             if bool(invalid.any()):
@@ -761,11 +785,13 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
                     f'max|state|={float(peaks[iteration,graph]):.6e}, '
                     f'fixed initial-scale precision budget={float(limit):.6e}. '
                     'No state was clipped or substituted.')
-            return value, old_state, old_residual, weight
-        state, previous, residual, weight = (checkpoint(advance, state, previous, residual, weight, *args,
-            use_reentrant=False, preserve_rng_state=False) if checkpointed else
-            advance(state, previous, residual, weight, *args))
+            return value, old_state, old_proposal, old_residual, weight, relaxation
+        values = (state, previous_state, previous_proposal, residual, weight, relaxation, *args)
+        state, previous_state, previous_proposal, residual, weight, relaxation = (
+            checkpoint(advance, *values, use_reentrant=False, preserve_rng_state=False)
+            if checkpointed else advance(*values))
     return state
+
 
 def _norm(x):
     return torch.linalg.vector_norm(x.reshape(-1))
@@ -1307,7 +1333,12 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                      constant_charge=True, compute_stress=False, mode=None, mixing=None,
                      tolerance=1.e-7, reference_conditioning=False):
-    """Return the selected finite trajectory or a verified constitutive root."""
+    """Return electronic observables and the energy fitted to the energy label.
+
+    For electronic free-energy labels, ``energy`` represents that free energy.
+    Forces are its negative total position derivative, including the electronic
+    response, at fixed charge, cell and prescribed external controls.
+    """
     if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
         raise ValueError('Unknown reference-conditioning observation')
     with torch.set_grad_enabled(training or compute_force or compute_stress or torch.is_grad_enabled()):

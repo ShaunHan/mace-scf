@@ -15,6 +15,35 @@ from mace_scf.electrostatics.loss import WeightedLoss, WeightedVacuumPotential
 from tests.test_coupled_response import coupled_model
 from tests.test_spectral_response import small_data
 
+
+def test_counter_source_cartesian_export_roundtrip(tmp_path):
+    import json
+    import runpy
+    from pathlib import Path
+    from ase.io import read
+    from mace_scf.data.new_atomic_data import COUNTER_CHARGE_KEYS
+    script = Path(__file__).resolve().parents[1]/'scripts/export_counter_charge_frame.py'
+    atoms = Atoms('OH', positions=[[3., 3., 4.], [3.5, 3., 4.5]], cell=[7., 7., 12.], pbc=[1, 1, 0])
+    atoms.info.update(counter_charge=-.1, counter_charge_center=np.array([2., 3., 9.]),
+                      counter_charge_width=.3, total_charge=.1, vacuum_zfrac=.8,
+                      dipole_correction_zfrac=.5, vacuum_potential=8., fermi_level=4.)
+    atoms.set_array('model_forces', np.ones((2, 3)))
+    destination = tmp_path/'dft'
+    runpy.run_path(str(script))['export_frame'](atoms, destination)
+    controls = json.loads((destination/'counter_charge.json').read_text())
+    assert controls['counter_charge_center'] == [2., 3., 9.]
+    assert controls['counter_charge_width'] == .3
+    assert 'vacuum_potential' not in controls and 'fermi_level' not in controls
+    recovered = read(destination/'frame.xyz')
+    assert 'model_forces' not in recovered.arrays
+    assert 'model_forces' in atoms.arrays and 'vacuum_potential' in atoms.info
+    np.testing.assert_array_equal(recovered.pbc, atoms.pbc)
+    graph = ExtAtomicData.from_config(config_from_atoms(recovered,
+        key_specification=KeySpecification(info_keys={k:k for k in COUNTER_CHARGE_KEYS})),
+        z_table=AtomicNumberTable([1, 8]), cutoff=4., atomic_multipoles_max_l=1)
+    torch.testing.assert_close(graph.counter_charge_center, torch.tensor([[2., 3., 9.]]))
+
+
 @pytest.mark.parametrize('axis',range(3))
 @pytest.mark.parametrize('center',[0.,.5])
 def test_slab_images_preserve_neighbors_observables_and_forces(axis,center):

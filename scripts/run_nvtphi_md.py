@@ -22,9 +22,9 @@ TARGET_POTENTIAL = 4.50
 VOLTAGE_MODE = "relative"  # initial-structure reference for the derived potential
 REFERENCE_POTENTIAL = 4.50  # physical potential assigned to the initial structure
 
-# Change all three suffixes to xfrac or yfrac for a different open cell axis.
-PLANE_FRACTIONS = {"vacuum_zfrac": 0.75, "dipole_correction_zfrac": 0.50,
-                   "counter_charge_zfrac": 0.35}
+# Change both suffixes to xfrac or yfrac for a different open cell axis.
+PLANE_FRACTIONS = {"vacuum_zfrac": 0.75, "dipole_correction_zfrac": 0.50}
+COUNTER_CHARGE_CENTER = [0.0, 0.0, 10.0]  # Cartesian Angstrom; set for your solvent region
 INITIAL_COUNTER_CHARGE = 0.0
 GAUSSIAN_WIDTH = 1.0
 
@@ -61,19 +61,19 @@ def main() -> None:
     atoms = read(ATOMS_FILE, index=-1)
     axes = [i for i, letter in enumerate("xyz")
             if set(PLANE_FRACTIONS) == {f"{prefix}_{letter}frac" for prefix in
-                                      ("vacuum", "dipole_correction", "counter_charge")}]
+                                      ("vacuum", "dipole_correction")}]
     if len(axes) != 1:
-        raise ValueError("Choose vacuum, dipole-correction and counter-charge planes on the same cell axis")
+        raise ValueError("Choose vacuum and dipole-correction planes on the same cell axis")
     axis = axes[0]
     atoms.pbc = True
     atoms.pbc[axis] = False
-    for prefix in ("vacuum", "dipole_correction", "counter_charge"):
+    for prefix in ("vacuum", "dipole_correction"):
         for letter in "xyz":
             atoms.info.pop(f"{prefix}_{letter}frac", None)
     atoms.info.update(PLANE_FRACTIONS)
-    atoms.info.pop("counter_charge_center", None)
     atoms.info.update(
         counter_charge=float(INITIAL_COUNTER_CHARGE),
+        counter_charge_center=np.asarray(COUNTER_CHARGE_CENTER, dtype=float),
         total_charge=-float(INITIAL_COUNTER_CHARGE),
         counter_charge_width=GAUSSIAN_WIDTH,
         external_field=np.zeros(3, dtype=float),

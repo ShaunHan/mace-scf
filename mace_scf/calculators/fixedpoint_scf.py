@@ -343,8 +343,7 @@ class MACEFixedPointSCF(Calculator):
             key_specification=self.keyspec,
             head_name=self.head,
         )
-        profile = (config.properties.get("counter_charge_center") is not None or
-                   any(config.properties.get(f"counter_charge_{axis}frac") is not None for axis in "xyz"))
+        profile = config.properties.get("counter_charge_center") is not None
         if self.compensating_jellium:
             if profile:
                 raise ValueError("Specify a Gaussian counter charge or compensating_jellium, not both")

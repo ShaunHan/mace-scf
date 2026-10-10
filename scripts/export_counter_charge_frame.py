@@ -20,7 +20,7 @@ def export_frame(atoms, directory):
     Its potential, ionic energy/force corrections and slab boundaries must be
     included when obtaining the reference labels. This function does not run DFT.
     """
-    source = counter_charge_data(atoms.info, atoms.pbc)
+    source = counter_charge_data(atoms.info)
     if float(source['counter_charge_width']) == 0.:
         raise ValueError('The frame has no specified counter-charge profile')
     keys = (*COUNTER_CHARGE_KEYS, 'total_charge', 'external_field',

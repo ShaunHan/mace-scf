@@ -432,6 +432,8 @@ class WeightedLoss(torch.nn.Module):
         self.loss_weights = {}
         self.loss_fns = {}
         weights_and_options = deepcopy(_weights_and_options)
+        self.definition = {name: deepcopy(value) if isinstance(value, dict) else {'weight': value}
+                           for name, value in weights_and_options.items()}
         for name, options in weights_and_options.items():
             if not name in _LOSS_FUNCTIONS:
                 raise ValueError(f"requested `{name}` in loss, which is not recognised")

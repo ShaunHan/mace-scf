@@ -333,6 +333,99 @@ def test_raw_resume_and_ema_deployment_are_distinct(tmp_path):
         torch.testing.assert_close(a,b,rtol=0,atol=0)
 
 
+@pytest.mark.parametrize('recorded,weight,relative,recheck', [
+    (True, 100, True, False), (True, 500, True, True),
+    (True, 100, False, True), (False, 100, True, True)])
+def test_resume_rescores_changed_loss_without_resetting_training_state(
+        tmp_path, monkeypatch, recorded, weight, relative, recheck):
+    import importlib
+    from copy import deepcopy
+    from mace_scf.electrostatics.loss import WeightedLoss
+    module = importlib.import_module('mace_scf.utils.train')
+    model = torch.nn.Linear(2, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    ema = ExponentialMovingAverage(model.parameters(), decay=.99)
+    model(torch.ones(2)).square().sum().backward(); optimizer.step(); ema.update()
+    state = CheckpointState(model, optimizer, scheduler)
+    old = WeightedLoss({'dipole':100, 'fermi_level':{'weight':100, 'relative':True}})
+    handler = CheckpointHandler(directory=str(tmp_path), tag='objective', keep=True, ema=ema)
+    handler.loss_definition = old.definition if recorded else None
+    handler.best_loss, handler.best_epoch = .01, 5
+    handler.save(state, 5); handler.save_progress(state, 5)
+    restored = CheckpointHandler(directory=str(tmp_path), tag='objective', keep=True, ema=ema)
+    assert restored.load_latest(state, device='cpu') == 5
+    raw = [p.detach().clone() for p in model.parameters()]
+    moments = deepcopy(optimizer.state_dict())
+    shadows = [p.clone() for p in ema.shadow_params]
+    rng = torch.random.get_rng_state()
+    calls = []
+    optimizer_modes = []
+    optimizer.eval = lambda: optimizer_modes.append('eval')
+    monkeypatch.setattr(module, 'calibrate_scalar_references', lambda *a:None)
+    def evaluate(*args):
+        assert optimizer_modes == ['eval']
+        calls.append(True); torch.rand(4); np.random.rand(); random.random()
+        return 10., {'scf_residual_max':0.}
+    monkeypatch.setattr(module, 'evaluate', evaluate)
+    loss = WeightedLoss({'dipole':weight, 'fermi_level':{'weight':100, 'relative':relative}})
+    module._resume_loss_baseline(model, None, loss, [], [], optimizer, scheduler, restored, ema, 'cpu')
+    assert len(calls) == int(recheck)
+    assert optimizer_modes == (['eval'] if recheck else [])
+    assert restored.best_loss == (10. if recheck else .01)
+    assert restored.best_epoch == 5 and restored.loss_definition == loss.definition
+    torch.testing.assert_close(torch.random.get_rng_state(), rng, rtol=0, atol=0)
+    for actual, expected in zip(model.parameters(), raw):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for actual, expected in zip(ema.shadow_params, shadows):
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    for key, record in moments['state'].items():
+        for name, value in record.items():
+            torch.testing.assert_close(optimizer.state_dict()['state'][key][name], value, rtol=0, atol=0)
+    module._resume_loss_baseline(model, None, loss, [], [], optimizer, scheduler, restored, ema, 'cpu')
+    assert len(calls) == int(recheck)
+
+
+def test_recovered_best_marker_uses_latest_objective_metadata(tmp_path):
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=.001)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer)
+    handler = CheckpointHandler(directory=str(tmp_path), tag='rescaled', keep=True)
+    state = CheckpointState(model, optimizer, scheduler)
+    handler.best_loss, handler.best_epoch = .01, 2
+    handler.loss_definition = {'dipole':{'weight':100}}
+    handler.save(state, 2)
+    handler.best_loss, handler.best_epoch = 4., 6
+    handler.loss_definition = {'dipole':{'weight':1000}}
+    handler.save(state, 6)
+    handler.progress_path.with_suffix('.best').unlink()
+    deployment = CheckpointHandler(directory=str(tmp_path), tag='rescaled', keep=True, deployment=True)
+    assert deployment.load_latest(state, device='cpu') == 6
+    assert deployment.best_loss == 4.
+
+
+@pytest.mark.parametrize('raises', [False, True])
+def test_failed_resume_rescore_keeps_selection_and_rng(monkeypatch, raises):
+    import importlib
+    from types import SimpleNamespace
+    from mace_scf.electrostatics.loss import WeightedLoss
+    module = importlib.import_module('mace_scf.utils.train')
+    old = {'dipole':{'weight':100}}
+    handler = SimpleNamespace(loss_definition=old, loaded_epoch=5, best_epoch=5, best_loss=.1)
+    monkeypatch.setattr(module, 'calibrate_scalar_references', lambda *a:None)
+    def fail(*args):
+        torch.rand(4)
+        if raises:raise RuntimeError('reference evaluation failed')
+        return float('nan'), {}
+    monkeypatch.setattr(module, 'evaluate', fail)
+    rng = torch.random.get_rng_state()
+    with pytest.raises(RuntimeError if raises else FloatingPointError):
+        module._resume_loss_baseline(None, None, WeightedLoss({'dipole':1000}), [], [],
+                                     None, None, handler, None, 'cpu')
+    assert handler.loss_definition == old and handler.best_epoch == 5 and handler.best_loss == .1
+    torch.testing.assert_close(torch.random.get_rng_state(), rng, rtol=0, atol=0)
+
+
 def test_validation_restores_frozen_parameters_after_failure():
     model = torch.nn.Linear(2, 1)
     model.bias.requires_grad_(False)

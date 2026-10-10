@@ -386,6 +386,73 @@ def test_counter_charge_adjoint_and_force(profile):
         result['forces'][1, 2:3], atol=2.e-7, rtol=2.e-5)
 
 
+@pytest.mark.parametrize('axis', range(3))
+def test_cartesian_counter_sheet_matches_plugin_gaussian_grid(axis):
+    model, data = small_model(), small_data()
+    data['external_field'].zero_()
+    data['pbc'] = torch.ones((1, 3), dtype=torch.bool)
+    data['pbc'][0, axis] = False
+    center = torch.tensor([[2.1, 2.4, 4.3]])
+    data.update(counter_charge=torch.tensor([-.2]), counter_charge_center=center,
+                counter_charge_width=torch.tensor([.3]))
+    geom = SpectralGeometry(model, data, data['positions'])
+    # Independent real-space Gaussian wall, as in the VASP plug-in example.
+    length = float(geom.length[0])
+    area = float(geom.volume[0])/length
+    grid = np.arange(4096)*length/4096
+    delta = grid-float(center[0, axis])
+    delta -= length*np.round(delta/length)
+    density = -.2*np.exp(-.5*(delta/.3)**2)/(area*np.sqrt(2*np.pi)*.3)
+    spectrum = torch.as_tensor(np.fft.fft(density)/len(grid))
+    modes = geom.modes.long()
+    planar = (modes[:, [i for i in range(3) if i != axis]] == 0).all(-1)
+    expected = spectrum[modes[:, axis].remainder(len(grid))]*planar*geom.mask[0]
+    torch.testing.assert_close(geom.counter_density[0], expected, atol=2.e-13, rtol=2.e-12)
+    # Center coordinates within the sheet cannot change its field or energy.
+    moved = dict(data)
+    moved['counter_charge_center'] = center.clone()
+    moved['counter_charge_center'][0, (axis+1)%3] += 1.7
+    lateral = SpectralGeometry(model, moved, data['positions'])
+    torch.testing.assert_close(lateral.counter, geom.counter, atol=2.e-12, rtol=2.e-12)
+    torch.testing.assert_close(lateral.counter_energy, geom.counter_energy)
+
+
+@pytest.mark.parametrize('axis', range(3))
+def test_counter_sheet_center_works_for_tilted_cells(axis):
+    model, data = small_model(), small_data()
+    data['external_field'].zero_()
+    data['cell'] = torch.tensor([[7., 0., 0.], [1., 8., 0.], [2., 1., 12.]])
+    data['pbc'] = torch.ones((1, 3), dtype=torch.bool)
+    data['pbc'][0, axis] = False
+    data.update(counter_charge=torch.tensor([.2]), counter_charge_width=torch.tensor([.8]),
+                counter_charge_center=(torch.tensor([[.3, .4, .6]])@data['cell']))
+    geom = SpectralGeometry(model, data, data['positions'])
+    moved = dict(data)
+    moved['counter_charge_center'] = data['counter_charge_center']+.37*data['cell'][(axis+1)%3]
+    lateral = SpectralGeometry(model, moved, data['positions'])
+    torch.testing.assert_close(lateral.counter, geom.counter, atol=2.e-12, rtol=2.e-12)
+    torch.testing.assert_close(lateral.counter_energy, geom.counter_energy)
+
+
+def test_counter_center_validation_and_bulk_gaussian():
+    from mace_scf.data.new_atomic_data import COUNTER_CHARGE_KEYS, counter_charge_data
+    assert COUNTER_CHARGE_KEYS == ('counter_charge', 'counter_charge_center', 'counter_charge_width')
+    assert counter_charge_data({})['counter_charge_width'] == 0.
+    for properties in ({'counter_charge':.1}, {'counter_charge_center':[1., 2.]},
+                       {'counter_charge_center':[1., 2., 3.], 'counter_charge_width':0.}):
+        with pytest.raises(ValueError):
+            counter_charge_data(properties)
+    model, data = small_model(), small_data()
+    data['pbc'] = torch.ones((1, 3), dtype=torch.bool)
+    data['external_field'].zero_()
+    data.update(counter_charge_data({'counter_charge':.2, 'counter_charge_center':[2., 3., 4.],
+                                     'counter_charge_width':.8}))
+    geom = SpectralGeometry(model, data, data['positions'])
+    phase = -(geom.wave*data['counter_charge_center'][:, None]).sum(-1)
+    expected = .2/geom.volume[:, None]*torch.exp(-.5*.8**2*geom.k2)*torch.exp(1j*phase)*geom.mask
+    torch.testing.assert_close(geom.counter_density, expected)
+
+
 def test_grand_canonical_conjugacy():
     model = small_model()
     fixed = evaluate_variational(model, small_data())

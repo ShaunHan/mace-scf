@@ -35,6 +35,8 @@ class CheckpointHandler(NativeCheckpointHandler):
         self.progress_path = Path(kwargs["directory"])/"resume"/(kwargs["tag"]+".pt")
         self.best_loss = float("inf")
         self.best_epoch = None
+        self.loss_definition = None
+        self.loaded_epoch = None
 
     def _mark_best(self, epoch):
         path = self.progress_path.with_suffix('.best')
@@ -56,6 +58,14 @@ class CheckpointHandler(NativeCheckpointHandler):
         records = [self.io._parse_checkpoint_path(p) for p in self.io._list_file_paths()]
         records = sorted((r for r in records if r and r.tag == self.io.tag and r.swa == swa),
                          key=lambda r: r.epochs)
+        if records:
+            latest = torch.load(records[-1].path, map_location='cpu', weights_only=False, mmap=True)
+            if 'best_epoch' in latest:
+                best = latest['best_epoch']
+                if best is None:
+                    return None
+                self._mark_best(best)
+                return directory/self.io._get_checkpoint_filename(best, self.io.swa_start)
         best, loss = None, float('inf')
         for record in records:
             value = torch.load(record.path, map_location='cpu', weights_only=False, mmap=True)
@@ -72,6 +82,7 @@ class CheckpointHandler(NativeCheckpointHandler):
         value["ema"] = None if self.ema is None else self.ema.state_dict()
         value["best_loss"] = self.best_loss
         value["best_epoch"] = self.best_epoch
+        value["loss_definition"] = self.loss_definition
         value["python_rng"] = random.getstate()
         value["numpy_rng"] = np.random.get_state()
         value["torch_rng"] = torch.random.get_rng_state()
@@ -126,6 +137,8 @@ class CheckpointHandler(NativeCheckpointHandler):
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         self.best_loss=value.get("best_loss",float("inf"))
         self.best_epoch=value.get("best_epoch")
+        self.loss_definition=value.get('loss_definition')
+        self.loaded_epoch=epoch
         if 'best_epoch' not in value and np.isfinite(self.best_loss):
             best_path = self._best_path(swa)
             if best_path is not None:
@@ -157,6 +170,8 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
           test_loaders=None, debug_log_grad_summary=False,
           debug_grad_log_frequency=None, wandb_watch="off"):
     """Train each stage without resetting Adam moments or the EMA trajectory."""
+    _resume_loss_baseline(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
+                          optimizer, lr_scheduler, checkpoint_handler, ema, device)
     best = getattr(checkpoint_handler, "best_loss", float("inf"))
     stalled = 0
     best_epoch = None
@@ -236,6 +251,38 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             logging.info("Stage early stopping after %d epochs without improvement", stalled)
             break
     return best_epoch
+
+
+def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
+                          optimizer, scheduler, handler, ema, device):
+    """Compare resumed checkpoints on the current objective's scale."""
+    from copy import deepcopy
+    definition = getattr(loss_fn, 'definition', None)
+    if definition is None:
+        return
+    changed = getattr(handler, 'loss_definition', None) != definition
+    epoch = getattr(handler, 'loaded_epoch', None)
+    if not changed or epoch is None:
+        handler.loss_definition = deepcopy(definition)
+        return
+    rng = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
+    cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
+    try:
+        if hasattr(optimizer, 'eval'):
+            optimizer.eval()
+        calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device)
+        value, metrics = evaluate(model, wrapper, loss_fn, ema, valid_loader, device)
+    finally:
+        random.setstate(rng[0]); np.random.set_state(rng[1]); torch.random.set_rng_state(rng[2])
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state(cuda_rng, device)
+    if not np.isfinite(value) or not np.isfinite(metrics.get('scf_residual_max', 0.)):
+        raise FloatingPointError('Nonfinite resumed validation baseline; checkpoint selection unchanged')
+    handler.loss_definition = deepcopy(definition)
+    handler.best_loss, handler.best_epoch = value, epoch
+    handler.save(CheckpointState(model, optimizer, scheduler), epoch, keep_last=True)
+    logging.info('Re-evaluated resumed epoch %d with the current loss definition: loss=%.6g. '
+                 'The previous loss definition differed or was not recorded; optimizer and EMA state are retained.', epoch, value)
 
 
 def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):

@@ -868,6 +868,37 @@ def test_secant_relaxation_preserves_unresolved_step_and_derivatives():
     assert torch.autograd.gradgradcheck(function,(dx,dr),eps=1.e-6,atol=2.e-5)
 
 
+@pytest.mark.parametrize('checkpointed', [False, True])
+def test_mild_response_restores_original_training_trajectory(checkpointed):
+    """Golden values and both derivatives from the earlier unmodified mixer."""
+    from mace_scf.electrostatics.coupled import unroll_steps
+    drive=torch.tensor([[[.2,-.4],[.1,.6]]],dtype=torch.float64,requires_grad=True)
+    result=unroll_steps(lambda x,b:-.25*torch.tanh(x)+b,
+                        torch.zeros_like(drive),(drive,),12,.5,checkpointed)
+    gradient=torch.autograd.grad(result.square().sum(),drive,create_graph=True)[0]
+    second=torch.autograd.grad(gradient.sum(),drive)[0]
+    expected=[[[.16027031211431758,-.3221363550120139],
+               [.08003345635587975,.48702730544531203]]]
+    expected_gradient=[[[.25773166595510455,-.5256052095853077],
+                        [.12821602823932,.8123910334389409]]]
+    expected_second=[[[1.3059018920417023,1.3802583160677038],
+                      [1.286513421911894,1.4927331092345444]]]
+    for actual,reference in ((result,expected),(gradient,expected_gradient),(second,expected_second)):
+        torch.testing.assert_close(actual,torch.tensor(reference,dtype=drive.dtype),atol=2.e-13,rtol=2.e-13)
+
+
+def test_slope_safeguard_is_smooth_at_activation():
+    from mace_scf.electrostatics.coupled import secant_relaxation
+    displacement=torch.ones(1,1,1,dtype=torch.float64)
+    change=torch.full_like(displacement,2.,requires_grad=True)
+    floor=torch.full_like(displacement,torch.finfo(displacement.dtype).eps)
+    previous=torch.full_like(displacement,.5)
+    function=lambda r:secant_relaxation(displacement,r,previous,.5,floor)
+    torch.testing.assert_close(function(change),previous,atol=1.e-15,rtol=0.)
+    assert torch.autograd.gradcheck(function,(change,),eps=1.e-6,atol=1.e-8)
+    assert torch.autograd.gradgradcheck(function,(change,),eps=1.e-6,atol=1.e-5)
+
+
 
 @pytest.mark.parametrize('checkpointed',[False,True])
 def test_finite_safety_checks_include_intermediate_proposals(checkpointed):

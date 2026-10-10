@@ -247,13 +247,12 @@ class SpectralGeometry:
                 width = torch.where(width > 0, width, 1.)
                 phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
                 profile = torch.exp(-.5*self.k2*width[:, None].square())
-                fraction = data.get("counter_charge_fraction", counter.new_full(counter.shape, -1.)).reshape(-1)
-                sheet = fraction >= 0.
-                if bool((sheet & (~self.slab | (fraction >= 1.))).any()):
-                    raise ValueError("Counter-charge sheet fractions need a slab and a value in [0, 1)")
-                phase_counter = torch.where(sheet[:, None], -2*math.pi*self.order*fraction[:, None], phase_counter)
+                # A slab source is uniform within its periodic plane, matching
+                # the Gaussian-wall external-potential convention. Its center
+                # is Cartesian; lateral translations leave every retained mode
+                # unchanged. Other boundary geometries retain a 3D Gaussian.
                 planar = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
-                profile = profile*torch.where(sheet[:, None], planar, True)
+                profile = profile*torch.where(self.slab[:, None], planar, True)
             self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
             counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
             self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
