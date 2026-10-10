@@ -152,6 +152,7 @@ class AtomicPotentialResponse(nn.Module):
                      'coarse_density_energy', 'geometry_charge_is_level', 'linear_induced_dipoles'):
             self.register_buffer(name, torch.tensor(True))
         self.source_channels=int(source_channels)
+        self.charge_response = 'field'
         self.field_channels=int(field_channels)
         self.density_width=float(density_width)
         self.vector_width=min(16,max(4,int(vector_channels)))
@@ -365,13 +366,14 @@ class AtomicPotentialResponse(nn.Module):
                                      electronic_reference,target)
         computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True,include_dipole=False)
         scalars, polar = computed[:2]
-        # With a learned completion potential, use ONE nonlinear electronic
-        # drive. Its evolving total field acts on the positive quadratic charge
-        # response; the geometry supplies the local electronegativity contrasts.
-        # A second field-dependent contrast would add an unscreened susceptibility
-        # on top of that same potential and defeat the exact moment solve.
-        # Density-only models retain their original field-dependent response.
-        chemical_level = (electronic_reference[...,0] if self.source_channels else
+        # The geometry reference conditions the descriptors; it does not replace
+        # the constitutive response to the evolving field. These contrasts let
+        # density and force supervision train the same electronic representation
+        # as the potential and chemical level. Screening removes the analytic
+        # Coulomb block, while this learned response remains in the fixed point.
+        # Preserve the law of already fitted geometry-response checkpoints.
+        geometry_charge = self.source_channels and getattr(self, 'charge_response', 'geometry') == 'geometry'
+        chemical_level = (electronic_reference[...,0] if geometry_charge else
                           attrs@self.species_level+scalars[...,0]+p0[...,0])
         softness=electronic_reference[...,1]
         levels=chemical_level+potential[...,0]
@@ -1055,7 +1057,8 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
-                'response_reference': getattr(self, 'response_reference', 'total')}
+                'response_reference': getattr(self, 'response_reference', 'total'),
+                'charge_response': getattr(self, 'charge_response', 'geometry')}
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -1076,6 +1079,10 @@ class CoupledResponse(AtomicPotentialResponse):
         if reference not in ('neutral', 'total'):
             raise ValueError(f'Unknown saved response reference {reference}')
         self.response_reference = reference
+        charge = state.get('charge_response', 'geometry')
+        if charge not in ('field', 'geometry'):
+            raise ValueError(f'Unknown saved charge response {charge}')
+        self.charge_response = charge
 
 class CoupledGeometry(SpectralGeometry):
     """Same Fourier support for the response, observers and moment screening."""
@@ -1494,6 +1501,8 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.field_scales_initialized.fill_(True)
     logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
                  r.response_reference, r.source_channels, r.receiver_widths.tolist())
+    logging.debug('Constitutive charge response: %s; stored in checkpoint metadata',
+                  getattr(r, 'charge_response', 'geometry'))
 
 @torch.no_grad()
 def initialize_reference(model, loader, device, options, loss_config):

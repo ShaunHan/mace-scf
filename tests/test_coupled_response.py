@@ -812,10 +812,11 @@ def test_finite_safety_checks_include_intermediate_proposals(checkpointed):
 
 @pytest.mark.parametrize('local_energy', [False, True])
 @pytest.mark.parametrize('functional', [False, True])
-def test_nonlinear_potential_has_an_exact_screened_charge_block(local_energy, functional):
-    """The nonlinear completion may change; it must not add a second charge law."""
+def test_geometry_response_checkpoint_keeps_its_exact_charge_block(local_energy, functional):
+    """Loading the previous law must not reinterpret its fitted parameters."""
     from mace_scf.electrostatics.coupled import prepare_coupled
     model = coupled_model(local_energy=local_energy)
+    model.field_dependent_charges_map.charge_response = 'geometry'
     data = small_data()
     with torch.no_grad():
         # A strong field-dependent NN must not destroy the linear charge solve.
@@ -832,3 +833,57 @@ def test_nonlinear_potential_has_an_exact_screened_charge_block(local_energy, fu
     defect = (raw[..., :4]-solved[..., :4]).square().sum()
     gradient = torch.autograd.grad(defect, model.field_dependent_charges_map.scalar_out.weight)[0]
     assert gradient.abs().max()<1.e-16
+
+
+def test_completion_does_not_disable_field_dependent_charge_contrasts():
+    from mace_scf.electrostatics.coupled import prepare_coupled
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    assert response.source_channels > 0 and response.charge_response == 'field'
+    data = small_data()
+    local = model.local_part(data, compute_force=False)
+    _, initial, args, _, evaluate = prepare_coupled(model, data, local)
+    state = initial+torch.randn_like(initial)*.1
+    result, _ = evaluate(state, *args, screened=False, observe=False)
+    contrast = (result[5]-args[7][..., -2])*args[4]
+    assert contrast.abs().max() > 1.e-8
+    derivative = torch.autograd.grad(contrast.square().sum(), response.state_scalar.weight)[0]
+    assert torch.isfinite(derivative).all() and derivative.abs().max() > 1.e-10
+    torch.testing.assert_close(result[0][..., 0].sum(-1), data['total_charge'], atol=1.e-12, rtol=0.)
+
+
+def test_charge_response_law_survives_loading_and_export(tmp_path):
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    state = model.state_dict()
+    restored = coupled_model()
+    restored.load_state_dict(state)
+    assert restored.field_dependent_charges_map.charge_response == 'field'
+    # The supplied geometry-response checkpoints predate this metadata key.
+    state['field_dependent_charges_map._extra_state'].pop('charge_response')
+    response.charge_response = 'geometry'
+    restored.load_state_dict(state)
+    assert restored.field_dependent_charges_map.charge_response == 'geometry'
+    before = evaluate_coupled(model, small_data(), steps=12)
+    after = evaluate_coupled(restored, small_data(), steps=12)
+    for key in ('energy', 'forces', 'fermi_level', 'vacuum_potential', 'fourier_density'):
+        torch.testing.assert_close(before[key], after[key], atol=1.e-12, rtol=1.e-10)
+    path = tmp_path/'model.pt'
+    torch.save(restored, path)
+    loaded = torch.load(path, weights_only=False)
+    assert loaded.field_dependent_charges_map.charge_response == 'geometry'
+    with pytest.raises(ValueError, match='charge response'):
+        response.set_extra_state({'charge_response': 'unknown'})
+
+
+def test_initial_charge_readout_preserves_both_response_laws():
+    model = coupled_model()
+    response = model.field_dependent_charges_map
+    with torch.no_grad():
+        response.scalar_out.weight[0].zero_()
+        response.scalar_out.bias[0].zero_()
+    field = evaluate_coupled(model, small_data(), steps=12)
+    response.charge_response = 'geometry'
+    geometry = evaluate_coupled(model, small_data(), steps=12)
+    for key in ('energy', 'forces', 'fermi_level', 'vacuum_potential', 'fourier_density'):
+        torch.testing.assert_close(field[key], geometry[key], atol=1.e-12, rtol=1.e-10)
