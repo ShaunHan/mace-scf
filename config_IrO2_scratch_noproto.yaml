@@ -93,12 +93,12 @@ train_schedule:
   1:
     name: stage2
     start: 50
-    end: 449
+    end: 349
     lr: 0.001
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 1000
+      dipole: 100
       fourier_density:
         weight: 10
         reference: farfield
@@ -120,13 +120,13 @@ train_schedule:
         use_autograd_forces: true
   2:
     name: stage3
-    start: 450
-    end: 500
+    start: 350
+    end: 400
     lr: 0.001
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 1000
+      dipole: 100
       fourier_density:
         weight: 10
         reference: farfield
