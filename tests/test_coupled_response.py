@@ -189,6 +189,40 @@ def test_absent_counter_charge_has_no_zero_times_proto_force_graph():
     assert torch.count_nonzero(geom.counter_energy) == 0
 
 
+def test_optional_proto_does_not_change_optimizer_trajectory():
+    """A spatial reference cannot silently change neutral E/F/scalar learning."""
+    from mace_scf.utils.train import take_step
+    from mace_scf.utils.model_training_wrappers import FixedPointWrapper
+    from mace_scf.electrostatics.fixed_point_state import FixedPointTrainingOptions, FixedPointSCFOptions
+    models = [coupled_model()]
+    models.append(deepcopy(models[0]))
+    models[1].field_dependent_charges_map.proto_fitted.fill_(True)
+    models[1].field_dependent_charges_map.proto_coefficients.copy_(torch.linspace(-80.,0.,64).expand(2,-1))
+    graphs = []
+    for i in range(3):
+        graph = small_data(charge=0., batched=False)
+        graph.positions[0,2] += .1*i
+        graph.fermi_level = torch.tensor(-.4+.01*i)
+        graph.fermi_level_weight = torch.tensor(1.)
+        graph.vacuum_potential = torch.tensor(.2-.02*i)
+        graph.vacuum_potential_weight = torch.tensor(1.)
+        graph.forces = torch.zeros_like(graph.positions)
+        graph.forces_weight = torch.tensor(1.)
+        graphs.append(graph)
+    batch = torch_geometric.Batch.from_data_list(graphs)
+    loss = WeightedLoss({'forces':500, 'fermi_level':100, 'vacuum_potential':100})
+    options = FixedPointTrainingOptions(mode='unroll_scf',
+        scf=FixedPointSCFOptions(num_scf_steps=4,mixing_parameter=.5))
+    optimizers = [torch.optim.AdamW(model.parameters(),lr=.001) for model in models]
+    wrappers = [FixedPointWrapper(optimizer,{'forces':True},options) for optimizer in optimizers]
+    for _ in range(3):
+        losses = [take_step(model,wrapper,loss,deepcopy(batch),optimizer,None,10.,'cpu')[0]
+                  for model,wrapper,optimizer in zip(models,wrappers,optimizers)]
+        torch.testing.assert_close(losses[0],losses[1],rtol=0.,atol=0.)
+        for first,second in zip(models[0].parameters(),models[1].parameters()):
+            torch.testing.assert_close(first,second,rtol=0.,atol=0.)
+
+
 @pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
 def test_neutral_proto_reference_preserves_response_and_wf(mode):
     model = coupled_model()

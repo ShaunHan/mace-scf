@@ -352,6 +352,10 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         logging.warning('A relative scalar loss needs at least two observed labels in an optimizer batch; '
                         'singleton batches contribute no scalar pair loss. Device microbatch size may still be one.')
         model_eval_wrapper._logged_relative_singleton = True
+    frequency = debug_grad_log_frequency
+    if (debug_log_grad_summary and logging.getLogger().isEnabledFor(logging.DEBUG)
+            and (opt_step == 0 or (frequency is not None and frequency > 0 and opt_step % frequency == 0))):
+        logging.debug('Optimizer gradient ownership before clipping: %s', _gradient_diagnostics(optimizer))
     norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
                                          error_if_nonfinite=True)
     norm_value = float(norm)
@@ -365,6 +369,24 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         ema.update()
     metrics["time"] = time.time()-start
     return loss.detach(), metrics
+
+
+def _gradient_diagnostics(optimizer):
+    """Measure existing gradients by owner, without another backward pass."""
+    report = []
+    for group in optimizer.param_groups:
+        parameters = [p for p in group['params'] if p.requires_grad]
+        present = [p for p in parameters if p.grad is not None]
+        count = sum(p.numel() for p in present)
+        squares = [torch.linalg.vector_norm(p.grad.detach()).square() for p in present]
+        squared_norm = float(torch.stack(squares).sum()) if squares else 0.
+        report.append({'group':group.get('name', str(len(report))), 'lr':float(group['lr']),
+            'trainable_values':sum(p.numel() for p in parameters), 'gradient_values':count,
+            'norm':squared_norm**.5, 'rms':(squared_norm/max(count,1))**.5})
+    total = sum(row['norm']**2 for row in report)
+    for row in report:
+        row['squared_norm_fraction'] = row['norm']**2/max(total,1.e-30)
+    return report
 
 
 def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device):
@@ -527,6 +549,7 @@ def _evaluate(
     scalar_metrics = {}
     wf_moments = []
     paired_scalar_moments = []
+    voltage_rows = []
     debug_stability = logging.getLogger().isEnabledFor(logging.DEBUG)
     force_outliers, residual_outliers, graph_offset = [], [], 0
 
@@ -599,6 +622,25 @@ def _evaluate(
                 vac = (output['vacuum_potential']-target)[use]
                 paired_scalar_moments.append(torch.stack(((ef*weight[use]).sum(),
                     (vac*weight[use]).sum(),(ef*vac*weight[use]).sum(),weight[use].sum())))
+                if debug_stability and bool(use.any()):
+                    from graph_longrange.utils import FIELD_CONSTANT
+                    cell = batch.cell.reshape(-1, 3, 3)
+                    pbc = batch.pbc.reshape(-1, 3).bool()
+                    axis = (~pbc).long().argmax(-1)
+                    rows = torch.arange(batch.num_graphs)
+                    normal = torch.linalg.cross(cell[rows, (axis+1)%3], cell[rows, (axis+2)%3])
+                    area = torch.linalg.vector_norm(normal, dim=-1)
+                    normal = normal/area[:, None]
+                    step_error = torch.full_like(weight, float('nan'))
+                    if output.get('dipole') is not None and batch.dipole is not None:
+                        observed = ((batch.dipole_weight.reshape(-1, 3)>0) | (normal.abs()<1.e-12)).all(-1)
+                        observed &= pbc.sum(-1) == 2
+                        delta = output['dipole'].reshape(-1, 3)-batch.dipole.reshape(-1, 3)
+                        step_error[observed] = (FIELD_CONSTANT*(delta*normal).sum(-1)/area)[observed]
+                    voltage_rows.extend({'index':graph_offset+i, 'weight':float(weight[i]),
+                        'wf_error':float(difference[i]), 'ef_error':float(output['fermi_level'][i]-batch.fermi_level[i]),
+                        'vacuum_error':float(output['vacuum_potential'][i]-target[i]),
+                        'dipole_step_error':float(step_error[i])} for i in torch.where(use)[0].tolist())
                 error = difference.square()
             else:
                 target, weight = vacuum_reference_weights(batch, output[key])
@@ -841,7 +883,34 @@ def _evaluate(
                       'WF bias=%.6g eV, maximum SCF residual=%.6g',
                       float(product/weight-ef*vac/weight.square()),
                       aux.get('wf_bias',0.),aux.get('scf_residual_max',0.))
+    if voltage_rows:
+        _voltage_diagnostics(voltage_rows, split)
     return avg_loss, aux
+
+
+def _voltage_diagnostics(rows, split):
+    """Reuse evaluation residuals; no extra model call or fitted correction."""
+    weight = np.array([row['weight'] for row in rows])
+    error = np.array([row['wf_error'] for row in rows])
+    error -= np.average(error, weights=weight)
+    contribution = weight*error**2
+    largest = np.argsort(-contribution)[:5]
+    logging.debug('%s largest relative WF contributions (zero-based evaluation indices): %s', split,
+        [{'index':rows[i]['index'], 'WF_error_meV':float(1000*error[i]),
+          'relative_WF_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
+          'EF_error_meV':1000*rows[i]['ef_error'],
+          'vacuum_error_meV':1000*rows[i]['vacuum_error']} for i in largest])
+    dipole = np.array([row['dipole_step_error'] for row in rows])
+    use = np.isfinite(dipole)
+    if np.count_nonzero(use)>1:
+        w = weight[use]
+        x, y = dipole[use], error[use]
+        x, y = x-np.average(x,weights=w), y-np.average(y,weights=w)
+        xx, yy, xy = (np.average(value,weights=w) for value in (x*x,y*y,x*y))
+        logging.debug('%s polarization diagnostic: centered dipole-step RMSE=%.6g meV, '
+                      'correlation with WF residual=%.6g; 4*pi*kappa*delta(D_normal)/area, '
+                      'observed slab components only, no prediction correction',
+                      split,1000*np.sqrt(xx),xy/max(np.sqrt(xx*yy),1.e-30))
 
 
 def valid_err_log(

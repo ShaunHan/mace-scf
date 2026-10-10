@@ -99,7 +99,7 @@ train_schedule:
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 10
+      dipole: 1000
       fourier_density:
         weight: 10
         reference: farfield
@@ -127,7 +127,7 @@ train_schedule:
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 10
+      dipole: 1000
       fourier_density:
         weight: 10
         reference: farfield

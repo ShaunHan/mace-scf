@@ -55,7 +55,10 @@ def install_foundation(model, foundation):
     shift = float(scale_shift.shift.reshape(-1)[0]) if scale_shift is not None else 0.
     model.register_buffer("foundation_energy_scale", torch.tensor(scale))
     model.register_buffer("foundation_energy_shift", torch.tensor(shift))
-    logging.info("Foundation: exact module adoption, %d species retained, native neighbour normalization preserved", len(source))
+    logging.info("Foundation: local backbone and energy readouts adopted, %d species retained, "
+                 "native neighbour normalization preserved; density and electronic response readouts initialize separately",
+                 len(source))
+    logging.debug("Realized foundation feature irreps: %s", model.products[0].linear.irreps_out)
 
 
 class FusedConvolution(torch.nn.Module):

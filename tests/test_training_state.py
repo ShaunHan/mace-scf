@@ -606,3 +606,76 @@ def test_stability_outliers_are_debug_only_and_do_not_change_metrics(caplog):
     assert "by force contribution=[{'index': 2" in debug[0]
     assert "by SCF residual=[{'index': 0" in debug[0]
     assert 'zero-based evaluation order' in debug[0]
+def test_voltage_diagnostics_center_once_and_preserve_input(caplog):
+    import logging
+    from copy import deepcopy
+    from mace_scf.utils.train import _voltage_diagnostics
+    rows = [{'index':i, 'weight':w, 'wf_error':e, 'ef_error':0.,
+             'vacuum_error':e, 'dipole_step_error':e-2.}
+            for i,(w,e) in enumerate(((1.,1.),(2.,3.),(1.,1.)))]
+    original = deepcopy(rows)
+    with caplog.at_level(logging.DEBUG):
+        _voltage_diagnostics(rows, 'validation')
+    assert rows == original
+    messages = [record.getMessage() for record in caplog.records]
+    assert "[{'index': 1" in messages[0]
+    assert "'relative_WF_SSE_fraction': 0.5" in messages[0]
+    assert 'correlation with WF residual=1;' in messages[1]
+
+def test_gradient_diagnostics_preserve_gradients_and_track_missing_owners():
+    import torch
+    from mace_scf.utils.train import _gradient_diagnostics
+    a = torch.nn.Parameter(torch.tensor([1., 2.]))
+    b = torch.nn.Parameter(torch.tensor([3.]))
+    a.grad = torch.tensor([3., 4.])
+    optimizer = torch.optim.AdamW([{'name':'field', 'params':[a]}, {'name':'local', 'params':[b]}], lr=.001)
+    report = _gradient_diagnostics(optimizer)
+    assert report[0]['norm'] == 5.
+    assert report[0]['squared_norm_fraction'] == 1.
+    assert report[0]['gradient_values'] == 2
+    assert report[1]['trainable_values'] == 1
+    assert report[1]['gradient_values'] == 0
+    torch.testing.assert_close(a.grad, torch.tensor([3., 4.]))
+    assert b.grad is None and not optimizer.state
+
+
+def test_voltage_diagnostics_reuse_evaluation_for_open_x_slabs(caplog):
+    import logging
+    from mace.tools import torch_geometric
+    from mace_scf.electrostatics.loss import WeightedLoss
+    graphs = [small_data(charge=float(i+1), batched=False) for i in range(3)]
+    for graph in graphs:
+        graph.pbc = torch.tensor([[False, True, True]])
+        graph.fermi_level_weight.fill_(1.)
+        graph.vacuum_potential_weight.fill_(1.)
+        graph.dipole_weight = torch.tensor([[1., 0., 0.]])
+        graph.dipole.zero_()
+
+    calls = []
+    def wrapper(model, data, **kwargs):
+        calls.append(len(data['ptr'])-1)
+        error = data['total_charge']
+        ef = data['fermi_level']+error
+        vac = data['vacuum_potential']+2*error
+        dipole = torch.stack((error, error*0., error*0.), dim=-1)
+        return {'fermi_level':ef, 'vacuum_potential':vac,
+                'workfunction':vac-ef, 'dipole':dipole}
+
+    def check(level, batch_size):
+        caplog.clear()
+        calls.clear()
+        loader = torch_geometric.dataloader.DataLoader(graphs, batch_size=batch_size, shuffle=False)
+        with caplog.at_level(level):
+            result = evaluate(torch.nn.Linear(1, 1), wrapper,
+                              WeightedLoss({'fermi_level':1, 'vacuum_potential':1}),
+                              None, loader, 'cpu')
+        return result, list(calls), [record.getMessage() for record in caplog.records]
+
+    quiet, quiet_calls, _ = check(logging.INFO, 3)
+    debug, debug_calls, messages = check(logging.DEBUG, 2)
+    assert quiet_calls == [3] and debug_calls == [2, 1]
+    assert quiet[0] == pytest.approx(debug[0])
+    assert quiet[1]['rmse_wf_rel'] == pytest.approx(debug[1]['rmse_wf_rel'])
+    assert any('correlation with WF residual=1;' in message for message in messages)
+
+
