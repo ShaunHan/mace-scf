@@ -751,7 +751,12 @@ def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
     """
     limit = _trajectory_scale(initial)
     axes = tuple(range(1, initial.ndim))
-    floor = torch.finfo(initial.dtype).eps * initial.detach().square().sum(axes, keepdim=True).clamp_min(1.)
+    # Ratios used by the history fit and secant safeguard must be conditioned
+    # for force derivatives as well as values. An eps-sized Gram floor can leave
+    # almost coincident iterates with accurate states but enormous forces.
+    # Retain the full derivative of the scale: it depends on the initial
+    # electronic state, and therefore can depend on atomic positions.
+    floor = torch.finfo(initial.dtype).eps**(1./3.) * initial.square().sum(axes, keepdim=True).clamp_min(1.)
     proposal = function(initial, *args)
     _check_trajectory(proposal, limit, 1, 'finite-step proposal')
     residual = proposal-initial
