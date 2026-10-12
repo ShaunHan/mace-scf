@@ -31,7 +31,7 @@ class VariationalResponse(nn.Module):
     ``potential_widths`` are the Gaussian widths of the local potential basis.
     An empty list gives the ordinary monopole/dipole electronic functional.
     Completing the potential adds zero-charge, zero-dipole source functions,
-    not another Fermi-level or work-function prediction head.
+    without adding another scalar prediction head.
     """
 
     variational = True
@@ -589,7 +589,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
               "virials": -stress*geom.volume[:, None, None] if stress is not None else None,
               "density_coefficients": geom.unpack(state[..., :response.coarse_dim]),
               "dipole": dipole, "total_charge": charge, "fermi_level": mu,
-              "workfunction": vacuum-mu, "vacuum_potential": vacuum,
+              "vacuum_potential": vacuum,
               "electrostatic_energy": electronic, "electron_energy": electronic,
               "external_field": geom.external,
               "electrostatic_features": geom.unpack(-geom.hartree(state)),

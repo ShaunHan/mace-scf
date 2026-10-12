@@ -188,7 +188,7 @@ class AtomicPotentialResponse(nn.Module):
         # The uniform chemical level is a null direction of fixed-Q charge
         # equilibration. Give that identifiable EF coordinate its own linear
         # projection of the SAME geometry/total-field hidden representation.
-        # There is no extra field, vacuum/WF head, detached feature or SCF state.
+        # There is no extra field, vacuum head, detached feature or SCF state.
         self.common_level = (nn.Linear(width, 1, bias=False)
                              if separate_chemical_level else None)
         if self.common_level is not None:
@@ -1428,7 +1428,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         output = {'energy':energy, 'forces':forces, 'stress':stress,
             'virials': -stress*g.volume[:,None,None] if stress is not None else None,
             'density_coefficients':density_coefficients, 'dipole':dipole, 'total_charge':charge,
-            'fermi_level':mu, 'vacuum_potential':vacuum, 'workfunction':vacuum-mu,
+            'fermi_level':mu, 'vacuum_potential':vacuum,
             'potential_reference':potential_reference,
             'fourier_density':coarse*g.ngrid, 'fourier_farfield_density':coarse*smoothing[...,None]*g.ngrid,
             'fourier_effective_density':effective*g.ngrid,
@@ -1475,7 +1475,7 @@ def apply_scalar_reference(output, response):
     Spatial Fourier quantities retain their zero-mean convention. A calibrated
     vacuum observation equals the model plane plus its scalar reference; the
     latter is not a deformation-field coefficient. No force/energy or SCF state
-    changes. WF remains the difference of the two reported scalar observations.
+    changes. Voltage differences are formed by consumers from these two scalars.
     """
     reference = getattr(response, 'scalar_reference', None)
     if reference is not None:
@@ -1484,8 +1484,6 @@ def apply_scalar_reference(output, response):
                 output[key] = output[key]+reference[index]
         if 'potential_reference' in output:
             output['potential_reference'] = output['potential_reference']+reference[1]
-        if 'workfunction' in output:
-            output['workfunction'] = output['vacuum_potential']-output['fermi_level']
         if 'reference_response' in output:
             apply_scalar_reference(output['reference_response'], response)
     return output

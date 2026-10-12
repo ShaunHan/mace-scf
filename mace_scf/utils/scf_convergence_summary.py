@@ -660,7 +660,8 @@ def create_scf_convergence_summary(
                         outputs[steps] = output
                         row[f'residual_{steps}'] = float(output['scf_residual'].detach().max())
                 if len(outputs) == 2:
-                    row['WF_50_minus_100_eV'] = float((outputs[50]['workfunction']-outputs[100]['workfunction']).detach().abs().max())
+                    for key in ('vacuum_potential', 'fermi_level'):
+                        row[key+'_50_minus_100_eV'] = float((outputs[50][key]-outputs[100][key]).detach().abs().max())
                     row['F_50_minus_100_max_eV_A'] = float((outputs[50]['forces']-outputs[100]['forces']).detach().abs().max())
                 values.append(row)
             report[name] = values

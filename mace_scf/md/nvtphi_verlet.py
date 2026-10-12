@@ -18,8 +18,8 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
         tauphi: float = 100.0 * units.fs,
         counter_charge_key: str = "counter_charge",
         total_charge_key: str = "total_charge",
-        workfunction_key: str = "workfunction",
-        use_relative_workfunction: bool = True,
+        vacuum_potential_key: str = "vacuum_potential",
+        fermi_level_key: str = "fermi_level",
         reference_potential: Optional[float] = None,
         trajectory: Optional[str] = None,
         logfile: Optional[Union[IO, str]] = None,
@@ -35,8 +35,8 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
             tauphi,
             counter_charge_key,
             total_charge_key,
-            workfunction_key,
-            use_relative_workfunction,
+            vacuum_potential_key,
+            fermi_level_key,
             reference_potential,
         )
         MolecularDynamics.__init__(
@@ -56,7 +56,8 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
                     atoms,
                     logfile,
                     counter_charge_key,
-                    workfunction_key,
+                    vacuum_potential_key=vacuum_potential_key,
+                    fermi_level_key=fermi_level_key,
                 )
             )
             self.attach(logger, loginterval)

@@ -5,6 +5,7 @@ import numpy as np
 from ase import Atoms, units
 from ase.parallel import world
 from ase.utils import IOContext
+from ._potential import potential_difference
 
 
 class NVTPhiMDLogger(IOContext):
@@ -14,7 +15,8 @@ class NVTPhiMDLogger(IOContext):
         atoms: Atoms,
         logfile: Union[IO, str],
         counter_charge_key: str = "counter_charge",
-        workfunction_key: str = "workfunction",
+        vacuum_potential_key: str = "vacuum_potential",
+        fermi_level_key: str = "fermi_level",
         header: bool = True,
         peratom: bool = False,
         mode: str = "a",
@@ -23,7 +25,8 @@ class NVTPhiMDLogger(IOContext):
         self.dyn = weakref.proxy(dyn) if hasattr(dyn, "get_time") else None
         self.atoms = atoms
         self.counter_charge_key = counter_charge_key
-        self.workfunction_key = workfunction_key
+        self.vacuum_potential_key = vacuum_potential_key
+        self.fermi_level_key = fermi_level_key
         self.peratom = peratom
         self.logfile = self.openfile(file=logfile, mode=mode, comm=comm)
 
@@ -63,9 +66,12 @@ class NVTPhiMDLogger(IOContext):
             ekin /= natoms
         counter = self.atoms.info.get(self.counter_charge_key, np.nan)
         electrode_charge = -float(np.asarray(counter).reshape(-1)[0])
-        potential = getattr(self.dyn, "current_potential", None)
-        if potential is None and self.atoms.calc is not None:
-            potential = self.atoms.calc.results.get(self.workfunction_key, np.nan)
+        if self.dyn is not None and hasattr(self.dyn, "_read_potential"):
+            potential = self.dyn._read_potential()
+        else:
+            potential = potential_difference(
+                self.atoms.calc.results, self.vacuum_potential_key, self.fermi_level_key
+            )
 
         values = ()
         if self.dyn is not None:

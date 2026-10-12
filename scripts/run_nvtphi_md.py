@@ -13,14 +13,18 @@ from ase.md.velocitydistribution import (
 
 from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
 from mace_scf.md import NVTPhiLangevin
+from mace_scf.md._potential import potential_difference
 
 
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0.model"
 TARGET_POTENTIAL = 4.50
-VOLTAGE_MODE = "relative"  # initial-structure reference for the derived potential
-REFERENCE_POTENTIAL = 4.50  # physical potential assigned to the initial structure
+# Optional physical potential of the initial structure in the target's reference.
+# None uses the model's scalar origin. No training-loss mode switch is needed.
+REFERENCE_POTENTIAL = 4.50
+VACUUM_POTENTIAL_KEY = "vacuum_potential"
+FERMI_LEVEL_KEY = "fermi_level"
 
 # Change both suffixes to xfrac or yfrac for a different open cell axis.
 PLANE_FRACTIONS = {"vacuum_zfrac": 0.75, "dipole_correction_zfrac": 0.50}
@@ -103,14 +107,9 @@ def main() -> None:
     ZeroRotation(atoms)
 
     initial_energy = atoms.get_potential_energy()
-    if "workfunction" not in atoms.calc.results:
-        raise RuntimeError(
-            "The loaded model does not expose a workfunction observable. "
-            "Use a model trained with potential and chemical-level observations."
-        )
-    if VOLTAGE_MODE not in {"relative", "absolute"}:
-        raise ValueError("VOLTAGE_MODE must be 'relative' or 'absolute'")
-    model_reference = scalar(atoms.calc.results["workfunction"])
+    model_reference = potential_difference(
+        atoms.calc.results, VACUUM_POTENTIAL_KEY, FERMI_LEVEL_KEY
+    )
     control_reference = (
         model_reference if REFERENCE_POTENTIAL is None else float(REFERENCE_POTENTIAL)
     )
@@ -118,7 +117,6 @@ def main() -> None:
     print(f"Initial model voltage: {model_reference:.10f} V")
     print(f"Initial control potential: {control_reference:.10f} V")
     print(f"Target potential: {TARGET_POTENTIAL:.10f} V")
-    print(f"Voltage mode: {VOLTAGE_MODE}")
 
     dyn = NVTPhiLangevin(
         atoms=atoms,
@@ -130,9 +128,9 @@ def main() -> None:
         tauphi=TAUPHI_FS * units.fs,
         counter_charge_key="counter_charge",
         total_charge_key="total_charge",
-        workfunction_key="workfunction",
-        use_relative_workfunction=VOLTAGE_MODE == "relative",
-        reference_potential=control_reference,
+        vacuum_potential_key=VACUUM_POTENTIAL_KEY,
+        fermi_level_key=FERMI_LEVEL_KEY,
+        reference_potential=REFERENCE_POTENTIAL,
         trajectory=TRAJECTORY,
         logfile=LOGFILE,
         loginterval=LOGINTERVAL,

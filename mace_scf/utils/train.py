@@ -589,12 +589,12 @@ def _evaluate(
     delta_total_charge_list = []
     delta_fermi_level_list = []
 
-    voltage_errors = {"workfunction": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
+    voltage_errors = {"potential_difference": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
     scf_residuals = []
     objective_sums = {}
     scalar_objectives = {}
     scalar_metrics = {}
-    wf_moments = []
+    phi_moments = []
     paired_scalar_moments = []
     voltage_rows = []
     debug_stability = logging.getLogger().isEnabledFor(logging.DEBUG)
@@ -646,7 +646,10 @@ def _evaluate(
 
         from mace_scf.electrostatics.loss import spectral_errors
         for key in voltage_errors:
-            if key not in output:
+            if key == "potential_difference":
+                if any(output.get(part) is None for part in ("vacuum_potential", "fermi_level")):
+                    continue
+            elif output.get(key) is None:
                 continue
             if key.startswith("fourier"):
                 weight = (batch.fourier_potential_weight*batch.fourier_proto_potential_weight*batch.weight
@@ -656,14 +659,14 @@ def _evaluate(
                 density_reference = getattr(loss_fn.loss_fns.get('fourier_density'), 'reference', 'density')
                 observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield' else key)
                 error = spectral_errors(batch,output,observed_key)
-            elif key == "workfunction":
+            elif key == "potential_difference":
                 target, weight = vacuum_reference_weights(batch, output['vacuum_potential'])
                 weight = weight*(batch.fermi_level_weight>0)
-                difference = output[key]-(target-batch.fermi_level)
+                difference = (output['vacuum_potential']-output['fermi_level'])-(target-batch.fermi_level)
                 use = weight>0
                 if bool((use & ~torch.isfinite(difference)).any()):
-                    raise FloatingPointError('Nonfinite observed workfunction error')
-                wf_moments.append(torch.stack(((difference[use]*weight[use]).sum(),
+                    raise FloatingPointError('Nonfinite observed potential difference error')
+                phi_moments.append(torch.stack(((difference[use]*weight[use]).sum(),
                                                (difference[use].square()*weight[use]).sum(), weight[use].sum())))
                 ef = (output['fermi_level']-batch.fermi_level)[use]
                 vac = (output['vacuum_potential']-target)[use]
@@ -685,7 +688,7 @@ def _evaluate(
                         delta = output['dipole'].reshape(-1, 3)-batch.dipole.reshape(-1, 3)
                         step_error[observed] = (FIELD_CONSTANT*(delta*normal).sum(-1)/area)[observed]
                     voltage_rows.extend({'index':graph_offset+i, 'weight':float(weight[i]),
-                        'wf_error':float(difference[i]), 'ef_error':float(output['fermi_level'][i]-batch.fermi_level[i]),
+                        'phi_error':float(difference[i]), 'ef_error':float(output['fermi_level'][i]-batch.fermi_level[i]),
                         'vacuum_error':float(output['vacuum_potential'][i]-target[i]),
                         'dipole_step_error':float(step_error[i])} for i in torch.where(use)[0].tolist())
                 error = difference.square()
@@ -902,15 +905,15 @@ def _evaluate(
             if sums[1]>0:
                 name = {'fourier_density':'rho', 'fourier_potential':'esp',
                         'fourier_total_potential':'esp_with_proto',
-                        'vacuum_potential':'esp_vac', 'workfunction':'wf_abs'}[key]
+                        'vacuum_potential':'esp_vac', 'potential_difference':'phi_abs'}[key]
                 aux["rmse_"+name] = float((sums[0]/sums[1]).sqrt())
-    if wf_moments:
-        first, second, weight = torch.stack(wf_moments).sum(0)
+    if phi_moments:
+        first, second, weight = torch.stack(phi_moments).sum(0)
         if weight>0:
             # One weighted offset over the WHOLE validation split, never a
             # per-batch correction or a shift installed in the deployed model.
-            aux['wf_bias'] = float(first/weight)
-            aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+            aux['phi_bias'] = float(first/weight)
+            aux['rmse_phi_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
     for key, moments in scalar_metrics.items():
         weight, first, second, _ = moments
         if weight > 0:
@@ -924,12 +927,12 @@ def _evaluate(
         if debug_stability:
             logging.debug('%s stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): '
                           'by force contribution=%s; by SCF residual=%s', split, force_outliers, residual_outliers)
-    if 'rmse_wf_rel' in aux:
+    if 'rmse_phi_rel' in aux:
         ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
         logging.debug('Validation voltage: centered EF/vacuum covariance=%.6g eV^2, '
-                      'WF bias=%.6g eV, maximum SCF residual=%.6g',
+                      'Phi bias=%.6g eV, maximum SCF residual=%.6g',
                       float(product/weight-ef*vac/weight.square()),
-                      aux.get('wf_bias',0.),aux.get('scf_residual_max',0.))
+                      aux.get('phi_bias',0.),aux.get('scf_residual_max',0.))
     if voltage_rows:
         _voltage_diagnostics(voltage_rows, split)
     return avg_loss, aux
@@ -938,13 +941,13 @@ def _evaluate(
 def _voltage_diagnostics(rows, split):
     """Reuse evaluation residuals; no extra model call or fitted correction."""
     weight = np.array([row['weight'] for row in rows])
-    error = np.array([row['wf_error'] for row in rows])
+    error = np.array([row['phi_error'] for row in rows])
     error -= np.average(error, weights=weight)
     contribution = weight*error**2
     largest = np.argsort(-contribution)[:5]
-    logging.debug('%s largest relative WF contributions (zero-based evaluation indices): %s', split,
-        [{'index':rows[i]['index'], 'WF_error_meV':float(1000*error[i]),
-          'relative_WF_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
+    logging.debug('%s largest relative Phi contributions (zero-based evaluation indices): %s', split,
+        [{'index':rows[i]['index'], 'Phi_error_meV':float(1000*error[i]),
+          'relative_Phi_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
           'EF_error_meV':1000*rows[i]['ef_error'],
           'vacuum_error_meV':1000*rows[i]['vacuum_error']} for i in largest])
     dipole = np.array([row['dipole_step_error'] for row in rows])
@@ -955,7 +958,7 @@ def _voltage_diagnostics(rows, split):
         x, y = x-np.average(x,weights=w), y-np.average(y,weights=w)
         xx, yy, xy = (np.average(value,weights=w) for value in (x*x,y*y,x*y))
         logging.debug('%s polarization diagnostic: centered dipole-step RMSE=%.6g meV, '
-                      'correlation with WF residual=%.6g; 4*pi*kappa*delta(D_normal)/area, '
+                      'correlation with Phi residual=%.6g; 4*pi*kappa*delta(D_normal)/area, '
                       'observed slab components only, no prediction correction',
                       split,1000*np.sqrt(xx),xy/max(np.sqrt(xx*yy),1.e-30))
 
@@ -967,7 +970,7 @@ def valid_err_log(
     log_errors,
     epoch,
 ):
-    if log_errors == "ElectrostaticRMSE" or "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
+    if log_errors == "ElectrostaticRMSE" or "rmse_phi_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
                   (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
                    ('rmse_mu_per_atom','RMSE_dip_per_atom','meA'), ('rmse_rho','RMSE_rho','me/A^3')) if key in eval_metrics]
@@ -978,8 +981,8 @@ def valid_err_log(
             pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:
             pieces.append('RMSE_ESPvac(abs/rel)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
-        if 'rmse_wf_abs' in eval_metrics:
-            pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+        if 'rmse_phi_abs' in eval_metrics:
+            pieces.append('RMSE_Phi(abs/rel)='+fmt('rmse_phi_abs')+'/'+fmt('rmse_phi_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
