@@ -929,8 +929,8 @@ def _evaluate(
                           'by force contribution=%s; by SCF residual=%s', split, force_outliers, residual_outliers)
     if 'rmse_phi_rel' in aux:
         ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
-        logging.debug('Validation voltage: centered EF/vacuum covariance=%.6g eV^2, '
-                      'Phi bias=%.6g eV, maximum SCF residual=%.6g',
+        logging.debug('Validation voltage: centered (EF/e)/vacuum covariance=%.6g V^2, '
+                      'Phi bias=%.6g V, maximum SCF residual=%.6g',
                       float(product/weight-ef*vac/weight.square()),
                       aux.get('phi_bias',0.),aux.get('scf_residual_max',0.))
     if voltage_rows:
@@ -946,10 +946,10 @@ def _voltage_diagnostics(rows, split):
     contribution = weight*error**2
     largest = np.argsort(-contribution)[:5]
     logging.debug('%s largest relative Phi contributions (zero-based evaluation indices): %s', split,
-        [{'index':rows[i]['index'], 'Phi_error_meV':float(1000*error[i]),
+        [{'index':rows[i]['index'], 'Phi_error_mV':float(1000*error[i]),
           'relative_Phi_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
           'EF_error_meV':1000*rows[i]['ef_error'],
-          'vacuum_error_meV':1000*rows[i]['vacuum_error']} for i in largest])
+          'vacuum_error_mV':1000*rows[i]['vacuum_error']} for i in largest])
     dipole = np.array([row['dipole_step_error'] for row in rows])
     use = np.isfinite(dipole)
     if np.count_nonzero(use)>1:
@@ -957,7 +957,7 @@ def _voltage_diagnostics(rows, split):
         x, y = dipole[use], error[use]
         x, y = x-np.average(x,weights=w), y-np.average(y,weights=w)
         xx, yy, xy = (np.average(value,weights=w) for value in (x*x,y*y,x*y))
-        logging.debug('%s polarization diagnostic: centered dipole-step RMSE=%.6g meV, '
+        logging.debug('%s polarization diagnostic: centered dipole-step RMSE=%.6g mV, '
                       'correlation with Phi residual=%.6g; 4*pi*kappa*delta(D_normal)/area, '
                       'observed slab components only, no prediction correction',
                       split,1000*np.sqrt(xx),xy/max(np.sqrt(xx*yy),1.e-30))
@@ -982,7 +982,7 @@ def valid_err_log(
         if 'rmse_esp_vac' in eval_metrics:
             pieces.append('RMSE_ESPvac(abs/rel)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_phi_abs' in eval_metrics:
-            pieces.append('RMSE_Phi(abs/rel)='+fmt('rmse_phi_abs')+'/'+fmt('rmse_phi_rel')+' meV')
+            pieces.append('RMSE_Phi(abs/rel)='+fmt('rmse_phi_abs')+'/'+fmt('rmse_phi_rel')+' mV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"

@@ -73,6 +73,19 @@ def angular_differences(operator, scalar_values, vector_values):
     grad = grad-row[:,:,None]*scalar_values[...,None]
     return div,grad
 
+def neighbor_messages(operator, phi, field):
+    """One scalar/vector message: radial sums and the allowed l<=1 couplings.
+
+    The dense operator is only a batched representation of the MACE edges.
+    Its four entries are a radial weight and a Cartesian direction, not four
+    learned graphs. Parameter names/order remain unchanged for saved models.
+    """
+    difference = transport_difference(operator[..., 0], torch.cat((phi, field.flatten(-2)), -1))
+    scalar, vector = difference.split((phi.shape[-1], field.shape[-2]*3), -1)
+    divergence, gradient = angular_differences(operator, phi, field)
+    return torch.cat((scalar, divergence), -1), torch.cat((vector.reshape_as(field), gradient), -2)
+
+
 def vector_asinh(vector):
     """Invertible, rotation-equivariant counterpart of scalar asinh.
 
@@ -90,10 +103,13 @@ def vector_asinh(vector):
     return vector * torch.where(squared < threshold, series, ratio)
 
 def sample_spectrum(total, geometry):
-    """Gaussian samples of v and its negative gradient in electron-energy units.
+    """Samples of electron-referenced phi (V) and -grad(phi) (V/Angstrom).
 
-    The gradient is a field descriptor, not the total nuclear force. Electrical
-    potential has the opposite sign to electron potential energy.
+    phi is electron potential energy divided by positive elementary charge:
+    its values in V equal the legacy electron-energy values in eV. It has the
+    opposite sign to the potential of a positive test charge. The gradient is
+    a descriptor, not a nuclear force. Width zero gives an exact point sample
+    of the retained spectrum; positive widths give normalized local averages.
     """
     cosine, sine, wave, _, _, _, receiver, *_ = geometry
     re = total[..., 0, None] * receiver
@@ -236,35 +252,35 @@ class AtomicPotentialResponse(nn.Module):
         # The full receiver coordinates carry the electrochemical drive;
         # local radial contrasts and angular/neighbor variation remain present.
         # Scalar and vector channels use one linear transport and one adjoint.
-        transported=transport_difference(neighborhood[...,0],torch.cat((v,e.flatten(-2)),-1))
-        ds,dv=transported.split((v.shape[-1],e.shape[-2]*3),-1)
-        dv=dv.reshape_as(e)
-        div,grad=angular_differences(neighborhood,v,e)
+        scalar_message,vector_message=neighbor_messages(neighborhood,v,e)
         # Combine the same projections before their linear maps. This keeps
         # every feature and parameter while reducing small recurrent kernels.
         scalar_weight=torch.cat((self.state_scalar.weight,self.neighbor_scalar.weight,
                                  self.neighbor_divergence.weight),-1)
         vector_weight=torch.cat((self.state_vector.weight,self.neighbor_vector.weight,
                                  self.neighbor_gradient.weight),-1)
-        scalar=chemical+F.linear(torch.asinh(torch.cat((v,ds,div),-1)),scalar_weight)
-        polar=vector_asinh(torch.cat((e,dv,grad),-2))
+        scalar=chemical+F.linear(torch.asinh(torch.cat((v,scalar_message),-1)),scalar_weight)
+        polar=vector_asinh(torch.cat((e,vector_message),-2))
         embedded=vector+F.linear(polar.transpose(-1,-2),vector_weight).transpose(-1,-2)
         return scalar,embedded
 
     def potential_coordinates(self, potential, mask, electronic_reference, target):
-        """Descriptors relative to an analytic reference charge multiplier.
+        """Centered deformation-field inputs, including the fixed-Q response.
 
-        This mu0 is a descriptor reference, not the final predicted Fermi level.
-        Geometry-only chi0,s0 define q0+s0*(chi0+v0-mu0), whose sum is Q.
-        Keeping all tensors attached makes derivatives include this alignment.
+        Center the sampled field plus a learned geometric chemical level and
+        add Q/sum(chi). This is the constrained quadratic charge law with its
+        multiplier eliminated, not a second Fermi observer. The chemical level
+        is environment-dependent; it is NOT the neutral proto-atomic potential.
+        A common field shift cancels. All reference derivatives remain live.
         """
         if electronic_reference.shape != (*mask.shape, 2):
-            raise ValueError('Missing geometry-only electronic reference [chi0,s0]')
-        chi0, softness0 = electronic_reference.unbind(-1)
-        soft = softness0 * mask
+            raise ValueError('Missing geometry-only electronic reference [level, softness]')
+        chemical_level, softness = electronic_reference.unbind(-1)
+        soft = softness * mask
         total = soft.sum(-1)
-        mu0 = ((soft*(chi0+potential[...,0])).sum(-1)-target)/total
-        return (chi0[...,None]+potential-mu0[:,None,None])/self.scalar_field_scale
+        levels = chemical_level[..., None]+potential
+        mean = (soft*levels[..., 0]).sum(-1)/total
+        return (levels-mean[:, None, None]+(target/total)[:, None, None])/self.scalar_field_scale
 
     def _invariants(self,state,chemical,vector,potential,field,mask,neighborhood,
                     electronic_reference,target):
@@ -291,9 +307,7 @@ class AtomicPotentialResponse(nn.Module):
                           torch.asinh((vector * polar).sum(-1))), -1)
 
     def _constitutive_outputs(self,invariants,vector,embedded,return_hidden=False,include_dipole=True):
-        u1 = self.shared[0](invariants)
-        u2 = self.shared[2](self.shared[1](u1))
-        hidden = self.shared[3](u2)
+        hidden = self.shared(invariants)
         scalars=self.scalar_out(hidden)
         channels=self.source_channels+int(include_dipole)
         if channels:
@@ -321,7 +335,22 @@ class AtomicPotentialResponse(nn.Module):
         It is atom-local, has no label/graph pooling and adds no layer or weight.
         """
         norm = torch.asinh(vector.square().sum(-1))
-        return self.shared(torch.cat((chemical, norm, norm), -1))
+        first = self.shared[0]
+        width, channels = chemical.shape[-1], norm.shape[-1]
+        # At zero field both geometric invariants coincide. Fold their columns
+        # during evaluation, preserving stored parameters and resume gradients.
+        weight = torch.cat((first.weight[:, :width],
+                            first.weight[:, width:width+channels]+first.weight[:, width+channels:]), -1)
+        hidden = F.linear(torch.cat((chemical, norm), -1), weight, first.bias)
+        return self.shared[3](self.shared[2](self.shared[1](hidden)))
+
+    def dipole_softness(self, reference_offset):
+        """Physical dipole softness S in Angstrom^2/V, including width units.
+
+        The stored coefficient uses d/sigma as a numerical solve coordinate.
+        This exact conversion adds no learned output or physical state.
+        """
+        return reference_offset[..., -3:-2]*self.density_width**2
 
     def local_potential_coordinates(self, chemical, vector, attrs, mask, *, hidden=None):
         hidden = self.geometry_reference_features(chemical, vector) if hidden is None else hidden
@@ -370,19 +399,19 @@ class AtomicPotentialResponse(nn.Module):
         chemical_level = (electronic_reference[...,0] if geometry_charge else
                           attrs@self.species_level+scalars[...,0]+p0[...,0])
         softness=electronic_reference[...,1]
-        levels=chemical_level+potential[...,0]
         reference_charge = torch.zeros_like(p0[..., 0])
-        q,mu,f,response,neutral=charge_closure(reference_charge,levels,softness,target,mask)
-        # The common chemical level is exactly a fixed-Q null coordinate.
-        # Keep it out of the charge calculation instead of adding/subtracting
-        # a large common value through every atom and every recurrent step.
+        # Align the common component once, before the charge multiplier is
+        # evaluated. That SAME multiplier is the Fermi observation: no second
+        # formula is needed. Skip the null coordinate during pure SCF updates.
         if observe_chemical_level and self.common_level is not None:
+            soft = softness*mask
+            f = soft/soft.sum(-1, keepdim=True)
             common = self.common_level((f[...,None]*computed[-1]).sum(1)).squeeze(-1)
             common = common+(f*(attrs@self.species_level)).sum(-1)
-            mu = common+(f*potential[...,0]).sum(-1)-target/response
             chemical_level = chemical_level+(common-(f*chemical_level).sum(-1))[:,None]
-            levels = chemical_level+potential[...,0]
-        induced=-reference_offset[...,-3:-2]*self.density_width*field[...,0,:]
+        levels=chemical_level+potential[...,0]
+        q,mu,f,response,neutral=charge_closure(reference_charge,levels,softness,target,mask)
+        induced=-self.dipole_softness(reference_offset)*field[...,0,:]/self.density_width
         proposal=torch.cat((q[...,None],p0[...,1:4]/self.density_width+induced,
                             scalars[...,2:],polar.flatten(-2)),-1)*mask[...,None]
         proposal=(proposal+offset)*mask[...,None]
@@ -1071,6 +1100,9 @@ class CoupledResponse(AtomicPotentialResponse):
         self.state_irreps = o3.Irreps(f'0e+1o+{channels}x0e+{channels}x1o').simplify()
         self.register_buffer('source_widths', torch.tensor(source_widths))
         self.register_buffer('receiver_widths', torch.tensor(widths))
+        # Observation resolution is independent of response sampling. Older
+        # checkpoints recover exactly the same value from their saved widths.
+        self.density_reference_width = max(widths)
         self.register_buffer('feature_norms', torch.ones(irreps.dim))
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
@@ -1090,7 +1122,20 @@ class CoupledResponse(AtomicPotentialResponse):
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
                 'response_reference': getattr(self, 'response_reference', 'total'),
-                'charge_response': getattr(self, 'charge_response', 'geometry')}
+                'charge_response': getattr(self, 'charge_response', 'geometry'),
+                'density_reference_width': self.farfield_width}
+
+    @property
+    def farfield_width(self):
+        width = getattr(self, 'density_reference_width', None)
+        return float(self.receiver_widths.max()) if width is None else float(width)
+
+    def farfield_filter(self, k2):
+        """Additional density smoothing; its square is the density-loss weight."""
+        variance = self.farfield_width**2-self.density_width**2
+        if variance < 0:
+            raise ValueError('Density reference width must be at least the density width')
+        return torch.exp(-.5*variance*k2)
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
@@ -1115,6 +1160,10 @@ class CoupledResponse(AtomicPotentialResponse):
         if charge not in ('field', 'geometry'):
             raise ValueError(f'Unknown saved charge response {charge}')
         self.charge_response = charge
+        width = float(state.get('density_reference_width', float(self.receiver_widths.max())))
+        if not math.isfinite(width) or width < self.density_width:
+            raise ValueError('Invalid saved density reference width')
+        self.density_reference_width = width
 
 class CoupledGeometry(SpectralGeometry):
     """Same Fourier support for the response, observers and moment screening."""
@@ -1193,7 +1242,8 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     state = torch.cat(((target/mask.sum(-1))[:, None, None]*mask[..., None],
                        p0[..., 1:4]/r.density_width, state[..., 4:]), -1)
     transport = angular_transport(local.positions, data['edge_index'], data.get('shifts'),
-        g.batch, g.slot, len(g.counts), g.size, float(model.r_max), float(r.receiver_widths.max()))
+        g.batch, g.slot, len(g.counts), g.size, float(model.r_max),
+        float(getattr(r, 'neighbor_width', r.receiver_widths.max())))
     source, reference = r.prepare_reference(state, chemical, vector, g.attrs, p0, mask, target, transport)
     state = torch.cat((state[..., :1], state[..., 1:4]+reference[..., 1:4], source), -1)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
@@ -1306,7 +1356,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         net_charge = solved[..., 0].sum(-1)
         density = bare/torch.where(g.coulomb>0,-g.coulomb,1.)[..., None]
         density = density+torch.stack(((g.k2==0)*(net_charge/g.volume)[:, None],torch.zeros_like(g.k2)),-1)
-        smoothing = torch.exp(-.5*(float(r.receiver_widths.max())**2-r.density_width**2)*g.k2)
+        smoothing = r.farfield_filter(g.k2)
         result.update(fourier_density=density*g.ngrid,
                       fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
                       fourier_potential=(carrier+regular)*g.ngrid,
@@ -1424,7 +1474,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             # atomic reference in the scalar observer, not fed back into SCF.
             total = total+torch.view_as_real(g.observer_proto)
             potential_reference = potential_reference-g.plane(g.observer_proto)
-        smoothing = torch.exp(-.5*(float(r.receiver_widths.max())**2-r.density_width**2)*g.k2)
+        smoothing = r.farfield_filter(g.k2)
         output = {'energy':energy, 'forces':forces, 'stress':stress,
             'virials': -stress*g.volume[:,None,None] if stress is not None else None,
             'density_coefficients':density_coefficients, 'dipole':dipole, 'total_charge':charge,

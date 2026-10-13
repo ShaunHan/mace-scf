@@ -91,6 +91,15 @@ def test_spectral_metric_is_the_real_space_inverse_fft_rmse():
     torch.testing.assert_close(spectral_errors(None,pred,'fourier_potential'),field.square().mean((1,2,3)),rtol=1.e-12,atol=1.e-12)
 
 
+_model_evaluate_coupled = evaluate_coupled
+
+def evaluate_coupled(*args, **kwargs):
+    """Derive the voltage in the test consumer from the two public scalars."""
+    output = _model_evaluate_coupled(*args, **kwargs)
+    output['potential_difference'] = output['vacuum_potential']-output['fermi_level']
+    return output
+
+
 @pytest.mark.parametrize('device', ['cpu', 'cuda'])
 def test_cueq_backend_preserves_fields_forces_gradients_and_export(tmp_path, device):
     if device == 'cuda' and not torch.cuda.is_available():
@@ -194,7 +203,7 @@ def test_optional_proto_reference_is_one_shared_gauge_and_serializes(tmp_path):
     shift = (2*50.-20.)/(7*7*12)
     for key in ('fermi_level','vacuum_potential'):
         torch.testing.assert_close(after[key]-before[key],torch.tensor([shift]))
-    for key in ('workfunction','forces','density_coefficients','fourier_potential'):
+    for key in ('potential_difference','forces','density_coefficients','fourier_potential'):
         torch.testing.assert_close(after[key],before[key],atol=1.e-12,rtol=1.e-12)
     path=tmp_path/'reference.model';torch.save(model,path)
     saved=torch.load(path,weights_only=False)
@@ -255,21 +264,21 @@ def test_optional_proto_does_not_change_optimizer_trajectory():
 
 
 @pytest.mark.parametrize('mode', ['unroll_scf', 'shortcut_scf', 'implicit'])
-def test_neutral_proto_reference_preserves_response_and_wf(mode):
+def test_neutral_proto_reference_preserves_response_and_voltage(mode):
     model = coupled_model()
     response = model.field_dependent_charges_map
     options = dict(mode=mode, steps=50 if mode == 'implicit' else 4, training=True)
     before = evaluate_coupled(model, small_data(), **options)
     parameters = [p for p in model.parameters() if p.requires_grad]
-    gradient = torch.autograd.grad(before['workfunction'].sum()+before['forces'].square().sum(),
+    gradient = torch.autograd.grad(before['potential_difference'].sum()+before['forces'].square().sum(),
                                    parameters, allow_unused=True)
     response.proto_fitted.fill_(True)
     response.proto_coefficients.copy_(torch.linspace(-80.,0.,64).expand(2,-1))
     response.vacuum_reference_integrals.fill_(80.)
     after = evaluate_coupled(model, small_data(), **options)
-    new_gradient = torch.autograd.grad(after['workfunction'].sum()+after['forces'].square().sum(),
+    new_gradient = torch.autograd.grad(after['potential_difference'].sum()+after['forces'].square().sum(),
                                        parameters, allow_unused=True)
-    for key in ('energy','forces','density_coefficients','fourier_potential','workfunction','scf_residual'):
+    for key in ('energy','forces','density_coefficients','fourier_potential','potential_difference','scf_residual'):
         torch.testing.assert_close(after[key],before[key],atol=1.e-11,rtol=1.e-11)
     for a,b in zip(gradient,new_gradient):
         if a is None: assert b is None
@@ -325,7 +334,7 @@ def test_scalar_references_preserve_physics_relative_gradients_and_export(mode, 
         else: torch.testing.assert_close(a,b,atol=1.e-9,rtol=1.e-9)
     for key in ('energy','forces','dipole','density_coefficients','fourier_potential','fourier_total_potential','scf_residual'):
         torch.testing.assert_close(before[key],after[key],atol=1.e-12,rtol=1.e-12)
-    for key,shift in (('fermi_level',3.5),('vacuum_potential',-.2),('workfunction',-3.7)):
+    for key,shift in (('fermi_level',3.5),('vacuum_potential',-.2),('potential_difference',-3.7)):
         torch.testing.assert_close(after[key]-before[key],torch.full((2,),shift),atol=1.e-12,rtol=1.e-12)
     geometry=CoupledGeometry(model,batch.to_dict(),batch.positions)
     plane=geometry.plane(torch.view_as_complex((after['fourier_total_potential']/geometry.ngrid).contiguous()))
@@ -333,7 +342,7 @@ def test_scalar_references_preserve_physics_relative_gradients_and_export(mode, 
     path=tmp_path/'referenced.model';torch.save(model,path)
     restored=torch.load(path,weights_only=False)
     prediction=evaluate_coupled(restored,deepcopy(batch.to_dict()),**options)
-    torch.testing.assert_close(prediction['workfunction'],after['workfunction'])
+    torch.testing.assert_close(prediction['potential_difference'],after['potential_difference'])
     state=model.state_dict()
     del state['field_dependent_charges_map.scalar_reference']
     restored.load_state_dict(state,strict=True)
@@ -501,7 +510,7 @@ def test_modes_force_loss_and_full_field_gradients(widths, mode):
     assert result['scf_residual'].max()<1.e-6
     loss = result['forces'].square().sum()+result['fermi_level'].square().sum()
     if widths:
-        loss = loss+result['workfunction'].square().sum()+result['fourier_potential'].square().mean()
+        loss = loss+result['potential_difference'].square().sum()+result['fourier_potential'].square().mean()
     loss.backward()
     assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
     assert model.field_dependent_charges_map.state_scalar.weight.grad.abs().max()>0.
@@ -516,11 +525,11 @@ def test_checkpointed_gradient_and_converged_root_parity():
     values=[]; gradients=[]
     for mode in ('unroll_scf','shortcut_scf','implicit'):
         out=evaluate_coupled(model,small_data(),steps=50,training=True,mode=mode)
-        objective=out['forces'].square().sum()+out['workfunction'].square().sum()
+        objective=out['forces'].square().sum()+out['potential_difference'].square().sum()
         gradients.append(torch.autograd.grad(objective,parameters,allow_unused=True))
         values.append(out)
     for i in (1,2):
-        for key in ('energy','forces','workfunction','fourier_potential'):
+        for key in ('energy','forces','potential_difference','fourier_potential'):
             torch.testing.assert_close(values[0][key],values[i][key],atol=1.e-6,rtol=1.e-6)
         for a,b in zip(gradients[0],gradients[i]):
             if a is None:
@@ -537,7 +546,7 @@ def test_damped_fifty_step_shortcut_keeps_force_and_parameter_derivatives(mixing
     for mode in ('unroll_scf', 'shortcut_scf'):
         out = evaluate_coupled(model, small_data(), steps=50, mixing=mixing,
                                training=True, mode=mode)
-        objective = out['forces'].square().sum()+out['workfunction'].square().sum()
+        objective = out['forces'].square().sum()+out['potential_difference'].square().sum()
         gradients = torch.autograd.grad(objective, parameters, allow_unused=True)
         results.append((out, gradients))
     for key in ('energy', 'forces', 'fermi_level', 'vacuum_potential', 'fourier_potential'):
@@ -590,7 +599,7 @@ def test_rotation_and_heterogeneous_batch_invariance():
     together=evaluate_coupled(model,batch,steps=12)
     for i,item in enumerate((first,second)):
         separate=evaluate_coupled(model,torch_geometric.Batch.from_data_list([item]).to_dict(),steps=12)
-        for key in ('energy','fermi_level','workfunction'):
+        for key in ('energy','fermi_level','potential_difference'):
             torch.testing.assert_close(together[key][i:i+1],separate[key],atol=1.e-9,rtol=1.e-9)
         torch.testing.assert_close(together['forces'][batch['ptr'][i]:batch['ptr'][i+1]],separate['forces'],atol=1.e-9,rtol=1.e-9)
     # Atom-normalized force losses and their full parameter derivatives must
@@ -616,7 +625,7 @@ def test_rotation_and_heterogeneous_batch_invariance():
     for key in ('positions','cell','shifts','external_field'):
         rotated[key]=rotated[key]@rotation.T
     a=evaluate_coupled(model,original,steps=12);b=evaluate_coupled(model,rotated,steps=12)
-    for key in ('energy','fermi_level','workfunction'):
+    for key in ('energy','fermi_level','potential_difference'):
         torch.testing.assert_close(a[key],b[key],atol=1.e-9,rtol=1.e-9)
     torch.testing.assert_close(a['forces']@rotation.T,b['forces'],atol=1.e-9,rtol=1.e-9)
 
@@ -625,7 +634,7 @@ def test_labels_do_not_enter_the_scf_map():
     model=coupled_model();data=small_data();other=deepcopy(data)
     other['fermi_level'].fill_(12345.);other['vacuum_potential'].fill_(-10000.)
     a=evaluate_coupled(model,data,steps=12);b=evaluate_coupled(model,other,steps=12)
-    for key in ('energy','forces','workfunction','fermi_level','density_coefficients','fourier_potential'):
+    for key in ('energy','forces','potential_difference','fermi_level','density_coefficients','fourier_potential'):
         torch.testing.assert_close(a[key],b[key],rtol=0.,atol=0.)
 
 
@@ -701,7 +710,7 @@ def test_masked_labels_and_invalid_observed_labels():
     with pytest.raises(FloatingPointError):objective(ref,pred)
 
 
-def test_validation_weighted_global_wf_and_batch_partition():
+def test_validation_weighted_global_voltage_and_batch_partition():
     from mace_scf.utils.train import evaluate
     graphs=[]
     for i in range(1,4):
@@ -713,7 +722,7 @@ def test_validation_weighted_global_wf_and_batch_partition():
     def wrapper(model,data,**kwargs):
         charge=data['total_charge'].reshape(-1)
         predicted=torch.zeros(len(charge),3,2);predicted[:,1,0]=charge*3
-        return {'energy':charge*0.,'workfunction':charge*2,'vacuum_potential':charge*3,
+        return {'energy':charge*0.,'potential_difference':charge*2,'vacuum_potential':charge*3,
                 'fermi_level':charge,'fourier_potential':predicted,'fourier_potential_dft':predicted*0,
                 'k_vectors_mask':torch.ones(len(charge),3,dtype=torch.bool),
                 'k_vectors':torch.tensor([[[0.,0.,0.],[0.,0.,1.],[0.,0.,-1.]]]).expand(len(charge),-1,-1),
@@ -723,9 +732,9 @@ def test_validation_weighted_global_wf_and_batch_partition():
         loader=torch_geometric.dataloader.DataLoader(graphs,batch_size=batch_size,shuffle=False)
         loss,metric=evaluate(torch.nn.Linear(1,1),wrapper,WeightedLoss({'fourier_potential':100,'vacuum_potential':100}),None,loader,'cpu')
         values.append((loss,metric))
-        assert metric['rmse_wf_abs']==pytest.approx(24.**.5)
-        assert metric['rmse_wf_rel']==pytest.approx((24.-(28./6)**2)**.5)
-        assert metric['wf_bias']==pytest.approx(28./6)
+        assert metric['rmse_phi_abs']==pytest.approx(24.**.5)
+        assert metric['rmse_phi_rel']==pytest.approx((24.-(28./6)**2)**.5)
+        assert metric['phi_bias']==pytest.approx(28./6)
         assert loss==pytest.approx(100*(3.+90./11.))
         assert metric['rmse_esp_vac_rel']==pytest.approx(5.**.5)
         assert metric['rmse_fermi_level_rel']==pytest.approx((6.-(14./6)**2)**.5)
@@ -749,7 +758,8 @@ def test_saved_deployment_and_optional_diagnostics(tmp_path):
     loader=torch_geometric.dataloader.DataLoader([small_data(batched=False)],batch_size=1)
     with patch.dict(sys.modules,{'mace_scf.utils.diagnostics':None}):
         report=create_scf_convergence_summary(model,{'valid':loader},{'forces':True},'cpu',{})
-    assert 'WF_50_minus_100_eV' in report
+    assert 'vacuum_potential_50_minus_100_eV' in report
+    assert 'fermi_level_50_minus_100_eV' in report
 
 
 @pytest.mark.parametrize('foundation',[False,True])

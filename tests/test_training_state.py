@@ -56,11 +56,11 @@ def test_log_uses_requested_density_and_dipole_names(caplog):
         def log(self,metrics):pass
     metrics={'rmse_rho':.001,'rmse_mu_per_atom':.002,'rmse_esp':.1,'rmse_esp_vac':.2,
              'rmse_esp_vac_rel':.1,'rmse_fermi_level':.2,'rmse_fermi_level_rel':.05,
-             'esp_vacuum_enabled':True,'rmse_wf_abs':.15,'rmse_wf_rel':.14}
+             'esp_vacuum_enabled':True,'rmse_phi_abs':.15,'rmse_phi_rel':.14}
     with caplog.at_level(logging.INFO):valid_err_log(1.,metrics,Logger(),'ElectrostaticRMSE',5)
     assert 'RMSE_dip_per_atom=2.0000 meA' in caplog.text
     assert 'RMSE_rho=1.0000 me/A^3' in caplog.text
-    assert 'RMSE_WF(abs/rel)=150.0000/140.0000 meV' in caplog.text
+    assert 'RMSE_Phi(abs/rel)=150.0000/140.0000 mV' in caplog.text
     assert 'RMSE_EF(abs/rel)=200.0000/50.0000 meV' in caplog.text
     assert 'RMSE_ESPvac(abs/rel)=200.0000/100.0000 mV' in caplog.text
     assert 'RMSE_ESP=100.0000 mV' in caplog.text
@@ -522,7 +522,7 @@ def test_validation_and_calculator_use_deployment_step_count(tmp_path, mode):
     from ase import units
     from mace_scf.md import NVTPhiLangevin
     dynamics=NVTPhiLangevin(atoms,timestep=.01*units.fs,temperature_K=0.,friction=.01/units.fs,
-        target_potential=float(atoms.calc.results['workfunction'])+.1,
+        target_potential=float(atoms.calc.results['vacuum_potential']-atoms.calc.results['fermi_level'])+.1,
         rng=np.random.default_rng(17))
     dynamics.run(2)
     assert np.isfinite(atoms.positions).all()
@@ -544,7 +544,8 @@ def test_diagnostics_module_is_optional():
     with patch.dict(sys.modules, {'mace_scf.utils.diagnostics': None}):
         result = create_scf_convergence_summary(model, {'valid': loader}, {'forces': True}, 'cpu', {})
     assert 'mode=unroll_scf' in result
-    assert 'residual_50' in result and 'WF_50_minus_100_eV' in result
+    assert 'residual_50' in result and 'fermi_level_50_minus_100_eV' in result
+    assert 'vacuum_potential_50_minus_100_eV' in result
     assert model.training
     assert [p.requires_grad for p in model.parameters()] == flags
 
@@ -769,7 +770,7 @@ def test_voltage_diagnostics_center_once_and_preserve_input(caplog):
     import logging
     from copy import deepcopy
     from mace_scf.utils.train import _voltage_diagnostics
-    rows = [{'index':i, 'weight':w, 'wf_error':e, 'ef_error':0.,
+    rows = [{'index':i, 'weight':w, 'phi_error':e, 'ef_error':0.,
              'vacuum_error':e, 'dipole_step_error':e-2.}
             for i,(w,e) in enumerate(((1.,1.),(2.,3.),(1.,1.)))]
     original = deepcopy(rows)
@@ -778,8 +779,8 @@ def test_voltage_diagnostics_center_once_and_preserve_input(caplog):
     assert rows == original
     messages = [record.getMessage() for record in caplog.records]
     assert "[{'index': 1" in messages[0]
-    assert "'relative_WF_SSE_fraction': 0.5" in messages[0]
-    assert 'correlation with WF residual=1;' in messages[1]
+    assert "'relative_Phi_SSE_fraction': 0.5" in messages[0]
+    assert 'correlation with Phi residual=1;' in messages[1]
 
 def test_gradient_diagnostics_preserve_gradients_and_track_missing_owners():
     import torch
@@ -817,8 +818,7 @@ def test_voltage_diagnostics_reuse_evaluation_for_open_x_slabs(caplog):
         ef = data['fermi_level']+error
         vac = data['vacuum_potential']+2*error
         dipole = torch.stack((error, error*0., error*0.), dim=-1)
-        return {'fermi_level':ef, 'vacuum_potential':vac,
-                'workfunction':vac-ef, 'dipole':dipole}
+        return {'fermi_level':ef, 'vacuum_potential':vac, 'dipole':dipole}
 
     def check(level, batch_size):
         caplog.clear()
@@ -834,7 +834,7 @@ def test_voltage_diagnostics_reuse_evaluation_for_open_x_slabs(caplog):
     debug, debug_calls, messages = check(logging.DEBUG, 2)
     assert quiet_calls == [3] and debug_calls == [2, 1]
     assert quiet[0] == pytest.approx(debug[0])
-    assert quiet[1]['rmse_wf_rel'] == pytest.approx(debug[1]['rmse_wf_rel'])
-    assert any('correlation with WF residual=1;' in message for message in messages)
+    assert quiet[1]['rmse_phi_rel'] == pytest.approx(debug[1]['rmse_phi_rel'])
+    assert any('correlation with Phi residual=1;' in message for message in messages)
 
 

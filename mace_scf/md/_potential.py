@@ -5,10 +5,11 @@ import numpy as np
 
 
 def potential_difference(results, vacuum_potential_key, fermi_level_key) -> float:
-    """Read two finite scalar electron energies in eV and return their difference.
+    """Return phi_vac - mu/e in volts from two finite scalar observations.
 
-    The numerical value is the electrode potential in volts relative to the
-    vacuum reference. A physical target may require an initial-frame offset.
+    phi_vac uses the electron-referenced voltage convention; mu is in eV, so
+    mu/e has the same numerical value in volts. Existing DFT/model label values
+    therefore need no rescaling. A target may require an initial-frame offset.
     """
     values = []
     for key in (vacuum_potential_key, fermi_level_key):

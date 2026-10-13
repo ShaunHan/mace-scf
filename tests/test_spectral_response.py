@@ -15,6 +15,15 @@ from mace_scf.electrostatics.potential import (
 )
 
 
+_model_evaluate_variational = evaluate_variational
+
+def evaluate_variational(*args, **kwargs):
+    """Derive the voltage in the test consumer from the two public scalars."""
+    output = _model_evaluate_variational(*args, **kwargs)
+    output['potential_difference'] = output['vacuum_potential']-output['fermi_level']
+    return output
+
+
 @pytest.mark.parametrize('zero', [False, True])
 def test_finite_iteration_first_second_derivatives_and_checkpoint(zero):
     torch.set_default_dtype(torch.float64)
@@ -58,7 +67,7 @@ def test_finite_energy_force_ef_conjugacy(steps):
                                                      mode='unroll_scf', compute_force=False)['energy'])
     torch.testing.assert_close(-(charge_energies[1]-charge_energies[0])/(2*epsilon), result['fermi_level'], atol=2.e-7, rtol=2.e-5)
     torch.testing.assert_close(-(position_energies[1]-position_energies[0])/(2*epsilon), result['forces'][0, 2:3], atol=2.e-7, rtol=2.e-5)
-    loss = result['forces'].square().sum()+result['workfunction'].square().sum()
+    loss = result['forces'].square().sum()+result['potential_difference'].square().sum()
     loss.backward(inputs=[p for p in model.parameters() if p.requires_grad])
     assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
 
@@ -69,10 +78,10 @@ def test_finite_checkpoint_mode_matches_forward_and_parameter_gradients():
     results, gradients = [], []
     for mode in ('unroll_scf', 'shortcut_scf'):
         output = evaluate_variational(model, small_data(), steps=3, mode=mode, training=True)
-        objective = output['energy'].square().sum()+output['forces'].square().sum()+output['workfunction'].square().sum()
+        objective = output['energy'].square().sum()+output['forces'].square().sum()+output['potential_difference'].square().sum()
         gradients.append(torch.autograd.grad(objective, parameters, allow_unused=True))
         results.append(output)
-    for key in ('energy', 'forces', 'fermi_level', 'workfunction', 'density_coefficients'):
+    for key in ('energy', 'forces', 'fermi_level', 'potential_difference', 'density_coefficients'):
         torch.testing.assert_close(results[0][key], results[1][key])
     for left, right in zip(*gradients):
         if left is None:
@@ -90,7 +99,7 @@ def test_finite_trajectory_rotation_invariance():
         rotated[key] = rotated[key]@rotation.T
     before = evaluate_variational(model, original, steps=3, mode='unroll_scf')
     after = evaluate_variational(model, rotated, steps=3, mode='unroll_scf')
-    for key in ('energy', 'fermi_level', 'workfunction'):
+    for key in ('energy', 'fermi_level', 'potential_difference'):
         torch.testing.assert_close(before[key], after[key], atol=1.e-9, rtol=1.e-9)
     torch.testing.assert_close(before['forces']@rotation.T, after['forces'], atol=1.e-9, rtol=1.e-9)
 
@@ -224,7 +233,7 @@ def test_finite_force_parameter_gradient_and_charge_conjugacy():
     result = evaluate_variational(model, data, steps=50, training=True)
     assert torch.isfinite(result['forces']).all()
     assert result['scf_residual'].max() < 1.e-8
-    loss = result['forces'].square().sum()+result['workfunction'].square().sum()
+    loss = result['forces'].square().sum()+result['potential_difference'].square().sum()
     loss.backward(inputs=[p for p in model.parameters() if p.requires_grad])
     assert all(p.grad is None or torch.isfinite(p.grad).all() for p in model.parameters())
     eps = 1.e-5
@@ -241,7 +250,7 @@ def test_no_reference_label_leakage():
     data['fermi_level']=torch.tensor([999.])
     data['density_coefficients']=torch.randn_like(data['density_coefficients'])*100
     after=evaluate_variational(model,data,compute_force=False)
-    for key in ('energy','dipole','fermi_level','workfunction'):
+    for key in ('energy','dipole','fermi_level','potential_difference'):
         torch.testing.assert_close(before[key],after[key],rtol=0,atol=0)
 
 
@@ -288,7 +297,7 @@ def test_rotation_and_batch_invariance():
     for key in ('positions', 'cell', 'shifts', 'external_field'):
         rotated[key] = rotated[key]@rotation.T
     result = evaluate_variational(model, rotated)
-    for key in ('energy', 'workfunction', 'fermi_level'):
+    for key in ('energy', 'potential_difference', 'fermi_level'):
         torch.testing.assert_close(result[key], reference[key], atol=2.e-10, rtol=2.e-10)
     torch.testing.assert_close(result['forces'], reference['forces']@rotation.T, atol=2.e-10, rtol=2.e-10)
     torch.testing.assert_close(result['dipole'], reference['dipole']@rotation.T, atol=2.e-10, rtol=2.e-10)
@@ -300,7 +309,7 @@ def test_rotation_and_batch_invariance():
     result = evaluate_variational(model, batched)
     for i, (charge, atoms) in enumerate(((.1, None), (-.2, second))):
         single = evaluate_variational(model, small_data(charge, atoms=atoms))
-        for key in ('energy', 'workfunction', 'fermi_level', 'dipole'):
+        for key in ('energy', 'potential_difference', 'fermi_level', 'dipole'):
             torch.testing.assert_close(result[key][i:i+1], single[key], atol=3.e-10, rtol=3.e-10)
 
 

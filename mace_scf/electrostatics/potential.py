@@ -737,7 +737,7 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
                                   rcond=1.e-10, driver='gelsd').solution.to(x)/scale
     response.vacuum_reference_integrals.copy_(solution)
     residual = ((x@solution-y).square()*w).sum()/w.sum()
-    logging.debug('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g eV; '
+    logging.debug('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g V; '
                  'shared EF/vacuum gauge, fitted independently of optional spatial proto data',relative,len(y),float(residual.sqrt()))
 
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:

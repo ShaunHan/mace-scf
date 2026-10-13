@@ -32,7 +32,7 @@ def test_counter_source_cartesian_export_roundtrip(tmp_path):
     runpy.run_path(str(script))['export_frame'](atoms, destination)
     controls = json.loads((destination/'counter_charge.json').read_text())
     assert controls['counter_charge_center'] == [2., 3., 9.]
-    assert controls['counter_charge_width'] == .3
+    assert controls['counter_charge_width'] == pytest.approx(.3)
     assert 'vacuum_potential' not in controls and 'fermi_level' not in controls
     recovered = read(destination/'frame.xyz')
     assert 'model_forces' not in recovered.arrays
@@ -141,7 +141,7 @@ def test_independent_vacuum_loss_does_not_require_fermi_or_spectral_labels():
     torch.testing.assert_close(loss, torch.tensor(1.))
     torch.testing.assert_close(torch.autograd.grad(loss,value)[0],torch.tensor([2.,0.]))
     with pytest.raises(ValueError, match='not recognised'):
-        WeightedLoss({'workfunction':1})
+        WeightedLoss({'potential_difference':1})
     with pytest.raises(TypeError):
         WeightedLoss({'fourier_potential':{'weight':1,'vacuum_weight':1}})
 
@@ -153,7 +153,7 @@ def test_reference_labels_cannot_change_deployment_predictions():
     data['fermi_level'].fill_(999.)
     data['vacuum_potential'].fill_(-999.)
     second = evaluate_coupled(model,deepcopy(data),steps=12)
-    for key in ('energy','forces','fermi_level','vacuum_potential','workfunction','fourier_potential'):
+    for key in ('energy','forces','fermi_level','vacuum_potential','fourier_potential'):
         torch.testing.assert_close(first[key],second[key],rtol=0,atol=0)
 
 
@@ -191,7 +191,7 @@ def test_raw_potential_zero_modes_cannot_drive_response_or_change_loss_gradients
     new_value=loss(batch,after)
     new_gradient=torch.autograd.grad(new_value,params,allow_unused=True)
     torch.testing.assert_close(value,new_value,atol=0,rtol=0)
-    for key in ('energy','forces','fermi_level','vacuum_potential','workfunction','fourier_potential'):
+    for key in ('energy','forces','fermi_level','vacuum_potential','fourier_potential'):
         torch.testing.assert_close(before[key],after[key],atol=0,rtol=0)
     for key in ('fermi_level','vacuum_potential','fourier_potential'):
         torch.testing.assert_close(before['reference_response'][key],after['reference_response'][key],atol=0,rtol=0)
@@ -204,7 +204,7 @@ def test_raw_potential_zero_modes_cannot_drive_response_or_change_loss_gradients
 
 
 @pytest.mark.parametrize('ef,vacuum', [(False,False),(True,False),(False,True),(True,True)])
-def test_wf_metric_requires_both_independent_labels(ef,vacuum):
+def test_voltage_metric_requires_both_independent_labels(ef,vacuum):
     from mace.tools import torch_geometric
     from mace_scf.utils.train import evaluate
     from mace_scf.utils.model_training_wrappers import FixedPointWrapper
@@ -217,7 +217,7 @@ def test_wf_metric_requires_both_independent_labels(ef,vacuum):
     wrapper = FixedPointWrapper(None,{'forces':True},FixedPointTrainingOptions(
         mode='unroll_scf',scf=FixedPointSCFOptions(num_scf_steps=2)))
     _,metrics = evaluate(model,wrapper,WeightedLoss({'forces':1.}),None,loader,'cpu')
-    assert ('rmse_wf_abs' in metrics) == (ef and vacuum)
+    assert ('rmse_phi_abs' in metrics) == (ef and vacuum)
     assert ('rmse_esp_vac' in metrics) == vacuum
 
 
@@ -229,7 +229,7 @@ def test_vacuum_only_main_log(caplog):
         valid_err_log(1.,{'rmse_esp_vac':.1,'esp_vacuum_enabled':True},
                       SimpleNamespace(log=lambda _: None),'ElectrostaticRMSE',0)
     assert 'RMSE_ESPvac(abs/rel)=100.0000/n/a mV' in caplog.text
-    assert 'RMSE_WF' not in caplog.text
+    assert 'RMSE_Phi' not in caplog.text
 
 
 def test_cold_reference_initialization_uses_independent_vacuum_label():
@@ -321,7 +321,7 @@ def test_conditional_loss_has_finite_gradients_without_changing_free_predictions
     for key in ('energy','forces','fermi_level','vacuum_potential','fourier_potential','total_charge'):
         torch.testing.assert_close(before[key],after[key],rtol=0,atol=0)
     assert 'reference_response' in after
-    assert 'workfunction' not in after['reference_response']
+    assert 'potential_difference' not in after['reference_response']
     torch.testing.assert_close(after['total_charge'],data['total_charge'])
     assert after['reference_response']['reference_charge_error'].abs().max()>0
     ref = SimpleNamespace(**data,to_dict=lambda:data)
@@ -349,7 +349,7 @@ def test_validation_wrapper_never_conditions_on_reference_labels(reference_mode)
     data['fourier_potential'].mul_(2.)
     prediction = wrapper(model,deepcopy(data),training=False)
     assert 'reference_response' not in prediction
-    for key in ('energy','forces','fermi_level','vacuum_potential','workfunction'):
+    for key in ('energy','forces','fermi_level','vacuum_potential'):
         torch.testing.assert_close(baseline[key],prediction[key],rtol=0,atol=0)
     assert prediction['scf_steps'].item()==50
 
@@ -405,7 +405,7 @@ def test_reference_conditioning_respects_saved_scalar_references():
         torch.testing.assert_close(before['reference_response'][key],after['reference_response'][key],rtol=1.e-12,atol=1.e-12)
     for key,shift in (('fermi_level',.8),('vacuum_potential',-.3)):
         torch.testing.assert_close(after['reference_response'][key]-before['reference_response'][key],torch.tensor([shift]),rtol=1.e-12,atol=1.e-12)
-    assert 'workfunction' not in after['reference_response']
+    assert 'potential_difference' not in after['reference_response']
 
 
 def test_no_fermi_observations_means_no_conditional_branch():
