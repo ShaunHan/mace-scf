@@ -363,7 +363,8 @@ class AtomicPotentialResponse(nn.Module):
         # respect to positions and parameters; no learned field is supplied here.
         hidden = self.geometry_reference_features(chemical, vector)
         initial_scalar = self.scalar_out(hidden)
-        chi0 = attrs@self.species_level + initial_scalar[...,0]
+        species_level = attrs @ self.species_level
+        chi0 = species_level + initial_scalar[...,0]
         chi0 = chi0 + p0[..., 0]
         softness0 = self.softness_scale*(F.softplus(initial_scalar[...,1]+math.log(math.expm1(1.)))+1.e-6)
         electronic_reference = torch.stack((chi0,softness0),-1)
@@ -375,12 +376,13 @@ class AtomicPotentialResponse(nn.Module):
         raw=torch.cat((scalar[...,2:],polar[...,1:,:].flatten(-2)),-1)
         offset=torch.cat((torch.zeros_like(state[...,:1]),polar[...,0,:],local-raw),-1)*mask[...,None]
         dipole_soft=self.softness_scale*(F.softplus(self.dipole_hardness(hidden)+math.log(math.expm1(1.)))+1.e-6)
-        return local,torch.cat((offset,dipole_soft,electronic_reference),-1)
+        return local,torch.cat((offset,dipole_soft,electronic_reference),-1),species_level
 
 
-    def forward(self,state,chemical,vector,attrs,potential,field,p0,mask,target,
+    def forward(self,state,chemical,vector,species_level,potential,field,p0,mask,target,
                 neighborhood=None,*,include_energy=True,reference_offset=None,
                 observe_chemical_level=True):
+        """Respond using geometry features and prepared per-atom scalar levels."""
         extra=3
         if reference_offset is None or reference_offset.shape!=(*state.shape[:-1],state.shape[-1]+extra):
             raise ValueError('Missing/mismatched differentiable geometry/electrochemical reference')
@@ -397,7 +399,7 @@ class AtomicPotentialResponse(nn.Module):
         # Preserve the law of already fitted geometry-response checkpoints.
         geometry_charge = self.source_channels and getattr(self, 'charge_response', 'geometry') == 'geometry'
         chemical_level = (electronic_reference[...,0] if geometry_charge else
-                          attrs@self.species_level+scalars[...,0]+p0[...,0])
+                          species_level+scalars[...,0]+p0[...,0])
         softness=electronic_reference[...,1]
         reference_charge = torch.zeros_like(p0[..., 0])
         # Align the common component once, before the charge multiplier is
@@ -407,7 +409,7 @@ class AtomicPotentialResponse(nn.Module):
             soft = softness*mask
             f = soft/soft.sum(-1, keepdim=True)
             common = self.common_level((f[...,None]*computed[-1]).sum(1)).squeeze(-1)
-            common = common+(f*(attrs@self.species_level)).sum(-1)
+            common = common+(f*species_level).sum(-1)
             chemical_level = chemical_level+(common-(f*chemical_level).sum(-1))[:,None]
         levels=chemical_level+potential[...,0]
         q,mu,f,response,neutral=charge_closure(reference_charge,levels,softness,target,mask)
@@ -1244,7 +1246,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     transport = angular_transport(local.positions, data['edge_index'], data.get('shifts'),
         g.batch, g.slot, len(g.counts), g.size, float(model.r_max),
         float(getattr(r, 'neighbor_width', r.receiver_widths.max())))
-    source, reference = r.prepare_reference(state, chemical, vector, g.attrs, p0, mask, target, transport)
+    source, reference, species_level = r.prepare_reference(state, chemical, vector, g.attrs, p0, mask, target, transport)
     state = torch.cat((state[..., :1], state[..., 1:4]+reference[..., 1:4], source), -1)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
     factors = factor_moments(reference, kernel, mask)
@@ -1262,18 +1264,21 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     names = tuple(name for name,_ in r.named_parameters())
     # All geometry, reference and parameter dependencies are explicit for the
     # converged-root adjoint, including the live linear operator behind LU.
-    fixed = (chemical, vector, g.attrs, p0, mask, target, transport, reference,
+    # Species offsets are selected once by the geometric node maps. The
+    # recurrent neural features contain geometry, fields and messages only.
+    # Keep this scalar attached to autograd for training and implicit response.
+    fixed = (chemical, vector, species_level, p0, mask, target, transport, reference,
              completion, *factors, *g.tensors, *g.kernels)
     count = len(fixed)
 
     def evaluate(z, *args, screened=True, include_energy=False, observe=True):
-        chem, vec, attrs, initial, present, charge, neighbors, ref, coupling = args[:9]
+        chem, vec, level, initial, present, charge, neighbors, ref, coupling = args[:9]
         factor = args[9:13]
         geometry, kernels = args[13:27], args[27:29]
         spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
                     if observe else (total_spectrum(z*present[..., None], geometry, kernels, r.density_width),))
         potential, field = sample_spectrum(spectral[0], geometry)
-        inputs = (z, chem, vec, attrs, potential, field, initial, present, charge, neighbors)
+        inputs = (z, chem, vec, level, potential, field, initial, present, charge, neighbors)
         options = {'include_energy': include_energy, 'reference_offset': ref,
                    'observe_chemical_level': observe}
         result = (functional_call(r, dict(zip(names, args[count:])), inputs, options, strict=False)
@@ -1308,7 +1313,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
     the measured density is used. The ordinary fixed-Q prediction is untouched.
     """
     r = model.field_dependent_charges_map
-    chemical, vector, attrs, p0, mask, target, neighbors, reference = fixed[:8]
+    chemical, vector, species_level, p0, mask, target, neighbors, reference = fixed[:8]
     factors = fixed[9:13]
     observed = (data['fermi_level_weight'].reshape(-1)>0) & (data['weight'].reshape(-1)>0)
     if not bool(observed.any()):
@@ -1377,7 +1382,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
         selected = torch.where(use[:, None,None],selected,spectral[0])
         values, gradients = sample_spectrum(selected,g.tensors)
-        conditional = r(state,chemical,vector,attrs,values,gradients,p0,mask,target,neighbors,
+        conditional = r(state,chemical,vector,species_level,values,gradients,p0,mask,target,neighbors,
                         include_energy=False,reference_offset=reference)
         result['fermi_level'] = conditional[1]+model.fermi_level_offset+g.vacuum_reference
         masks['fermi_level'] = use
