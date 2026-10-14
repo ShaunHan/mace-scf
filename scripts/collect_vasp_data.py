@@ -1,5 +1,6 @@
 """Collect training labels directly from VASP outputs. Edit the settings below."""
 from pathlib import Path
+import json
 import multiprocessing as mp
 
 import h5py
@@ -9,8 +10,6 @@ from pymatgen.io.vasp import Chgcar, Locpot, Outcar
 
 
 BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
-PROTO_BASE_PATH = BASE_PATH.with_name("dft_proto")
-CHUNK_SIZE = 5
 N_PROCS = 64
 REUSE_HDF = False
 K_CUTOFF = 18.0
@@ -32,9 +31,15 @@ OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 def get_output_dirs():
     folders = sorted((p for p in BASE_PATH.glob("vasp_*") if p.is_dir()),
                      key=lambda p: int(p.name.split("_")[1]))
-    return [folder / f"output_{i}" for folder in folders for i in range(CHUNK_SIZE)
-            if int(folder.name.split("_")[1]) + i not in SKIP_IDS
-            and (folder / f"output_{i}").is_dir()]
+    paths = []
+    for folder in folders:
+        outputs = sorted((p for p in folder.glob("output_*") if p.is_dir()),
+                         key=lambda p: int(p.name.split("_")[1]))
+        for outdir in outputs:
+            meta = json.loads((outdir / "dft_metadata.json").read_text())
+            if int(folder.name.split("_")[1]) + meta["source_index"] not in SKIP_IDS:
+                paths.append(outdir)
+    return paths
 
 
 def read_grid(path, atoms, reader):
@@ -76,14 +81,15 @@ def fourier_data(outdir, atoms, parameters, axis):
     path = outdir / HDF_NAME
     if REUSE_HDF and path.is_file():
         with h5py.File(path, "r") as handle:
-            if handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle):
+            if (handle.attrs.get("schema") != "same_run_cdce_v1"
+                    or handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle)):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
             return {name: handle[name][...] for name in names}
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int)
     data = {}
     if DENSITY_SIGMAS:
-        density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
+        density = read_grid(outdir / "AECCAR1_proto", atoms, Chgcar)
         final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
         if density.shape != final_density.shape:
             raise ValueError(f"AECCAR grid mismatch: {outdir}")
@@ -94,9 +100,10 @@ def fourier_data(outdir, atoms, parameters, axis):
     if POTENTIAL_SIGMAS:
         if not parameters["lvhar"]:
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
-        potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
-        proto_dir = PROTO_BASE_PATH / outdir.relative_to(BASE_PATH)
-        proto = read_grid(proto_dir / "LOCPOT", atoms, Locpot)
+        # LOCPOT_total explicitly includes the plugin once, independent of
+        # whether this VASP version includes it in its native LOCPOT output.
+        potential = read_grid(outdir / "LOCPOT_total", atoms, Locpot)
+        proto = read_grid(outdir / "LOCPOT_proto", atoms, Locpot)
         if potential.shape != proto.shape:
             raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
         if axis is not None:
@@ -106,6 +113,7 @@ def fourier_data(outdir, atoms, parameters, axis):
         data["proto_fourier_potential"] = truncate_fft(np.fft.fftn(proto), shape)
     temporary = path.with_suffix(".tmp")
     with h5py.File(temporary, "w") as handle:
+        handle.attrs["schema"] = "same_run_cdce_v1"
         handle.attrs["k_cutoff"] = K_CUTOFF
         for name, values in data.items():
             handle.create_dataset(name, data=values)
@@ -122,12 +130,31 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
         target = truncate_fft(coefficients, shape)
         axes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
         wavevectors = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1) @ reciprocal
-        target *= np.exp(-0.5 * float(sigma)**2 * np.sum(wavevectors**2, axis=-1))
+        k2 = np.sum(wavevectors**2, axis=-1)
+        smoothing = np.exp(-0.5 * float(sigma)**2 * k2)
+        target *= smoothing
         if charge is not None:
             target[0, 0, 0] = charge * np.prod(shape) / atoms.get_volume()
         target = hermitian(target)
         atoms.info[f"{prefix}_fftn_shifted_{float(sigma)}"] = np.stack(
             [target.real, target.imag]).astype(np.float32)
+        if prefix == "vasp_phi":
+            # v383-v387 adds the prescribed periodic counter potential without
+            # observation smoothing. Preserve the ordinary smoothed DFT label
+            # above, and supply a separate, explicitly model-matched target:
+            # smooth(total - proto - periodic_cc) + periodic_cc.
+            qcc = float(atoms.info.get("counter_charge", 0.0))
+            known = np.zeros_like(target)
+            if qcc:
+                modes = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
+                planar = np.all(modes[..., atoms.pbc] == 0, axis=-1)
+                rho = (qcc / atoms.get_volume() * np.prod(shape) * planar *
+                       np.exp(-0.5 * atoms.info["counter_charge_width"]**2 * k2) *
+                       np.exp(-1j * (wavevectors @ atoms.info["counter_charge_center"])))
+                np.divide(-rho / 0.005526349406, k2, out=known, where=k2 > 0)
+            matched = hermitian(target + (1 - smoothing) * known)
+            atoms.info[f"vasp_phi_model_fftn_shifted_{float(sigma)}"] = np.stack(
+                [matched.real, matched.imag]).astype(np.float32)
 
 
 def add_vacuum_target(atoms, planar, axis, correction):
@@ -136,6 +163,11 @@ def add_vacuum_target(atoms, planar, axis, correction):
         raise ValueError(f"For this VASP IDIPOL, specify only {key}")
     if VACUUM_PLANE:
         fraction = float(VACUUM_PLANE[key])
+        if atoms.info.get("counter_charge", 0) and key in atoms.info and not np.isclose(
+                fraction, atoms.info[key], atol=1e-10, rtol=0):
+            raise ValueError("Keep the charged run's vacuum reference plane")
+    elif key in atoms.info:
+        fraction = float(atoms.info[key])
     else:
         distances = (correction - atoms.get_scaled_positions()[:, axis]) % 1.0
         fraction = (correction - 0.5 * np.min(distances[distances > 1e-8])) % 1.0
@@ -151,6 +183,9 @@ def add_vacuum_target(atoms, planar, axis, correction):
 
 
 def collect_job(outdir):
+    metadata = json.loads((outdir / "dft_metadata.json").read_text())
+    if metadata.get("schema") != "mace_volt_cdce_v1" or not metadata.get("complete"):
+        raise ValueError(f"Incomplete/unrecognized dft_runs.py output: {outdir}")
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
     forces = atoms.get_forces(apply_constraint=False)
@@ -167,24 +202,37 @@ def collect_job(outdir):
     fermi = float(outcar.efermi)
     if not np.isfinite(charge) or not np.isfinite(fermi):
         raise ValueError(f"Nonfinite charge/Fermi level: {outdir}")
+    counter = float(metadata["counter_charge"])
+    if (not np.isclose(charge, metadata["total_charge"], atol=1e-5, rtol=0)
+            or not np.isclose(charge + counter, 0, atol=1e-5, rtol=0)):
+        raise ValueError(f"NELECT/total_charge/counter_charge mismatch: {outdir}")
 
-    slab = bool(parameters["ldipol"])
-    axis = int(parameters["idipol"]) - 1 if slab else None
-    external_field = np.zeros(3)
+    # Charged slabs use a Python dipole correction with native LDIPOL=False.
+    axis = metadata["slab_axis"]
+    slab = axis is not None
+    external_field = np.asarray(metadata["external_field"], dtype=float)
     dipole = np.zeros(3)
     if slab:
         if axis not in (0, 1, 2):
             raise ValueError(f"Slab collection needs IDIPOL=1, 2 or 3: {outdir}")
         normal = np.linalg.inv(atoms.cell.array)[:, axis]
         normal /= np.linalg.norm(normal)
-        external_field = -float(parameters["efield"]) * normal
-        dipole = -np.asarray(atoms.get_dipole_moment(), dtype=float).reshape(3)
+        if metadata["plugin"]:
+            if bool(parameters["ldipol"]) or int(parameters["idipol"]) != 0:
+                raise ValueError(f"Native/plugin dipole corrections would be duplicated: {outdir}")
+            if parameters.get("lremove_drift") is not False:
+                raise ValueError(f"LREMOVE_DRIFT=False was not confirmed by VASP: {outdir}")
+            with np.load(outdir / "plugin_observables.npz") as data:
+                # Electrode + explicit solvent only; exclude the countercharge.
+                dipole = float(data["electrode_dipole"]) * normal
+                if not np.allclose(forces, data["expected_forces"], atol=2e-5, rtol=0):
+                    raise ValueError(f"Plugin/VASP force mismatch: {outdir}")
+        else:
+            dipole = -np.asarray(atoms.get_dipole_moment(), dtype=float).reshape(3)
         if not np.isfinite(dipole).all():
             raise ValueError(f"Nonfinite dipole: {outdir}")
-        if np.all(np.asarray(parameters["dipol"]) == -100):
-            raise ValueError(f"Specify DIPOL in VASP to locate its correction plane: {outdir}")
-        center = float(parameters["dipol"][axis]) % 1.0
-        correction = (center + 0.5) % 1.0
+        correction = float(metadata[f"dipole_correction_{'xyz'[axis]}frac"])
+        center = (correction + 0.5) % 1.0
         fractional = atoms.get_scaled_positions(wrap=False)[:, axis]
         atoms.positions -= np.floor(fractional - center + 0.5)[:, None] * atoms.cell[axis]
         atoms.pbc[axis] = False
@@ -197,14 +245,21 @@ def collect_job(outdir):
         "vasp_free_energy": float(energy),
         "vasp_efermi": fermi,
         "total_charge": float(charge),
+        "counter_charge": counter,
+        "counter_charge_center": np.asarray(metadata["counter_charge_center"]),
+        "counter_charge_width": float(metadata["counter_charge_width"]),
         "external_field": external_field,
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
         "config_fermi_level_weight": float(slab),
         "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
+        "config_stress_weight": 0.0,  # The fixed-cell plugin supplies no stress.
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
+        vacuum_key = f"vacuum_{'xyz'[axis]}frac"
+        if vacuum_key in metadata:
+            atoms.info[vacuum_key] = float(metadata[vacuum_key])
     data = fourier_data(outdir, atoms, parameters, axis)
     if DENSITY_SIGMAS:
         add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
