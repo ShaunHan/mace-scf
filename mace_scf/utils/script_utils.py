@@ -49,6 +49,9 @@ def create_error_table(
     log_wandb: bool,
     device: str,
     distributed: bool = False,
+    metrics_logger=None,
+    epoch=None,
+    stage=None,
 ) -> PrettyTable:
     assert table_type in NEW_TABLE_TYPES
 
@@ -130,7 +133,12 @@ def create_error_table(
             loss_fn=loss_fn,
             data_loader=data_loader,
             device=device,
+            split=name,
         )
+        if metrics_logger is not None:
+            metrics_logger.log({**metrics, 'mode':'eval', 'split':name,
+                                'epoch':epoch, 'stage':stage,
+                                'metric_context':'checkpoint_evaluation'})
         if distributed:
             torch.distributed.barrier()
         del data_loader

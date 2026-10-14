@@ -476,6 +476,8 @@ def main() -> None:
     all_data_loaders.update(test_data_loaders)
     
     logging.info("Computing final error tables and saving models")
+    final_logger = (tools.MetricsLogger(directory=args.results_dir, tag=tag + "_final")
+                    if rank == 0 else None)
     stages_with_models = []
     for train_stage in args.train_schedule:
         stage_name = train_stage["name"]
@@ -522,6 +524,9 @@ def main() -> None:
             log_wandb=args.wandb,
             device=device,
             distributed=args.distributed,
+            metrics_logger=final_logger,
+            epoch=latest_checkpoint_epoch,
+            stage=stage_name,
         )
         if rank == 0:
             logging.info("\nFinal error table for stage %s", stage_name)

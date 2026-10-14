@@ -19,6 +19,9 @@ from mace.tools.utils import (
     compute_rmse,
 )
 import os
+from mace_scf.utils.training_metrics import (
+    RMSE_KEYS, training_error_sums, training_error_metrics,
+)
 from mace.tools.scatter import scatter_sum
 from mace_scf.electrostatics.loss import (
     vacuum_observation_weight, vacuum_reference_weights, RelativeScalarLoss,
@@ -185,14 +188,27 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
         if hasattr(optimizer, "train"):
             optimizer.train()
         norms, retained, clipped, graphs_seen = [], [], 0, 0
+        epoch_errors = torch.zeros((len(RMSE_KEYS), 2), dtype=torch.float64, device=device)
         for step, batch in enumerate(train_loader):
             _, metrics = take_step(model if distributed_model is None else distributed_model,
                 model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
                 debug_log_grad_summary, debug_grad_log_frequency, step)
+            if "_rmse_sums" in metrics:
+                epoch_errors += metrics.pop("_rmse_sums")
             norms.append(metrics["grad_norm_before_clip"])
             retained.append(metrics["gradient_retained"])
             graphs_seen += metrics["graphs"]
             clipped += int(metrics["grad_clip_applied"])
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(epoch_errors)
+        if rank == 0 and logger is not None:
+            online = training_error_metrics(epoch_errors)
+            options = getattr(model_eval_wrapper, 'training_options', None)
+            scf = getattr(options, 'scf', None)
+            logger.log({**online, 'mode':'train', 'split':'training', 'epoch':epoch,
+                        'metric_context':'online_training', 'parameter_state':'optimizer',
+                        'scf_steps':getattr(scf, 'num_scf_steps', None)})
+            logging.debug('Training epoch %d, online RMSE (base units): %s', epoch, online)
         if epoch % eval_interval == 0 or epoch == end_epoch:
             if cuda_device:
                 torch.cuda.synchronize(device)
@@ -355,6 +371,7 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     def backward_batch():
         from mace.tools.torch_geometric import Batch
         total=None
+        metric_sums=None
         denominators = dict(normalizers) if normalizers is not None else None
         if adaptive and limit < len(graphs) and loss_fn.relative_scalar_losses:
             pieces = (Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit))
@@ -368,8 +385,10 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
                 raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
             torch.autograd.backward(loss,inputs=parameters)
             total=loss.detach() if total is None else total+loss.detach()
+            observed = training_error_sums(piece, output, loss_fn)
+            metric_sums = observed if metric_sums is None else metric_sums+observed
             del output,loss,piece
-        return total
+        return total, metric_sums
 
     def attempt():
         # Returning out of the exception scope releases the failed autograd
@@ -385,8 +404,10 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     rng=(torch.random.get_rng_state(),torch.cuda.get_rng_state(device)) if adaptive else None
     while True:
         optimizer.zero_grad(set_to_none=True)
-        loss=attempt()
-        if loss is not None:break
+        result=attempt()
+        if result is not None:
+            loss, metric_sums = result
+            break
         optimizer.zero_grad(set_to_none=True)
         import gc
         gc.collect();torch.cuda.empty_cache()
@@ -410,7 +431,7 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
                "grad_clip_applied": max_grad_norm is not None and norm_value>max_grad_norm,
                "gradient_retained": min(1., max_grad_norm/(norm_value+1.e-6)) if max_grad_norm is not None else 1.,
                "graphs": int(batch.num_graphs),
-               "device_batch_size":limit}
+               "device_batch_size":limit, "_rmse_sums":metric_sums}
     optimizer.step()
     if ema is not None:
         ema.update()
