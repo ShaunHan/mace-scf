@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""NVT-Phi O-O umbrella sampling with append-only continuation (mace_scf v383).
-
-Start in a fresh working directory. Rerun to resume future umbrella runs.
-Analyze fixed-window samples with analyze_umbrella.py. This one-distance
-harmonic restraint needs ASE and mace_scf; no PySAGES/library changes.
-"""
 import csv
 import hashlib
 import json
@@ -210,7 +204,7 @@ def simulate(atoms, model_file, max_steps=None):
     cfg_path = Path('run.json')
     if cfg_path.exists():
         protocol = json.loads(cfg_path.read_text())
-        if protocol.get('method') != 'distance_umbrella_v385' or restart is None:
+        if protocol.get('method') != 'distance_umbrella' or restart is None:
             raise ValueError('Use a fresh folder: restart is supported only for new umbrella runs')
         if protocol['settings'] != settings() or protocol['model_sha256'] != digest:
             raise ValueError('Saved umbrella settings/model differ; restore them before continuing')
@@ -221,7 +215,7 @@ def simulate(atoms, model_file, max_steps=None):
             raise ValueError('Restart requires the original run.json')
         distance = atoms.get_distance(*pair, mic=True)
         n = max(2, int(np.ceil(max(0., distance-OO_MIN)/WINDOW_SPACING))+1)
-        protocol = dict(method='distance_umbrella_v385', source_index=index, oxygen_pair=pair,
+        protocol = dict(method='distance_umbrella', source_index=index, oxygen_pair=pair,
                         centers_A=np.linspace(distance, OO_MIN, n).tolist(),
                         fixed_ids=physical[0].get_indices().tolist(), settings=settings(),
                         model_sha256=digest, model_file=str(model_file))
@@ -342,8 +336,8 @@ def load_atoms(source, index):
             raise FileNotFoundError('New runs require ATOMS_FILE')
         return prepare_frame(source, index)
     cfg = json.loads(cfg_path.read_text())
-    if cfg.get('method') != 'distance_umbrella_v385':
-        raise ValueError('Existing metadynamics runs are unchanged; start in a fresh working directory')
+    if cfg.get('method') != 'distance_umbrella':
+        raise ValueError('Method not supported')
     if cfg['source_index'] != index:
         raise ValueError('Restart folder and frame index differ')
     atoms = None
@@ -392,7 +386,7 @@ def main():
     frames = read(ATOMS_FILE, index=':') if Path(ATOMS_FILE).exists() else None
     if frames is not None and max(indexes) >= len(frames):
         raise ValueError(f'Frame indexes must lie in 0..{len(frames)-1}')
-    directories = [str(Path(f'metad_{i}').resolve()) for i in indexes]
+    directories = [str(Path(f'umbrella_{i}').resolve()) for i in indexes]
     failures = []
     with ProcessPoolExecutor(max_workers=len(indexes), mp_context=mp.get_context('spawn')) as pool:
         jobs = {pool.submit(run_one, frames[i] if frames is not None else None, i, model_file, d): i
@@ -401,10 +395,10 @@ def main():
             i = jobs[job]
             try:
                 job.result()
-                print(f'metad_{i}: complete', flush=True)
+                print(f'umbrella_{i}: complete', flush=True)
             except Exception as error:
                 failures.append(i)
-                print(f'metad_{i}: failed ({error}); see run.log', flush=True)
+                print(f'umbrella_{i}: failed ({error}); see run.log', flush=True)
     if failures:
         raise RuntimeError(f'Failed runs: {failures}')
 
