@@ -14,12 +14,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.ticker import AutoMinorLocator, FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 import numpy as np
 
 # (label, line style, results file)
 RUNS = [
-    ("Scratch", "--", Path("fit_0_run-7777_train.txt")),
-    ("MACE-POLAR fine-tuning", "-", Path("finetune/results/fit_0_run-7777_train.txt")),
+    ("Scratch training", "--", Path("fit_0_run-7777_train.txt")),
+    ("MACE-POLAR finetuning", "-", Path("finetune/results/fit_0_run-7777_train.txt")),
 ]
 OUTPUT = Path("mace_volt_learning_curves")
 Y_SCALE = "log"  # Or "linear".
@@ -64,62 +65,103 @@ def curve(records, keys):
     return epochs, errors
 
 
+def format_ticks(ax):
+    """Label intermediate log ticks, including ranges below one decade."""
+    lo, hi = ax.get_ylim()
+    if Y_SCALE == "log":
+        decades = np.log10(hi / lo)
+        locator = (MaxNLocator(nbins=5, min_n_ticks=4) if decades < 0.5 else
+                   LogLocator(base=10, subs=(1,) if decades > 3 else (1, 2, 3, 5, 7),
+                              numticks=100))
+        ax.yaxis.set_major_locator(locator)
+        ax.yaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
+    else:
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6, min_n_ticks=4))
+        ax.yaxis.set_minor_locator(AutoMinorLocator(2))
+    # Keep text clear of the horizontal borders shared with the next row.
+    inner = np.exp(np.log([lo, hi]) + np.array([1, -1]) * 0.025 * np.log(hi / lo)) if Y_SCALE == "log" else (
+        np.array([lo, hi]) + np.array([1, -1]) * 0.025 * (hi - lo))
+    ticks = ax.get_yticks()
+    ax.set_yticks(ticks[(ticks > inner[0]) & (ticks < inner[1])])
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+    ax.yaxis.set_minor_formatter(NullFormatter())
+
+
 def plot_learning_curves(runs=RUNS, output=OUTPUT):
     plt.rcParams.update({
         "font.family": "sans-serif", "font.sans-serif": ["Arial", "DejaVu Sans"],
-        "font.size": 11, "axes.titlesize": 11.5, "axes.linewidth": 0.8,
-        "axes.spines.top": False, "axes.spines.right": False, "axes.grid": False,
+        "font.size": 10, "axes.linewidth": 0.85,
+        "axes.spines.top": True, "axes.spines.right": True,
+        "axes.spines.bottom": True, "axes.spines.left": True, "axes.grid": False,
         "svg.fonttype": "none", "savefig.facecolor": "white",
     })
-    fig, axes = plt.subplots(2, 3, figsize=(13.2, 7.4), sharex=True)
-    handles, summaries = [], [[] for _ in PANELS]
+    fig, axes = plt.subplots(2, 3, figsize=(11.8, 6.8), sharex=True,
+                             gridspec_kw={"wspace": 0, "hspace": 0})
+    handles, summaries, epoch_limits = [], [[] for _ in PANELS], []
+    has_training = False
     for label, style, path in runs:
         data = read_metrics(path)
+        run_plotted = False
         for split, color in COLORS.items():
-            online = split == "Training" and any(
-                row.get("metric_context") == "online_training" for row in data[split].values())
-            description = "online training" if online else split.lower()
-            plotted = False
             for ax, (_, _, keys), summary in zip(axes.flat, PANELS, summaries):
                 epochs, errors = curve(data[split], keys)
                 finite = np.flatnonzero(np.isfinite(errors))
                 if len(finite) < 2:
-                    continue  # Never plot an isolated measurement.
+                    continue
                 last = finite[-1]
-                tag = "T online" if online else split[0]
-                short = label.replace(" fine-tuning", "")
-                summary.append(f"{short} {tag}: {errors[last]:.4g} ({epochs[last]:g})")
+                if split == "Validation":
+                    summary.append(Line2D([], [], color=color, linestyle=style, linewidth=1.7,
+                        label=f"{label}: {errors[last]:.4g} ({epochs[last]:g})"))
                 if Y_SCALE == "log":
                     errors[errors == 0] = np.nan
-                ax.plot(epochs, errors, color=color, linestyle=style, linewidth=1.8)
-                plotted = True
-            if plotted:
-                handles.append(Line2D([], [], color=color, linestyle=style, linewidth=1.8,
-                                      label=f"{label} · {description}"))
+                ax.plot(epochs, errors, color=color, linestyle=style, linewidth=1.7)
+                epoch_limits.extend((epochs[finite[0]], epochs[last]))
+                run_plotted = True
+                has_training |= split == "Training"
+        if run_plotted:
+            handles.append(Line2D([], [], color="0.15", linestyle=style, linewidth=1.8, label=label))
     if not handles:
         plt.close(fig)
         raise ValueError("No RMSE curves found. Set the results paths in RUNS.")
 
+    start, end = min(epoch_limits), max(epoch_limits)
+    span = max(end - start, 1)
+    # Keep a clear strip for y tick labels inside each shared border.
+    axes[0, 0].set_xlim(start - 0.17 * span, end + 0.04 * span)
+    ticks = MaxNLocator(nbins=6, integer=True).tick_values(start, end)
+    axes[0, 0].set_xticks(ticks[(ticks >= start) & (ticks <= end)])
+    axes[0, 0].xaxis.set_minor_locator(AutoMinorLocator(2))
     for letter, ax, (title, unit, _), summary in zip("abcdef", axes.flat, PANELS, summaries):
-        ax.set_title(title, pad=12)
-        ax.text(-0.16, 1.04, letter, transform=ax.transAxes, fontweight="bold",
-                fontsize=13, va="bottom")
-        ax.set_ylabel(f"RMSE ({unit})")
+        ax.text(0.15, 0.965, letter, transform=ax.transAxes, fontweight="bold",
+                fontsize=11, va="top")
+        ax.text(0.52, 0.965, title, transform=ax.transAxes, ha="center", va="top",
+                fontsize=10, fontweight="bold")
+        ax.text(0.52, 0.905, f"RMSE ({unit})", transform=ax.transAxes,
+                ha="center", va="top", fontsize=9, color="0.3")
         ax.set_yscale(Y_SCALE)
+        ax.margins(y=0.16)
+        format_ticks(ax)
+        ax.tick_params(which="both", direction="in", top=True, right=True, labelsize=8.5)
         ax.tick_params(which="major", length=4, width=0.8)
-        ax.tick_params(which="minor", length=2, width=0.6)
-        ax.margins(x=0.015, y=0.09)
+        ax.tick_params(which="minor", length=2, width=0.5)
+        ax.tick_params(axis="y", which="major", pad=-6)
+        for tick in ax.get_yticklabels():
+            tick.set_horizontalalignment("left")
         if summary:
-            ax.text(0.98, 0.97, "Latest RMSE (epoch)\n" + "\n".join(summary),
-                    transform=ax.transAxes, ha="right", va="top", fontsize=8.3,
-                    linespacing=1.5, bbox=dict(facecolor="white", edgecolor="0.85", alpha=0.95))
+            box = ax.legend(handles=summary, title="Latest validation RMSE (epoch)",
+                            loc="upper right", bbox_to_anchor=(0.985, 0.835),
+                            fontsize=8, title_fontsize=8.5, handlelength=2.8,
+                            borderaxespad=0, borderpad=0.5, labelspacing=0.5,
+                            frameon=True, facecolor="white", edgecolor="none", framealpha=0.94)
+            box.get_title().set_fontweight("normal")
     for ax in axes[-1]:
         ax.set_xlabel("Epoch")
-    fig.suptitle("MACE-VOLT learning curves", fontsize=15, y=0.995)
-    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.96),
-               ncol=2, frameon=False, handlelength=3.0, columnspacing=2.2)
-    fig.tight_layout(rect=(0, 0, 1, 0.97 - 0.035 * ((len(handles) + 1) // 2)),
-                     h_pad=2.7, w_pad=2.4)
+    if has_training:
+        handles.extend(Line2D([], [], color=color, linewidth=1.8, label=split)
+                       for split, color in COLORS.items())
+    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0.995),
+               ncol=len(handles), frameon=False, handlelength=3.0, columnspacing=2.0)
+    fig.subplots_adjust(left=0.015, right=0.995, bottom=0.08, top=0.93, wspace=0, hspace=0)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     for suffix in (".png", ".svg"):
