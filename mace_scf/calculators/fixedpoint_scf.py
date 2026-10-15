@@ -328,6 +328,7 @@ class MACEFixedPointSCF(Calculator):
                 "fermi_level": fermi_level_key,
                 "total_charge": total_charge_key,
                 **{key: key for key in COUNTER_CHARGE_KEYS},
+                "dipole_correction_center": "dipole_correction_center",
                 **{f"{prefix}_{axis}frac": f"{prefix}_{axis}frac"
                    for prefix in ("vacuum", "dipole_correction") for axis in "xyz"},
             },
@@ -342,7 +343,11 @@ class MACEFixedPointSCF(Calculator):
             key_specification=self.keyspec,
             head_name=self.head,
         )
-        profile = config.properties.get("counter_charge_center") is not None
+        profile = any(config.properties.get(key) is not None for key in
+                      ("counter_charge_center", *[f"counter_charge_{a}frac" for a in "xyz"]))
+        if (profile or config.properties.get("dipole_correction_center") is not None) and not getattr(
+                self.model.field_dependent_charges_map, "spectral", False):
+            raise NotImplementedError("Prescribed Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
         if self.compensating_jellium:
             if profile:
                 raise ValueError("Specify a Gaussian counter charge or compensating_jellium, not both")
@@ -592,6 +597,7 @@ class MACEFixedPointSCF(Calculator):
 
     def _control_keys(self):
         return (self.total_charge_key, self.external_field_key, self.fermi_level_key,
+                "dipole_correction_center",
                 *[f"{prefix}_{axis}frac" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
                 *COUNTER_CHARGE_KEYS)
 

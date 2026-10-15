@@ -16,14 +16,15 @@ OUTPUT_DIRECTORY = 'counter_charge_single_point'
 def export_frame(atoms, directory):
     """Save source inputs, not predicted electronic or mechanical labels.
 
-    The published VASP local-potential plugin can reproduce this charge profile.
+    The published VASP example handles Gaussian sheets. A 3D Gaussian requires
+    a corresponding 3D external-potential plugin; it must not be relabeled as a sheet.
     Its potential, ionic energy/force corrections and slab boundaries must be
     included when obtaining the reference labels. This function does not run DFT.
     """
-    source = counter_charge_data(atoms.info)
+    source = counter_charge_data(atoms.info, atoms.pbc)
     if float(source['counter_charge_width']) == 0.:
         raise ValueError('The frame has no specified counter-charge profile')
-    keys = (*COUNTER_CHARGE_KEYS, 'total_charge', 'external_field',
+    keys = (*COUNTER_CHARGE_KEYS, 'total_charge', 'external_field', 'dipole_correction_center',
             *[f'{prefix}_{axis}frac' for prefix in ('vacuum', 'dipole_correction') for axis in 'xyz'])
     controls = {key: np.asarray(atoms.info[key]).tolist() for key in keys if key in atoms.info}
     if 'total_charge' not in controls or not np.isfinite(controls['total_charge']):

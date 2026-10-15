@@ -396,14 +396,15 @@ def test_counter_charge_adjoint_and_force(profile):
 
 
 @pytest.mark.parametrize('axis', range(3))
-def test_cartesian_counter_sheet_matches_plugin_gaussian_grid(axis):
+def test_fractional_counter_sheet_matches_plugin_gaussian_grid(axis):
     model, data = small_model(), small_data()
     data['external_field'].zero_()
     data['pbc'] = torch.ones((1, 3), dtype=torch.bool)
     data['pbc'][0, axis] = False
     center = torch.tensor([[2.1, 2.4, 4.3]])
     data.update(counter_charge=torch.tensor([-.2]), counter_charge_center=center,
-                counter_charge_width=torch.tensor([.3]))
+                counter_charge_width=torch.tensor([.3]), counter_charge_axis=torch.tensor([axis]),
+                counter_charge_fraction=center[:, axis]/data['cell'][axis, axis])
     geom = SpectralGeometry(model, data, data['positions'])
     # Independent real-space Gaussian wall, as in the VASP plug-in example.
     length = float(geom.length[0])
@@ -427,14 +428,15 @@ def test_cartesian_counter_sheet_matches_plugin_gaussian_grid(axis):
 
 
 @pytest.mark.parametrize('axis', range(3))
-def test_counter_sheet_center_works_for_tilted_cells(axis):
+def test_counter_sheet_fraction_works_for_tilted_cells(axis):
     model, data = small_model(), small_data()
     data['external_field'].zero_()
     data['cell'] = torch.tensor([[7., 0., 0.], [1., 8., 0.], [2., 1., 12.]])
     data['pbc'] = torch.ones((1, 3), dtype=torch.bool)
     data['pbc'][0, axis] = False
     data.update(counter_charge=torch.tensor([.2]), counter_charge_width=torch.tensor([.8]),
-                counter_charge_center=(torch.tensor([[.3, .4, .6]])@data['cell']))
+                counter_charge_center=(torch.tensor([[.3, .4, .6]])@data['cell']),
+                counter_charge_axis=torch.tensor([axis]), counter_charge_fraction=torch.tensor([[.3, .4, .6]])[:, axis])
     geom = SpectralGeometry(model, data, data['positions'])
     moved = dict(data)
     moved['counter_charge_center'] = data['counter_charge_center']+.37*data['cell'][(axis+1)%3]
@@ -445,7 +447,8 @@ def test_counter_sheet_center_works_for_tilted_cells(axis):
 
 def test_counter_center_validation_and_bulk_gaussian():
     from mace_scf.data.new_atomic_data import COUNTER_CHARGE_KEYS, counter_charge_data
-    assert COUNTER_CHARGE_KEYS == ('counter_charge', 'counter_charge_center', 'counter_charge_width')
+    assert set(COUNTER_CHARGE_KEYS) == {'counter_charge', 'counter_charge_center', 'counter_charge_width',
+                                      'counter_charge_xfrac', 'counter_charge_yfrac', 'counter_charge_zfrac'}
     assert counter_charge_data({})['counter_charge_width'] == 0.
     for properties in ({'counter_charge':.1}, {'counter_charge_center':[1., 2.]},
                        {'counter_charge_center':[1., 2., 3.], 'counter_charge_width':0.}):

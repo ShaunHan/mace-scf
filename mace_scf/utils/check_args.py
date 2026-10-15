@@ -63,10 +63,11 @@ def check_and_fix_heads(args: argparse.Namespace):
         if key[-4:] == "_key":
             assert value is None, "keys can only be specified in the configfile dictionaries"
 
-    for prefix in ("vacuum", "dipole_correction"):
+    for prefix in ("vacuum", "dipole_correction", "counter_charge"):
         for axis in "xyz":
             key = f"{prefix}_{axis}frac"
             thedict["info_keys"].setdefault(key, key)
+    thedict["info_keys"].setdefault("dipole_correction_center", "dipole_correction_center")
 
     # patch for annoying stuff:
     if "stress" not in thedict["info_keys"]:

@@ -401,6 +401,10 @@ class FixedPointCore(torch.nn.Module):
         compute_force: bool = False,
     ) -> LocalState:
         """Run the MACE backbone and prepare all SCF-independent state."""
+        if not getattr(self.field_dependent_charges_map, "spectral", False):
+            for key in ("counter_charge_width", "molecular_correction"):
+                if key in data and bool((data[key] > 0).any()):
+                    raise NotImplementedError("Explicit Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
         if not hasattr(self, "from_ell_max_field_update"):
             self.from_ell_max_field_update = 9
 

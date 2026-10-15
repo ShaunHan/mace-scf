@@ -66,7 +66,7 @@ def geometry(c):
     k = 2 * np.pi * np.fft.fftfreq(size, d=length / size)
     rho = (C["counter_charge"] / volume *
            np.exp(-0.5 * (C["counter_charge_width"] * k)**2) *
-           np.exp(-1j * k * (np.asarray(C["counter_charge_center"]) @ normal)))
+           np.exp(-1j * k * length * C[f"counter_charge_{'xyz'[axis]}frac"]))
     if size % 2 == 0:
         rho[size // 2] = 0.0
     phi = np.zeros_like(rho)
@@ -132,23 +132,41 @@ def force_and_stress(constants, additions):
 def configuration(atoms):
     """Preserve the snapshot's charge, field and physical reference planes."""
     info = atoms.info
+    if info.get("dipole_correction_center") is not None:
+        raise NotImplementedError("This DFT runner is for slabs/bulk. Molecular reference data require native IDIPOL=4, LDIPOL=True and DIPOL in fractional coordinates.")
     open_axes = np.flatnonzero(~atoms.pbc)
     slab = info.get("config_type", "slab" if len(open_axes) == 1 else "bulk") == "slab"
     axis = next((j for j, a in enumerate("xyz")
                  if f"dipole_correction_{a}frac" in info),
                 int(open_axes[0]) if len(open_axes) == 1 else 2) if slab else None
     qcc = float(info.get("counter_charge", 0.0))
+    planes = [(j, f"counter_charge_{a}frac") for j, a in enumerate("xyz")
+              if info.get(f"counter_charge_{a}frac") is not None]
+    if len(planes) > 1 or (planes and info.get("counter_charge_center") is not None):
+        raise ValueError("Choose one sheet fraction or a 3D counter_charge_center")
+    if qcc and not planes:
+        raise NotImplementedError("This VASP plugin implements Gaussian sheets. Use counter_charge_xfrac/yfrac/zfrac; a 3D counter_charge_center needs a 3D plugin.")
+    if planes and (not slab or planes[0][0] != axis):
+        raise ValueError("The counter-charge sheet must be parallel to the slab")
     charge = float(info.get("total_charge", -qcc))
     if not np.isclose(charge + qcc, 0, atol=1e-8):
         raise ValueError("total_charge must equal -counter_charge")
-    center = np.asarray(info["counter_charge_center"] if qcc else
-                        info.get("counter_charge_center", [0., 0., 0.]), dtype=float)
+    center = np.asarray(info.get("counter_charge_center", [0., 0., 0.]), dtype=float)
     field = np.asarray(info.get("external_field", [0., 0., 0.]), dtype=float)
-    meta = dict(schema="mace_volt_cdce_v1", slab_axis=axis, total_charge=charge,
+    meta = dict(schema="mace_volt_cdce_v2", slab_axis=axis, total_charge=charge,
                 counter_charge=qcc, counter_charge_center=center.tolist(),
                 counter_charge_width=float(info.get("counter_charge_width", 1.0)),
                 external_field=field.tolist(), plugin=bool(qcc),
                 config_type="slab" if slab else "bulk")
+    if planes:
+        key = planes[0][1]
+        sheet_fraction = float(info[key])
+        if not np.isfinite(sheet_fraction) or not 0. <= sheet_fraction < 1.:
+            raise ValueError("Counter-charge sheet fractions must be in [0, 1)")
+        meta.pop("counter_charge_center")
+        meta[key] = sheet_fraction
+    elif info.get("counter_charge_center") is None:
+        meta.pop("counter_charge_center")
     if slab:
         normal = np.linalg.inv(atoms.cell.array)[:, axis]
         normal /= np.linalg.norm(normal)
@@ -162,7 +180,11 @@ def configuration(atoms):
         center = center - shift
         length = atoms.cell[axis] @ normal
         center -= np.floor((center @ normal) / length + 0.5) * atoms.cell[axis]
-        meta.update(external_field=field.tolist(), counter_charge_center=center.tolist())
+        meta.update(external_field=field.tolist())
+        if planes:
+            meta[planes[0][1]] = (sheet_fraction-origin) % 1.
+        elif "counter_charge_center" in meta:
+            meta["counter_charge_center"] = center.tolist()
         meta[f"dipole_correction_{'xyz'[axis]}frac"] = 0.5
         key = f"vacuum_{'xyz'[axis]}frac"
         if key in info:

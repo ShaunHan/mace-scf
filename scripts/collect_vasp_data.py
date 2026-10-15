@@ -147,10 +147,18 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
             known = np.zeros_like(target)
             if qcc:
                 modes = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
-                planar = np.all(modes[..., atoms.pbc] == 0, axis=-1)
+                sheets = [(j, atoms.info[f"counter_charge_{a}frac"]) for j, a in enumerate("xyz")
+                          if f"counter_charge_{a}frac" in atoms.info]
+                if sheets:
+                    axis, fraction = sheets[0]
+                    planar = np.all(np.delete(modes, axis, axis=-1) == 0, axis=-1)
+                    phase = 2*np.pi*modes[..., axis]*fraction
+                else:
+                    planar = 1.
+                    phase = wavevectors @ atoms.info["counter_charge_center"]
                 rho = (qcc / atoms.get_volume() * np.prod(shape) * planar *
                        np.exp(-0.5 * atoms.info["counter_charge_width"]**2 * k2) *
-                       np.exp(-1j * (wavevectors @ atoms.info["counter_charge_center"])))
+                       np.exp(-1j * phase))
                 np.divide(-rho / 0.005526349406, k2, out=known, where=k2 > 0)
             matched = hermitian(target + (1 - smoothing) * known)
             atoms.info[f"vasp_phi_model_fftn_shifted_{float(sigma)}"] = np.stack(
@@ -184,7 +192,7 @@ def add_vacuum_target(atoms, planar, axis, correction):
 
 def collect_job(outdir):
     metadata = json.loads((outdir / "dft_metadata.json").read_text())
-    if metadata.get("schema") != "mace_volt_cdce_v1" or not metadata.get("complete"):
+    if metadata.get("schema") not in ("mace_volt_cdce_v1", "mace_volt_cdce_v2") or not metadata.get("complete"):
         raise ValueError(f"Incomplete/unrecognized dft_runs.py output: {outdir}")
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
@@ -246,8 +254,6 @@ def collect_job(outdir):
         "vasp_efermi": fermi,
         "total_charge": float(charge),
         "counter_charge": counter,
-        "counter_charge_center": np.asarray(metadata["counter_charge_center"]),
-        "counter_charge_width": float(metadata["counter_charge_width"]),
         "external_field": external_field,
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
@@ -255,6 +261,17 @@ def collect_job(outdir):
         "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
         "config_stress_weight": 0.0,  # The fixed-cell plugin supplies no stress.
     }
+    if metadata['schema'] == 'mace_volt_cdce_v1' and slab:
+        # The old runner always used sheets, despite its Cartesian key name.
+        center_cc = np.asarray(metadata['counter_charge_center'])
+        atoms.info[f"counter_charge_{'xyz'[axis]}frac"] = float(
+            (center_cc @ np.linalg.inv(atoms.cell.array))[axis] % 1.)
+    else:
+        for key in ('counter_charge_center', *[f'counter_charge_{a}frac' for a in 'xyz']):
+            if key in metadata:
+                atoms.info[key] = metadata[key]
+    if any(key in atoms.info for key in ('counter_charge_center', *[f'counter_charge_{a}frac' for a in 'xyz'])):
+        atoms.info['counter_charge_width'] = float(metadata['counter_charge_width'])
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
         vacuum_key = f"vacuum_{'xyz'[axis]}frac"

@@ -94,3 +94,10 @@ def test_low_density_periodic_check_override_allows_large_periodic_cluster():
         max_volume_per_atom=1000.0,
         allow_low_density_pbc=True,
     )
+
+
+def test_explicit_molecular_correction_allows_periodic_supercell():
+    config = _config(pbc=[True,True,True],cell_size=40.)
+    config.properties['dipole_correction_center'] = [20.,20.,20.]
+    check_low_density_periodic_configs(_collections(train=[config]),
+        max_volume_per_atom=1000.,allow_low_density_pbc=False)

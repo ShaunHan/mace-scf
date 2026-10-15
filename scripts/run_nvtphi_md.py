@@ -28,7 +28,7 @@ FERMI_LEVEL_KEY = "fermi_level"
 
 # Change both suffixes to xfrac or yfrac for a different open cell axis.
 PLANE_FRACTIONS = {"vacuum_zfrac": 0.75, "dipole_correction_zfrac": 0.50}
-COUNTER_CHARGE_CENTER = [0.0, 0.0, 10.0]  # Cartesian Angstrom; set for your solvent region
+COUNTER_SHEET_POINT = [0.0, 0.0, 10.0]  # Cartesian point on the sheet; converted to a cell fraction below.
 INITIAL_COUNTER_CHARGE = 0.0
 GAUSSIAN_WIDTH = 1.0
 
@@ -71,13 +71,15 @@ def main() -> None:
     axis = axes[0]
     atoms.pbc = True
     atoms.pbc[axis] = False
-    for prefix in ("vacuum", "dipole_correction"):
+    for prefix in ("vacuum", "dipole_correction", "counter_charge"):
         for letter in "xyz":
             atoms.info.pop(f"{prefix}_{letter}frac", None)
     atoms.info.update(PLANE_FRACTIONS)
+    atoms.info.pop("counter_charge_center", None)
+    atoms.info[f"counter_charge_{'xyz'[axis]}frac"] = float(
+        (np.asarray(COUNTER_SHEET_POINT) @ np.linalg.inv(atoms.cell.array))[axis] % 1.)
     atoms.info.update(
         counter_charge=float(INITIAL_COUNTER_CHARGE),
-        counter_charge_center=np.asarray(COUNTER_CHARGE_CENTER, dtype=float),
         total_charge=-float(INITIAL_COUNTER_CHARGE),
         counter_charge_width=GAUSSIAN_WIDTH,
         external_field=np.zeros(3, dtype=float),

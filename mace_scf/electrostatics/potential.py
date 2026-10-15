@@ -23,6 +23,7 @@ from torch import nn
 from torch.nn import functional as F
 from graph_longrange.utils import FIELD_CONSTANT
 from mace.tools.scatter import scatter_sum
+from .molecular import MolecularCorrection, enabled as molecular_enabled, moment_sum
 
 
 class VariationalResponse(nn.Module):
@@ -247,18 +248,43 @@ class SpectralGeometry:
                 width = torch.where(width > 0, width, 1.)
                 phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
                 profile = torch.exp(-.5*self.k2*width[:, None].square())
-                # A slab source is uniform within its periodic plane, matching
-                # the Gaussian-wall external-potential convention. Its center
-                # is Cartesian; lateral translations leave every retained mode
-                # unchanged. Other boundary geometries retain a 3D Gaussian.
-                planar = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
-                profile = profile*torch.where(self.slab[:, None], planar, True)
+                axis = data.get("counter_charge_axis", torch.full_like(counter, -1, dtype=torch.long)).reshape(-1)
+                sheet = axis >= 0
+                if bool(((axis < -1) | (axis > 2)).any()):
+                    raise ValueError("Invalid counter-charge sheet axis")
+                if bool((sheet & self.slab & (axis != self.axes)).any()):
+                    raise ValueError("The counter-charge sheet must be parallel to the slab")
+                fraction = data.get("counter_charge_fraction", torch.zeros_like(counter)).reshape(-1)
+                order = self.modes[None].expand(len(counter), -1, -1).gather(
+                    -1, axis.clamp_min(0)[:, None, None].expand(-1, len(self.modes), 1)).squeeze(-1)
+                planar = (self.modes.square().sum(-1)[None] == order.square())
+                profile = profile*torch.where(sheet[:, None], planar, True)
+                phase_counter = torch.where(sheet[:, None], -2*math.pi*order*fraction[:, None], phase_counter)
             self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
             counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
             self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
             self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
                 +.5*self.slab_factor*counter_moment.square()
                 -self.volume*(self.counter_density.conj()*(self.proto+self.applied)).real.sum(-1))
+
+        self.molecular = None
+        if bool(molecular_enabled(data, self.volume).any()):
+            self.molecular = MolecularCorrection(self, data, positions)
+            coupled = getattr(self.response, 'coupled', False)
+            self.molecular_source = self.molecular.source_map(
+                4 if coupled else self.basis.shape[-1], coarse_dim=4 if coupled else self.response.coarse_dim,
+                scale=self.width if coupled else 1.,
+                order=(0, 1, 2) if coupled else (1, 2, 0), completion=not coupled)
+
+    def boundary_matrix(self):
+        """Low-rank correction used by the implicit linear electronic solve."""
+        if self.molecular is None:
+            return self.normal_moment, self.slab_factor
+        maps = torch.cat((self.normal_moment[..., None], self.molecular_source), -1)
+        metric = self.volume.new_zeros((len(self.volume), 6, 6))
+        metric[:, 0, 0] = self.slab_factor
+        metric[:, 1:, 1:] = self.molecular.metric
+        return maps, metric
 
     @property
     def proto_design(self):
@@ -298,11 +324,21 @@ class SpectralGeometry:
         source = self.source(state)
         value = self.adjoint(self.coulomb * source)
         moment = (state*self.normal_moment).sum((1, 2))
-        return value + self.slab_factor[:, None, None]*moment[:, None, None]*self.normal_moment
+        value = value + self.slab_factor[:, None, None]*moment[:, None, None]*self.normal_moment
+        if self.molecular is not None:
+            value = value + torch.einsum('gndm,gmk,gk->gnd', self.molecular_source,
+                self.molecular.metric, moment_sum(state, self.molecular_source))
+        return value
 
     def diagonal(self):
         diag = (self.basis.abs().square()*self.coulomb[..., None]).sum(1)/self.volume[:, None]
-        return diag[:, None, :]*self.present[..., None] + self.slab_factor[:, None, None]*self.normal_moment.square()
+        diag = diag[:, None, :]*self.present[..., None] + self.slab_factor[:, None, None]*self.normal_moment.square()
+        if self.molecular is not None:
+            # Positive diagonal bound also bounds the projected Chebyshev
+            # spectrum. Fixed-Q tangents remove the indefinite Q*M terms.
+            maps = self.molecular_source.abs()
+            diag = diag + torch.einsum('gndm,gmk,gndk->gnd', maps, self.molecular.metric.abs(), maps)
+        return diag
 
     def ramp(self, field):
         safe = torch.where(self.axial, self.order, torch.ones_like(self.order))
@@ -318,6 +354,9 @@ class SpectralGeometry:
         periodic = -self.coulomb*self.source(state)
         boundary = self.ramp(-self.slab_factor*moment)
         deformation = periodic + boundary + self.applied+self.counter
+        if self.molecular is not None:
+            deformation = deformation+self.molecular.spectrum(
+                moment_sum(state, self.molecular_source)+self.molecular.counter)
         return density, deformation, deformation + self.proto
 
     def plane(self, spectrum):
@@ -383,7 +422,10 @@ def _electronic_operator(value, hardness, phase, basis, coulomb, moment, factor,
     source = (torch.einsum('gkn,gnd->gkd', phase, tangent.to(phase.dtype))*basis).sum(-1)
     potential = (coulomb*source)[..., None]*basis.conj()
     hartree = torch.einsum('gkn,gkd->gnd', phase.conj(), potential).real
-    boundary = factor[:, None, None]*moment*(moment*tangent).sum((1, 2), keepdim=True)
+    if moment.ndim == 4:
+        boundary = torch.einsum('gndm,gmk,gk->gnd', moment, factor, moment_sum(tangent, moment))
+    else:
+        boundary = factor[:, None, None]*moment*(moment*tangent).sum((1, 2), keepdim=True)
     return _project_charge(hardness*tangent+hartree+boundary, constraint)+value-tangent
 
 
@@ -496,6 +538,8 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
         positions.requires_grad_(True)
     strain = None
     if compute_stress:
+        if bool(molecular_enabled(data, data['total_charge'].reshape(-1)).any()):
+            raise NotImplementedError('The cubic molecular correction supports fixed-cell energies and forces; general strain/stress is not implemented')
         strain = positions.new_zeros((len(data["ptr"])-1, 3, 3), requires_grad=True)
         strain_symmetric = .5*(strain+strain.transpose(-1, -2))
         data["positions"] = positions + torch.einsum("ni,nij->nj", positions, strain_symmetric[data["batch"]])
@@ -525,6 +569,9 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     # potential. The complete evolving LR+SR deformation still enters H at
     # every iteration, and v_proto remains in the absolute potential observer.
     fixed_drive = drive+geom.adjoint(geom.applied+geom.counter)
+    if geom.molecular is not None:
+        fixed_drive = fixed_drive-torch.einsum('gndm,gmk,gk->gnd', geom.molecular_source,
+                                             geom.molecular.metric, geom.molecular.counter)
     rhs = fixed_drive
     target = data["total_charge"].reshape(-1)
     if finite_steps and constant_charge:
@@ -548,7 +595,7 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     seed = constraint*target[:, None, None]/norm
     tangent_rhs = _project_charge(rhs-operator(seed), constraint)
     matrix = (hardness, geom.phase, geom.basis, geom.coulomb/geom.volume[:, None],
-              geom.normal_moment, geom.slab_factor, constraint)
+              *geom.boundary_matrix(), constraint)
     if finite_steps:
         correction = unroll_electronic(operator, tangent_rhs, hardness,
             geom.diagonal(), constraint, int(steps), checkpoint_steps=mode == "shortcut_scf")
@@ -566,6 +613,8 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
     mu = multiplier+level_reference if constant_charge else data["fermi_level"].reshape(-1)
     electronic = (.5*state*operator(state)-state*fixed_drive).sum((1, 2))
     electronic = electronic-level_reference*charge+geom.counter_energy
+    if geom.molecular is not None:
+        electronic = electronic+geom.molecular.energy(geom.molecular.counter)
     energy = local.energies.sum(-1)+electronic
     # For fixed mu the differentiated mechanical potential is E + mu*Q.
     mechanical = energy if constant_charge else energy+mu*charge
@@ -584,6 +633,9 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
             stress = derivative/geom.volume[:, None, None] if derivative is not None else torch.zeros_like(strain)
     density, deformation, total = geom.potentials(state)
     dipole = (geom.dipole_map*state[..., None]).sum((1, 2))
+    if geom.molecular is not None:
+        dipole = torch.where(geom.molecular.active[:, None],
+                             moment_sum(state, geom.molecular_source)[:, 1:4], dipole)
     vacuum = geom.plane(total)+geom.vacuum_reference
     output = {"energy": energy, "forces": forces, "stress": stress,
               "virials": -stress*geom.volume[:, None, None] if stress is not None else None,

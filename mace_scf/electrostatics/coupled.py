@@ -18,6 +18,7 @@ from torch.utils.checkpoint import checkpoint
 from e3nn import o3
 
 from .potential import SpectralGeometry, initialize_response, attach_observations
+from .molecular import enabled as molecular_enabled, moment_sum
 
 def transport_difference(matrix, values):
     """Neighbor-minus-center differences, for either scalar or vector channels."""
@@ -122,6 +123,17 @@ def sample_spectrum(total, geometry):
                + torch.bmm(sine.transpose(1, 2), torch.cat((-im, re_k), -1)))
     value, gradient = sampled.split((re.shape[-1], re_k.shape[-1]), -1)
     return value, gradient.reshape(*value.shape, 3)
+
+
+def sample_state_spectrum(total, state, geometry):
+    """Add the analytic molecular correction to every recurrent field sample."""
+    potential, field = sample_spectrum(total, geometry)
+    if len(geometry) > 14:
+        source, observer, counter = geometry[14:17]
+        moments = moment_sum(state, source)+counter
+        correction = torch.einsum('gnrom,gm->gnro', observer, moments)
+        potential, field = potential+correction[..., 0], field+correction[..., 1:]
+    return potential, field
 
 def charge_closure(reference_charge, levels, softness, target, mask):
     """Exact local quadratic KKT solution with a neutral chemical reference.
@@ -428,7 +440,7 @@ class AtomicPotentialResponse(nn.Module):
 
 def coefficient_kernels(geometry,density_width,source_volume,base_width):
     """Geometry-only kernels prepared once; no K x atom x basis tensor."""
-    co,si,wave,br,bi,radial,receiver,proto,ramp,applied,zn,normal,poisson,ivol=geometry
+    co,si,wave,br,bi,radial,receiver,proto,ramp,applied,zn,normal,poisson,ivol=geometry[:14]
     scales=br.new_tensor([1.,density_width,density_width,density_width])
     tail_re=br*poisson[...,None]*scales
     tail_im=bi*poisson[...,None]*scales
@@ -610,6 +622,10 @@ def moment_kernels(geometry, kernels, mask, sigma):
     observed=torch.cat((unit_v[...,:1],-sigma*unit_e[...,0,:]),-1).flatten(-2)
     dipole=torch.cat((geometry[10][...,None],sigma*geometry[11][:,None,:].expand(-1,mask.shape[1],-1)),-1).flatten(-2)
     matrix=matrix-observed[...,None]*dipole[:,None,:]
+    if len(geometry) > 14:
+        source, observer = geometry[14:16]
+        sampled = torch.cat((observer[..., 0, :1, :], -sigma*observer[..., 0, 1:, :]), -2)
+        matrix = matrix-torch.bmm(sampled.flatten(1, 2), source.flatten(1, 2).transpose(1, 2))
     present=mask[...,None].expand(-1,-1,4).flatten(-2)
     return matrix*present[...,None]*present[:,None,:],completion
 
@@ -1217,6 +1233,9 @@ class CoupledGeometry(SpectralGeometry):
                              for i,value in enumerate(self.tensors))
         base_width = float(widths[0]) if len(widths) else self.width
         self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3, base_width)
+        if self.molecular is not None:
+            self.tensors = (*self.tensors, self.molecular_source,
+                            self.molecular.sample_map(r.receiver_widths), self.molecular.counter)
 
     def expand_spectrum(self, value):
         """Restore only the retained physical modes to the shared FFT grid."""
@@ -1270,14 +1289,15 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     fixed = (chemical, vector, species_level, p0, mask, target, transport, reference,
              completion, *factors, *g.tensors, *g.kernels)
     count = len(fixed)
+    geometry_end = 13+len(g.tensors)
 
     def evaluate(z, *args, screened=True, include_energy=False, observe=True):
         chem, vec, level, initial, present, charge, neighbors, ref, coupling = args[:9]
         factor = args[9:13]
-        geometry, kernels = args[13:27], args[27:29]
+        geometry, kernels = args[13:geometry_end], args[geometry_end:geometry_end+2]
         spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
                     if observe else (total_spectrum(z*present[..., None], geometry, kernels, r.density_width),))
-        potential, field = sample_spectrum(spectral[0], geometry)
+        potential, field = sample_state_spectrum(spectral[0], z*present[..., None], geometry)
         inputs = (z, chem, vec, level, potential, field, initial, present, charge, neighbors)
         options = {'include_energy': include_energy, 'reference_offset': ref,
                    'observe_chemical_level': observe}
@@ -1295,7 +1315,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     # Exact screened geometry-reference seed. The nonlinear response
     # then updates density AND potential; this is not an inference-time fit.
     spectra = evaluate_coefficients(state, g.tensors, g.kernels, r.density_width)
-    values, gradient = sample_spectrum(spectra[0], g.tensors)
+    values, gradient = sample_state_spectrum(spectra[0], state, g.tensors)
     chi, soft = reference[..., -2:].unbind(-1)
     q = charge_closure(torch.zeros_like(p0[..., 0]), chi+values[..., 0], soft, target, mask)[0]
     dipole = state[..., 1:4]-reference[..., -3:-2]*r.density_width*gradient[..., 0, :]
@@ -1329,14 +1349,14 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         # With the nonlinear chemical levels/sources fixed, this is an affine
         # response. One existing constrained solve gives its exact fixed-Q state.
         seed = torch.cat((state[..., :4],response[0][..., 4:]),-1)
-        seed_v, seed_e = sample_spectrum(total_spectrum(seed,g.tensors,g.kernels,r.density_width),g.tensors)
+        seed_v, seed_e = sample_state_spectrum(total_spectrum(seed,g.tensors,g.kernels,r.density_width),seed,g.tensors)
         delta_v = seed_v[..., 0]-potential[..., 0]
         softness = reference[..., -1]*mask
         charge = response[0][..., 0]+softness*(delta_v-(response[2]*delta_v).sum(-1,keepdim=True))
         dipole = response[0][..., 1:4]-reference[..., -3:-2]*r.density_width*(seed_e[..., 0,:]-field[..., 0,:])
         raw = torch.cat((charge[..., None],dipole,response[0][..., 4:]),-1)
         solved = screen_moments(seed,raw,reference,mask,factors,materialized=materialized)
-        solved_v, _ = sample_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),g.tensors)
+        solved_v, _ = sample_state_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),solved,g.tensors)
         mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset+g.vacuum_reference
         # The last bordered-inverse column is dq/dQ. Its last entry, divided by
         # sum(s), is dmu/dQ for this frozen-coefficient response. Use the exact
@@ -1358,6 +1378,10 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         solved = torch.cat((solved[..., :4]+direction*delta_charge[:, None,None],solved[..., 4:]),-1)
         total, carrier, regular, _, bare = evaluate_coefficients(solved,g.tensors,g.kernels,r.density_width,include_carrier=True)
         total, carrier, regular, bare = (g.expand_spectrum(x) for x in (total,carrier,regular,bare))
+        if g.molecular is not None:
+            correction = torch.view_as_real(g.molecular.spectrum(
+                moment_sum(solved, g.molecular_source)+g.molecular.counter))
+            total, carrier = total+correction, carrier+correction
         net_charge = solved[..., 0].sum(-1)
         density = bare/torch.where(g.coulomb>0,-g.coulomb,1.)[..., None]
         density = density+torch.stack(((g.k2==0)*(net_charge/g.volume)[:, None],torch.zeros_like(g.k2)),-1)
@@ -1415,6 +1439,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             positions.requires_grad_(True)
         strain = None
         if compute_stress:
+            if bool(molecular_enabled(data, data['total_charge'].reshape(-1)).any()):
+                raise NotImplementedError('The cubic molecular correction supports fixed-cell energies and forces; general strain/stress is not implemented')
             strain = positions.new_zeros((len(data['ptr'])-1, 3, 3), requires_grad=True)
             symmetric = .5*(strain+strain.transpose(-1,-2))
             data['positions'] = positions+torch.einsum('ni,nij->nj', positions, symmetric[data['batch']])
@@ -1435,6 +1461,10 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         response, spectral = evaluate(state, *args, screened=False, include_energy=True)
         proposal, mu = response[:2]
         total, lr, sr, effective = (g.expand_spectrum(value) for value in spectral[:4])
+        if g.molecular is not None:
+            correction = torch.view_as_real(g.molecular.spectrum(
+                moment_sum(state, g.molecular_source)+g.molecular.counter))
+            total, lr = total+correction, lr+correction
         potential, field = spectral[-2:]
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1,2))
         if not bool(torch.isfinite(state).all() & torch.isfinite(residual).all()):
@@ -1454,6 +1484,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         normal_dipole = (dipole*g.normal).sum(-1)
         periodic_energy = .5*g.volume*(coarse.square().sum(-1)*g.coulomb).sum(-1)
         boundary_energy = .5*g.slab_factor*normal_dipole.square()
+        if g.molecular is not None:
+            molecular_moments = moment_sum(state, g.molecular_source)
+            boundary_energy = boundary_energy+g.molecular.energy(
+                molecular_moments+g.molecular.counter)
+            dipole = torch.where(g.molecular.active[:, None], molecular_moments[:, 1:4], dipole)
         counter_energy = -g.volume*(torch.view_as_complex(coarse.contiguous()).conj()*g.counter).real.sum(-1)+g.counter_energy
         electronic = periodic_energy+boundary_energy-(dipole*g.external).sum(-1)+counter_energy
         electronic = electronic-model.fermi_level_offset*charge

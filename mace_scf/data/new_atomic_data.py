@@ -28,34 +28,66 @@ import numpy as np
 
 
 _ATOMIC_DATA_PARAMETERS = inspect.signature(AtomicData.__init__).parameters
-COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charge_width")
+COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charge_width",
+                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
+COUNTER_CHARGE_FIELDS = ("counter_charge", "counter_charge_center", "counter_charge_width",
+                         "counter_charge_axis", "counter_charge_fraction")
 
 
-def counter_charge_data(properties):
+def counter_charge_data(properties, pbc=None):
     """Read a prescribed Gaussian source, independently of electronic labels.
 
-    The center is Cartesian in Angstrom. Slab periodicity defines a Gaussian
-    sheet normal to the open direction; other cells use a localized Gaussian.
+    A Cartesian center selects a localized 3D Gaussian in every geometry.
+    Exactly one x/y/zfrac selects a sheet at that fractional cell coordinate.
     Zero width is an internal marker for an absent source, never a user width.
     """
     charge = float(properties.get("counter_charge") or 0.)
     center = properties.get("counter_charge_center")
+    planes = [(i, properties[f"counter_charge_{a}frac"]) for i, a in enumerate("xyz")
+              if properties.get(f"counter_charge_{a}frac") is not None]
+    if len(planes) > 1 or (planes and center is not None):
+        raise ValueError("Specify counter_charge_center or exactly one counter_charge_xfrac/yfrac/zfrac")
+    axis, fraction = planes[0] if planes else (-1, 0.)
+    fraction = float(fraction)
+    if not np.isfinite(fraction) or not 0. <= fraction < 1.:
+        raise ValueError("A counter-charge sheet fraction must be finite and in [0, 1)")
+    if planes and pbc is not None:
+        periodic = np.asarray(pbc, dtype=bool)
+        if not np.delete(periodic, axis).all():
+            raise ValueError("A counter-charge sheet requires periodicity along both in-plane cell axes")
     if not np.isfinite(charge):
         raise ValueError("counter_charge must be finite, in elementary charge units")
     width = 0.
-    if center is not None:
+    if center is not None or planes:
         width = properties.get("counter_charge_width")
         width = 1. if width is None else float(width)
         if not np.isfinite(width) or width <= 0.:
             raise ValueError("counter_charge_width must be a positive finite Gaussian sigma in Angstrom")
     elif charge != 0. or properties.get("counter_charge_width") is not None:
-        raise ValueError("A counter charge requires counter_charge_center in Cartesian Angstrom")
+        raise ValueError("A counter charge requires counter_charge_center or one counter_charge_xfrac/yfrac/zfrac")
     center = np.zeros(3) if center is None else np.asarray(center, dtype=float)
     if center.shape != (3,) or not np.isfinite(center).all():
         raise ValueError("counter_charge_center must contain three finite Cartesian coordinates")
     return {key: torch.as_tensor(value, dtype=torch.get_default_dtype()) for key, value in {
         "counter_charge": charge, "counter_charge_center": center[None],
-        "counter_charge_width": width}.items()}
+        "counter_charge_width": width, "counter_charge_fraction": fraction}.items()} | {
+        "counter_charge_axis": torch.tensor(axis, dtype=torch.long)}
+
+
+def dipole_correction_data(properties, pbc):
+    """A Cartesian reference center explicitly selects a molecule in a box."""
+    center = properties.get("dipole_correction_center")
+    enabled = center is not None
+    if enabled:
+        if not np.asarray(pbc, dtype=bool).all():
+            raise ValueError("dipole_correction_center requires a periodic molecular supercell (pbc=True)")
+        if any(properties.get(f"dipole_correction_{a}frac") is not None for a in "xyz"):
+            raise ValueError("Specify a molecular dipole_correction_center or a slab correction plane")
+    center = np.zeros(3) if center is None else np.asarray(center, dtype=float)
+    if center.shape != (3,) or not np.isfinite(center).all():
+        raise ValueError("dipole_correction_center must contain three finite Cartesian coordinates in Angstrom")
+    return {"dipole_correction_center": torch.as_tensor(center[None], dtype=torch.get_default_dtype()),
+            "molecular_correction": torch.tensor(enabled)}
 
 def plane_fraction(properties, prefix, pbc):
     """Read one fractional cell-axis plane, consistent with slab periodicity."""
@@ -76,14 +108,20 @@ def plane_fraction(properties, prefix, pbc):
 
 
 def slab_positions(config):
-    """Select the slab image bounded by its specified dipole discontinuity.
+    """Rejoin the image defined by an explicit boundary-correction reference.
 
     VASP wraps coordinates even along the direction that becomes nonperiodic.
     Rejoin that slab before constructing neighbors or electronic moments.
     Integer lattice translations leave every Fourier observation unchanged.
-    Ordinary open structures without a specified correction plane are untouched.
+    A molecular center defines the middle of the image along all three axes.
+    Structures without an explicit reference are untouched.
     """
     pbc = np.asarray(config.pbc, dtype=bool)
+    center = config.properties.get("dipole_correction_center")
+    if center is not None:
+        dipole_correction_data(config.properties, pbc)
+        fractional = (config.positions - np.asarray(center)) @ np.linalg.inv(config.cell)
+        return config.positions - np.floor(fractional + .5) @ config.cell
     if pbc.sum() != 2 or not any(config.properties.get(
             f"dipole_correction_{axis}frac") is not None for axis in "xyz"):
         return config.positions
@@ -111,6 +149,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "fourier_potential_key",
         "fourier_proto_potential_key",
         "vacuum_potential_key",
+        "dipole_correction_center_key",
         *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
         "potcar_match_key",
         "vacuum_potential_weight_key",
@@ -123,7 +162,8 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "hardness_key",
         "atomic_multipoles_key",
     ]
-    info_keys = {key: keyspec.info_keys.get(key, key) for key in COUNTER_CHARGE_KEYS}
+    info_keys = {key: keyspec.info_keys.get(key, key)
+                 for key in (*COUNTER_CHARGE_KEYS, "dipole_correction_center")}
     arrays_keys = {}
     for key in infos:
         if key in keydict:
@@ -164,6 +204,10 @@ class ExtAtomicData(AtomicData):
     counter_charge: torch.Tensor
     counter_charge_center: torch.Tensor
     counter_charge_width: torch.Tensor
+    counter_charge_axis: torch.Tensor
+    counter_charge_fraction: torch.Tensor
+    dipole_correction_center: torch.Tensor
+    molecular_correction: torch.Tensor
 
     def __init__(
         self,
@@ -222,7 +266,8 @@ class ExtAtomicData(AtomicData):
         vacuum_fraction = kwargs.pop("vacuum_fraction", None)
         dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
         potcar_match = kwargs.pop("potcar_match", None)
-        counter = {key: kwargs.pop(key, None) for key in COUNTER_CHARGE_KEYS}
+        counter = {key: kwargs.pop(key, None) for key in
+                   (*COUNTER_CHARGE_FIELDS, "dipole_correction_center", "molecular_correction")}
         # MACE-develop added required, optional-valued magnetic targets.
         for key in ("magforces_weight", "magmom", "magforces"):
             if key in _ATOMIC_DATA_PARAMETERS:
@@ -613,5 +658,6 @@ class ExtAtomicData(AtomicData):
             vacuum_fraction=vacuum_fraction,
             dipole_correction_fraction=dipole_correction_fraction,
             potcar_match=potcar_match,
-            **counter_charge_data(config.properties),
+            **counter_charge_data(config.properties, pbc),
+            **dipole_correction_data(config.properties, pbc),
         )

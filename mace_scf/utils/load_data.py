@@ -168,6 +168,8 @@ def check_low_density_periodic_configs(
         for config_index, config in enumerate(configs):
             if not _is_fully_periodic(getattr(config, "pbc", None)):
                 continue
+            if getattr(config, "properties", {}).get("dipole_correction_center") is not None:
+                continue  # Explicit molecule-in-box metadata establishes intent.
             volume = _volume_from_cell(getattr(config, "cell", None))
             num_atoms = len(config.atomic_numbers)
             volume_per_atom = volume / num_atoms

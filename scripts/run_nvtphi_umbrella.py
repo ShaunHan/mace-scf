@@ -29,7 +29,7 @@ OXYGEN_PAIRS = {}  # Optional {frame_index: (oxygen_id, oxygen_id)}; ASE zero-ba
 DEVICE = 'cuda:0'
 TARGET_POTENTIAL = 1.60 + 4.44  # V
 VACUUM_POTENTIAL_KEY, FERMI_LEVEL_KEY = 'vacuum_potential', 'fermi_level'
-COUNTER_CHARGE_CENTER, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0  # Angstrom.
+COUNTER_SHEET_POINT, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0  # Angstrom; point on the Gaussian sheet.
 CAPACITANCE, TAUPHI_FS = 0.01, 10.0
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
 PAIR_CUTOFF = 3.0  # Initial minimum-image distance, Angstrom.
@@ -96,7 +96,7 @@ def prepare_frame(source, index):
                       dft_vacuum_potential=vacuum, dft_fermi_level=fermi,
                       reference_potential=vacuum-fermi, source_index=index, oxygen_pair=list(pair),
                       external_field=np.zeros(3), total_charge=0., counter_charge=0.,
-                      counter_charge_center=np.asarray(COUNTER_CHARGE_CENTER),
+                      counter_charge_zfrac=float((np.asarray(COUNTER_SHEET_POINT) @ np.linalg.inv(atoms.cell.array))[2] % 1.),
                       counter_charge_width=GAUSSIAN_WIDTH)
     atoms.set_constraint(physical_constraints(atoms, np.flatnonzero(atoms.positions[:, 2] < Z_FIXED).tolist()))
     return atoms
@@ -167,7 +167,7 @@ def make_calculator(model_file, enable_cueq=True):
 
 
 def settings():
-    names = ('TARGET_POTENTIAL', 'VACUUM_POTENTIAL_KEY', 'FERMI_LEVEL_KEY', 'COUNTER_CHARGE_CENTER',
+    names = ('TARGET_POTENTIAL', 'VACUUM_POTENTIAL_KEY', 'FERMI_LEVEL_KEY', 'COUNTER_SHEET_POINT',
              'GAUSSIAN_WIDTH', 'CAPACITANCE', 'TAUPHI_FS', 'Z_REPULSIVE', 'WALL_K',
              'TEMPERATURE_K', 'TIMESTEP_FS', 'FRICTION_PER_FS', 'OO_MIN', 'WINDOW_SPACING',
              'UMBRELLA_K', 'WINDOW_STEPS', 'EQUIL_STEPS', 'RELEASE_STEPS', 'SCF_STEPS', 'LOGINTERVAL')
@@ -206,7 +206,10 @@ def simulate(atoms, model_file, max_steps=None):
         protocol = json.loads(cfg_path.read_text())
         if protocol.get('method') != 'distance_umbrella' or restart is None:
             raise ValueError('Use a fresh folder: restart is supported only for new umbrella runs')
-        if protocol['settings'] != settings() or protocol['model_sha256'] != digest:
+        previous = dict(protocol['settings'])
+        if 'COUNTER_CHARGE_CENTER' in previous:
+            previous['COUNTER_SHEET_POINT'] = previous.pop('COUNTER_CHARGE_CENTER')
+        if previous != settings() or protocol['model_sha256'] != digest:
             raise ValueError('Saved umbrella settings/model differ; restore them before continuing')
         if restart['run_id'] != protocol['run_id']:
             raise ValueError('Trajectory and run.json belong to different runs')
@@ -354,6 +357,10 @@ def load_atoms(source, index):
                                           reference_model_potential=cfg['reference_model_potential'])
     if 'restart_state' not in atoms.info or not atoms.has('momenta'):
         raise ValueError('The trajectory lacks restart state or momenta')
+    # This script's earlier runs used a Gaussian sheet under the center key.
+    if 'COUNTER_CHARGE_CENTER' in cfg['settings'] and 'counter_charge_center' in atoms.info:
+        center = np.asarray(atoms.info.pop('counter_charge_center'))
+        atoms.info['counter_charge_zfrac'] = float((center @ np.linalg.inv(atoms.cell.array))[2] % 1.)
     if index in OXYGEN_PAIRS and set(OXYGEN_PAIRS[index]) != set(atoms.info['oxygen_pair']):
         raise ValueError('Cannot change the oxygen pair during continuation')
     atoms.set_constraint(physical_constraints(atoms, cfg['fixed_ids']))
