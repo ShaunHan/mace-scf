@@ -220,6 +220,7 @@ class SpectralGeometry:
         # An absent counter-charge has no energy/force graph through proto.
         self.counter = torch.zeros_like(self.proto)
         self.counter_energy = torch.zeros_like(self.volume)
+        self.counter_moment = torch.zeros_like(self.volume)
         counter_width = data.get("counter_charge_width")
         has_counter = ("counter_slab_bounds" in data or
                        (counter_width is not None and bool((counter_width > 0).any())))
@@ -262,6 +263,7 @@ class SpectralGeometry:
                 phase_counter = torch.where(sheet[:, None], -2*math.pi*order*fraction[:, None], phase_counter)
             self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
             counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
+            self.counter_moment = counter_moment
             self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
             self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
                 +.5*self.slab_factor*counter_moment.square()
@@ -340,12 +342,13 @@ class SpectralGeometry:
             diag = diag + torch.einsum('gndm,gmk,gndk->gnd', maps, self.molecular.metric.abs(), maps)
         return diag
 
-    def ramp(self, field):
+    def ramp(self, field, width=None):
         safe = torch.where(self.axial, self.order, torch.ones_like(self.order))
         phase = -2*math.pi*safe*self.branch[:, None]
         # Fourier coefficients of a centred sawtooth in electron-energy units.
         amplitude = field[:, None]*self.length[:, None]/(2*math.pi*safe)
-        amplitude = amplitude * torch.exp(-.5*self.width**2*self.k2)*self.axial
+        width = self.width if width is None else width
+        amplitude = amplitude * torch.exp(-.5*width**2*self.k2)*self.axial
         return torch.complex(-amplitude*phase.sin(), amplitude*phase.cos())
 
     def potentials(self, state):
@@ -659,6 +662,11 @@ def evaluate_variational(model, data, steps=50, training=False, compute_force=Tr
 
 def attach_observations(data, geom, output):
     """Attach measured labels after prediction, using the same retained grid."""
+    output['density_smearing_width'] = geom.wave.new_tensor(geom.width)
+    widths = getattr(geom.response, 'source_widths', geom.response.potential_widths)
+    width = getattr(geom.response, 'potential_amplitudes_smearing_width',
+                    float(widths[0]) if len(widths) else geom.width)
+    output['potential_smearing_width'] = geom.wave.new_tensor(width)
     # Labels are attached only AFTER computing the physical state/observables.
     for key in ("fourier_density", "fourier_potential", "fourier_proto_potential"):
         target_fft = _target_fft(data, key, key+"_shape", geom.shape, geom.wave.dtype)
@@ -681,7 +689,7 @@ def attach_observations(data, geom, output):
 
 
 @torch.no_grad()
-def initialize_response(model, loader, device):
+def initialize_response(model, loader, device, apply_potential_smearing=False):
     """Fit only training-set feature scales and frozen proto form factors."""
     from mace.tools import torch_geometric
     loader = torch_geometric.dataloader.DataLoader(loader.dataset,
@@ -708,6 +716,9 @@ def initialize_response(model, loader, device):
             continue
         geom = SpectralGeometry(model, data, data["positions"])
         target = _target_fft(data, "fourier_proto_potential", "fourier_proto_potential_shape", geom.shape, data["positions"].dtype)
+        if apply_potential_smearing:
+            width = getattr(response, 'potential_amplitudes_smearing_width', geom.width)
+            target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
         weights = data["weight"].reshape(-1)*data["fourier_proto_potential_weight"].reshape(-1)
         use = geom.mask & target_mode_mask(data["fourier_proto_potential_shape"], geom.modes) & (geom.k2>0) & (weights[:, None]>0)
         design = torch.view_as_real(geom.proto_design).reshape(len(weights), -1, size, 2)
@@ -727,6 +738,8 @@ def initialize_response(model, loader, device):
         values = norms[sl].reshape(mul, ir.dim).mean(-1).div(max(count, 1)).sqrt().clamp_min(1.e-3)
         response.feature_norms[sl] = values[:, None].expand(-1, ir.dim).reshape(-1)
     if observations:
+        response.proto_smearing_width = (float(getattr(response, 'potential_amplitudes_smearing_width', geom.width))
+                                         if apply_potential_smearing else 0.)
         solution = torch.linalg.lstsq(gram.cpu(), rhs.cpu()[:, None],
                                      rcond=1.e-10, driver="gelsd").solution[:, 0].to(gram)
         response.proto_coefficients.copy_(solution.reshape_as(response.proto_coefficients))
@@ -737,7 +750,7 @@ def initialize_response(model, loader, device):
 
 
 @torch.no_grad()
-def initialize_vacuum_reference(model, loader, device, relative=True):
+def initialize_vacuum_reference(model, loader, device, relative=True, apply_potential_smearing=False):
     """Fit the missing atomic vacuum reference from training observations only.
 
     Observed vacuum minus the retained deformation plane determines a small
@@ -769,6 +782,9 @@ def initialize_vacuum_reference(model, loader, device, relative=True):
         phi = _target_fft(data, 'fourier_potential', 'fourier_potential_shape', geom.shape, geom.volume.dtype)
         if phi is None:
             continue
+        if apply_potential_smearing:
+            width = getattr(response, 'potential_amplitudes_smearing_width', geom.width)
+            phi = phi*torch.exp(-.5*width**2*geom.k2)[..., None]
         complete = (~geom.axial | target_mode_mask(data['fourier_potential_shape'], geom.modes)).all(-1)
         use = (weight > 0) & complete
         if bool(use.any()):

@@ -678,8 +678,11 @@ def _evaluate(
                 if key+"_dft" not in output:
                     continue
                 density_reference = getattr(loss_fn.loss_fns.get('fourier_density'), 'reference', 'density')
-                observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield' else key)
-                error = spectral_errors(batch,output,observed_key)
+                observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield'
+                                and 'smooth_'+key not in output else key)
+                loss_key = 'fourier_potential' if key == 'fourier_total_potential' else key
+                apply_smearing = getattr(loss_fn.loss_fns.get(loss_key), 'apply_smearing', False)
+                error = spectral_errors(batch,output,observed_key,apply_smearing)
             elif key == "potential_difference":
                 target, weight = vacuum_reference_weights(batch, output['vacuum_potential'])
                 weight = weight*(batch.fermi_level_weight>0)

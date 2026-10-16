@@ -75,6 +75,8 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--atomic_multipoles_max_l", type=int, default=1)
     parser.add_argument("--atomic_multipoles_smearing_width", type=float, default=1.5)
+    parser.add_argument("--potential_amplitudes_smearing_width", type=float, default=1.5,
+                        help="Local potential basis width in Å; also sets optional Fourier-loss smoothing.")
     parser.add_argument("--kspace_cutoff_factor", type=float, default=1.0)
     parser.add_argument("--atomic_formal_charges", type=str, default="{}")
     parser.add_argument(

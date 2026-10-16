@@ -111,6 +111,9 @@ def sample_spectrum(total, geometry):
     opposite sign to the potential of a positive test charge. The gradient is
     a descriptor, not a nuclear force. Width zero gives an exact point sample
     of the retained spectrum; positive widths give normalized local averages.
+    These are the upstream GTO scalar/vector projections expressed in physical
+    units. Each receiver width stays a separate channel. The same projection
+    samples the sum of Coulomb, completion and prescribed boundary potentials.
     """
     cosine, sine, wave, _, _, _, receiver, *_ = geometry
     re = total[..., 0, None] * receiver
@@ -1088,14 +1091,24 @@ class CoupledResponse(AtomicPotentialResponse):
     spectral = True
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements,
-                 potential_widths=(), density_width=1.5, field_widths=(1.5, 3.),
+                 potential_widths=None, density_width=1.5, field_widths=(1.5, 3.),
+                 potential_amplitudes_smearing_width=1.5,
                  include_local_energy=False, **kwargs):
         irreps = o3.Irreps(node_feats_irreps)
         if o3.Irreps(charges_irreps).dim != 4:
             raise ValueError("CoupledResponse uses monopoles and dipoles (atomic_multipoles_max_l=1)")
+        sigma_phi = float(potential_amplitudes_smearing_width)
+        if not math.isfinite(sigma_phi) or sigma_phi <= 0:
+            raise ValueError('potential_amplitudes_smearing_width must be positive')
+        # Source resolution and receiver averaging have different roles.
+        # Keep the established two-scale basis without a second widths list.
+        potential_widths = (sigma_phi, 2*sigma_phi) if potential_widths is None else potential_widths
         source_widths = sorted(set(float(w) for w in potential_widths))
-        widths = [float(density_width), 0.]+sorted(set(float(w) for w in field_widths)-{float(density_width)})
-        if any(not math.isfinite(w) or w <= 0 for w in source_widths+widths[2:]):
+        self.potential_amplitudes_smearing_width = sigma_phi
+        # The first channel supplies the density-width moment response. Keep
+        # the configured Gaussian channels separate; no extra point receiver.
+        widths = [float(density_width)]+sorted(set(float(w) for w in field_widths)-{float(density_width)})
+        if any(not math.isfinite(w) or w <= 0 for w in source_widths+widths):
             raise ValueError("Gaussian widths must be finite and positive")
         scalar_slices, vector_slices = [], []
         for (mul, ir), sl in zip(irreps, irreps.slices()):
@@ -1111,8 +1124,9 @@ class CoupledResponse(AtomicPotentialResponse):
                          include_local_energy=include_local_energy)
         self.scalar_slices, self.vector_slices = scalar_slices, vector_slices
         self.coarse_dim = 4
-        # SpectralGeometry prepares the moment carrier. The regular-potential
-        # basis below uses volume-normalized Gaussian radial differences.
+        # SpectralGeometry prepares the moment carrier. New models use plain
+        # Gaussian potential channels; saved models retain their original basis.
+        self.source_basis = 'gaussian'
         self.potential_widths = ()
         channels=len(source_widths)
         self.state_irreps = o3.Irreps(f'0e+1o+{channels}x0e+{channels}x1o').simplify()
@@ -1141,7 +1155,11 @@ class CoupledResponse(AtomicPotentialResponse):
         return {'deployment_mode': self.deployment_mode,
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
-                'density_reference_width': self.farfield_width}
+                'source_basis': getattr(self, 'source_basis', 'difference'),
+                'proto_smearing_width': getattr(self, 'proto_smearing_width', None),
+                'density_reference_width': self.farfield_width,
+                'potential_amplitudes_smearing_width': getattr(self, 'potential_amplitudes_smearing_width',
+                    float(self.source_widths[0]) if len(self.source_widths) else self.density_width)}
 
     @property
     def farfield_width(self):
@@ -1157,7 +1175,26 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
+        from .desmearing import SpectralDecoder
+        decoder_key = prefix+'raw_decoder.coefficients'
+        if decoder_key in state_dict and getattr(self, 'raw_decoder', None) is None:
+            self.raw_decoder = SpectralDecoder().to(self.source_widths)
+        elif decoder_key not in state_dict and getattr(self, 'raw_decoder', None) is not None:
+            self.raw_decoder = None
         state_dict = dict(state_dict)
+        saved_widths = state_dict.get(prefix+'receiver_widths')
+        if saved_widths is not None and saved_widths.numel() != self.field_channels:
+            # Saved receivers are part of the trained architecture. In
+            # particular, retain the point channel in older checkpoints.
+            self.field_channels = saved_widths.numel()
+            for name in ('receiver_widths', 'scalar_field_scale', 'vector_field_scale'):
+                setattr(self, name, getattr(self, name).new_empty(self.field_channels))
+            for name in ('state_scalar', 'state_vector', 'neighbor_scalar',
+                         'neighbor_vector', 'neighbor_divergence', 'neighbor_gradient'):
+                layer = getattr(self, name)
+                layer.in_features = self.field_channels
+                layer.weight = nn.Parameter(layer.weight.new_empty(layer.out_features, self.field_channels),
+                                             requires_grad=layer.weight.requires_grad)
         for name in ('vacuum_reference_integrals', 'scalar_reference'):
             key = prefix+name
             if key not in state_dict:
@@ -1178,10 +1215,16 @@ class CoupledResponse(AtomicPotentialResponse):
         if charge not in ('field', 'geometry'):
             raise ValueError(f'Unknown saved charge response {charge}')
         self.charge_response = charge
+        self.source_basis = state.get('source_basis', 'difference')
+        self.proto_smearing_width = state.get('proto_smearing_width')
+        if self.source_basis not in ('gaussian', 'difference'):
+            raise ValueError('Unknown saved potential basis')
         width = float(state.get('density_reference_width', float(self.receiver_widths.max())))
         if not math.isfinite(width) or width < self.density_width:
             raise ValueError('Invalid saved density reference width')
         self.density_reference_width = width
+        self.potential_amplitudes_smearing_width = float(state.get(
+            'potential_amplitudes_smearing_width', float(self.source_widths[0]) if len(self.source_widths) else self.density_width))
 
 class CoupledGeometry(SpectralGeometry):
     """Same Fourier support for the response, observers and moment screening."""
@@ -1193,7 +1236,9 @@ class CoupledGeometry(SpectralGeometry):
         basis = self.basis[..., [0, 3, 1, 2]]
         widths = r.source_widths.to(positions)
         gaussian = torch.exp(-.5*self.k2[..., None]*widths.square())
-        radial = torch.cat((gaussian[..., :1], gaussian[..., 1:]-gaussian[..., :1]), -1) if len(widths) else gaussian
+        radial = gaussian
+        if len(widths) and getattr(r, 'source_basis', 'difference') == 'difference':
+            radial = torch.cat((gaussian[..., :1], gaussian[..., 1:]-gaussian[..., :1]), -1)
         receiver = torch.exp(-.5*self.k2[..., None]*r.receiver_widths.to(positions).square())
         proto = self.proto if len(widths) else torch.zeros_like(self.proto)
         self.proto = proto
@@ -1342,7 +1387,8 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         raise FloatingPointError('Nonfinite observed Fermi level for reference conditioning')
     result = {key:value for key,value in output.items()
               if key.endswith('_dft') or key.endswith('_dft_mask') or
-              key in ('energy','k_vectors','k_vectors_mask','k_vectors_grid_shape')}
+              key in ('energy','k_vectors','k_vectors_mask','k_vectors_grid_shape',
+                      'density_smearing_width','potential_smearing_width')}
     masks = {}
     if condition_density:
         potential, field = spectral[-2:]
@@ -1389,9 +1435,14 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         result.update(fourier_density=density*g.ngrid,
                       fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
                       fourier_potential=(carrier+regular)*g.ngrid,
+                      fourier_carrier_potential=bare*g.ngrid,
+                      fourier_local_potential=regular*g.ngrid,
+                      fourier_total_potential=total*g.ngrid,
                       vacuum_potential=g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference,
                       total_charge=net_charge, reference_charge_error=net_charge-target,
                       reference_charge_stiffness=stiffness)
+        if getattr(r, 'raw_decoder', None) is not None:
+            result = r.raw_decoder(g, solved, result)
         masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
     # Only complete retained DFT fields are valid inputs. A missing spectrum
     # is not a measured zero field; those graphs receive no conditional EF loss.
@@ -1402,6 +1453,8 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         if not g.neutral_reference:
             use &= data['fourier_proto_potential_weight']>0
         measured = output[field_key+'_dft']/g.ngrid
+        if getattr(r, 'raw_decoder', None) is not None and bool(r.raw_decoder.enabled[1]):
+            measured = measured*torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)[..., None]
         rows = torch.arange(len(g.counts),device=state.device)[:, None]
         selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
         selected = torch.where(use[:, None,None],selected,spectral[0])
@@ -1544,6 +1597,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                                                   condition_density=reference_conditioning!='fermi_level')
             if reference is not None:
                 output['reference_response'] = reference
+        decoder = getattr(r, 'raw_decoder', None)
+        if decoder is not None:
+            output = decoder(g, state, output)
         output = apply_scalar_reference(output, r)
         # A finite iterate does not imply finite derivatives of its trajectory.
         # Reject invalid observables before loss/Adam, metrics or MD consume them.
@@ -1574,6 +1630,8 @@ def apply_scalar_reference(output, response):
                 output[key] = output[key]+reference[index]
         if 'potential_reference' in output:
             output['potential_reference'] = output['potential_reference']+reference[1]
+        if 'smooth_vacuum_potential' in output:
+            output['smooth_vacuum_potential'] = output['smooth_vacuum_potential']+reference[1]
         if 'reference_response' in output:
             apply_scalar_reference(output['reference_response'], response)
     return output
@@ -1583,10 +1641,15 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
     from .potential import initialize_vacuum_reference
-    initialize_response(model, loader, device)
+    from .desmearing import configure_desmearing
+    configure_desmearing(model.field_dependent_charges_map, loss_config or {})
+    potential_options = (loss_config or {}).get('fourier_potential', {})
+    apply_smearing = potential_options.get('apply_smearing', False) if isinstance(potential_options, dict) else False
+    initialize_response(model, loader, device, apply_potential_smearing=apply_smearing)
     vacuum_options = (loss_config or {}).get('vacuum_potential', {})
     initialize_vacuum_reference(model, loader, device,
-        relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True)
+        relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True,
+        apply_potential_smearing=apply_smearing)
     r = model.field_dependent_charges_map
     ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
     for batch in calibration_loader(loader):
@@ -1624,6 +1687,11 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.scalar_field_scale.copy_((1.+ps/max(count,1.e-30)).sqrt())
     r.vector_field_scale.copy_((1.+fs/max(count,1.e-30)).sqrt())
     r.field_scales_initialized.fill_(True)
+    if getattr(r, 'raw_decoder', None) is not None:
+        from .desmearing import calibrate_desmearing
+        calibrate_desmearing(model, calibration_loader(loader), device,
+            steps=options.scf.num_scf_steps if options is not None else 50,
+            mixing=options.scf.mixing_parameter if options is not None else .5)
     logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
                  r.response_reference, r.source_channels, r.receiver_widths.tolist())
     logging.debug('Constitutive charge response: %s; stored in checkpoint metadata',
@@ -1670,6 +1738,11 @@ def initialize_reference(model, loader, device, options, loss_config):
             if target is not None:
                 active &= target_mode_mask(data['fourier_potential_shape'], geom.modes)
                 target = torch.where(active[...,None],target/geom.ngrid,0.)
+                function = objective.loss_fns.get('fourier_potential')
+                if getattr(function, 'apply_smearing', False) or (
+                        getattr(function, 'desmearing', False) and getattr(r, 'raw_decoder', None) is not None):
+                    width = getattr(r, 'potential_amplitudes_smearing_width', geom.width)
+                    target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
                 pw = batch.weight*batch.fourier_potential_weight
             else:
                 target = local.positions.new_zeros((*geom.k2.shape,2)); pw = batch.weight*0.

@@ -186,7 +186,9 @@ def check_unsupported_training_options(args):
 
 def fill_fixed_point_update_config(args):
     if args.fixed_point_update_config is None:
-        args.fixed_point_update_config = {
+        potential_data = any('fourier_potential' in head.get('info_keys', {})
+                             for head in args.heads.values())
+        args.fixed_point_update_config = {'type': 'CoupledResponse'} if potential_data else {
             "type": "OneBodyVariableUpdate",
             "potential_embedding_cls": "BiasedLinearPotentialEmbedding",
             "nonlinearity_cls": "NoNonLinearity",
@@ -197,6 +199,10 @@ def fill_fixed_point_update_config(args):
 
     if isinstance(args.fixed_point_update_config.get("potential_widths"), str):
         args.fixed_point_update_config["potential_widths"] = ast.literal_eval(args.fixed_point_update_config["potential_widths"])
+
+    if args.fixed_point_update_config['type'] == 'CoupledResponse':
+        args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
+                                                  getattr(args, 'potential_amplitudes_smearing_width', 1.5))
 
     cls_variables = [
         "type",

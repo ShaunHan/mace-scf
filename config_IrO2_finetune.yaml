@@ -1,3 +1,4 @@
+# Pre-smoothed dataset: keep its original objective with desmearing: false.
 heads:
   default:
     arrays_keys:
@@ -36,9 +37,7 @@ kspace_cutoff_factor: 1.0
 include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
-fixed_point_update_config:
-  type: CoupledResponse
-  potential_widths: '[1.5, 3.0]'
+potential_amplitudes_smearing_width: 1.5
 batch_size: 4
 valid_batch_size: 4
 lr: 0.001
@@ -74,9 +73,12 @@ train_schedule:
       forces: 500
       dipole: 10
       fourier_density:
+        desmearing: false
         weight: 10
         reference: farfield
-      fourier_potential: 100
+      fourier_potential:
+        weight: 100
+        desmearing: false
       vacuum_potential:
         weight: 100
         relative: true
@@ -103,9 +105,12 @@ train_schedule:
       forces: 500
       dipole: 10
       fourier_density:
+        desmearing: false
         weight: 10
         reference: farfield
-      fourier_potential: 100
+      fourier_potential:
+        weight: 100
+        desmearing: false
       vacuum_potential:
         weight: 100
         relative: true
@@ -131,9 +136,12 @@ train_schedule:
       forces: 500
       dipole: 500
       fourier_density:
+        desmearing: false
         weight: 10
         reference: farfield
-      fourier_potential: 100
+      fourier_potential:
+        weight: 100
+        desmearing: false
       vacuum_potential:
         weight: 100
         relative: true
@@ -159,9 +167,12 @@ train_schedule:
       forces: 500
       dipole: 500
       fourier_density:
+        desmearing: false
         weight: 10
         reference: farfield
-      fourier_potential: 100
+      fourier_potential:
+        weight: 100
+        desmearing: false
       vacuum_potential:
         weight: 100
         relative: true

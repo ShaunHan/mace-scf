@@ -242,7 +242,7 @@ class FixedPointStability(torch.nn.Module):
 
 
 
-def spectral_errors(ref, pred, key):
+def spectral_errors(ref, pred, key, apply_smearing=False):
     """Per-graph Parseval MSE; potential fields are compared modulo a constant.
 
     Raw and zero-mean potential labels give the same nonzero-mode objective.
@@ -259,6 +259,14 @@ def spectral_errors(ref, pred, key):
         if bool((weights > 0).any()):
             raise ValueError("Missing Fourier observation for " + key)
         return pred["energy"]*0.
+    if apply_smearing:
+        # The analytic model already uses finite-width sources. This option
+        # reproduces training on Gaussian-smoothed DFT labels, now internally.
+        # Never filter the prediction a second time or invert a Gaussian.
+        density = key in ('fourier_density', 'fourier_farfield_density')
+        width = pred['density_smearing_width' if density else 'potential_smearing_width']
+        k2 = pred['k_vectors'].square().sum(-1)
+        target = target*torch.exp(-.5*width**2*k2)[...,None]
     difference = pred[key]-target
     active = pred["k_vectors_mask"]
     if key+"_dft_mask" in pred:
@@ -291,27 +299,52 @@ def vacuum_reference_weights(ref, reference):
 
 class WeightedFourierDensity(torch.nn.Module):
     """Parseval error of the original or explicitly smoothed density observer."""
-    def __init__(self, reference='density'):
+    def __init__(self, reference='density', desmearing=True, **legacy):
         super().__init__()
         if reference not in ('density', 'farfield'):
             raise ValueError('fourier_density reference must be density or farfield')
         self.reference = reference
+        self.apply_smearing = legacy.pop('apply_smearing', False)
+        self.desmearing = desmearing and not self.apply_smearing
+        if legacy:
+            raise TypeError(f'Unknown density loss options: {list(legacy)}')
+        if not isinstance(desmearing, bool) or not isinstance(self.apply_smearing, bool):
+            raise TypeError('desmearing must be a boolean')
 
     def extra_repr(self):
-        return 'reference='+self.reference
+        return f'reference={self.reference}, desmearing={self.desmearing}'
 
     def forward(self, ref, pred):
         key = 'fourier_farfield_density' if self.reference == 'farfield' else 'fourier_density'
-        square = spectral_errors(ref, pred, key)/1.e-6
+        square = spectral_errors(ref, pred, key, self.apply_smearing)/1.e-6
+        if self.desmearing and 'smooth_'+key in pred:
+            smooth = dict(pred, **{key: pred['smooth_'+key]})
+            # Preserve the tested smooth far-field objective (weight 10) and
+            # add the raw density objective (effective weight .01). The fixed
+            # ratio is a loss-balancing choice, independent of physical units.
+            square = (spectral_errors(ref, smooth, key, True)
+                      +.001*spectral_errors(ref, pred, 'fourier_density'))/1.e-6
         weights = ref.weight*ref.fourier_density_weight
         return (square*weights).sum()/weights.sum().clamp_min(1.e-30)
 
 
 class WeightedFourierPotential(torch.nn.Module):
     """Real-space MSE of the retained potential after uniform-offset alignment."""
+    def __init__(self, desmearing=True, **legacy):
+        super().__init__()
+        self.apply_smearing = legacy.pop('apply_smearing', False)
+        self.desmearing = desmearing and not self.apply_smearing
+        if legacy:
+            raise TypeError(f'Unknown potential loss options: {list(legacy)}')
+        if not isinstance(desmearing, bool) or not isinstance(self.apply_smearing, bool):
+            raise TypeError('desmearing must be a boolean')
+
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
-        square = spectral_errors(ref, pred, 'fourier_potential')
+        square = spectral_errors(ref, pred, 'fourier_potential', self.apply_smearing)
+        if self.desmearing and 'smooth_fourier_potential' in pred:
+            smooth = dict(pred, fourier_potential=pred['smooth_fourier_potential'])
+            square = square+spectral_errors(ref, smooth, 'fourier_potential', True)
         return {'spatial': ((square*weights).sum(), weights.sum())}
 
     def forward(self, ref, pred):

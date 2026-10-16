@@ -247,11 +247,14 @@ def build_model(
                 fit_forces=args.train_schedule[0]['loss'].get('forces',{}).get('weight',0)>0)
             initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
         else:
-            initialize(model, train_loader, args.device)
+            potential_options = args.train_schedule[0]['loss'].get('fourier_potential', {})
+            apply_smearing = potential_options.get('apply_smearing', False) if isinstance(potential_options, dict) else False
+            initialize(model, train_loader, args.device, apply_potential_smearing=apply_smearing)
             from mace_scf.electrostatics.potential import initialize_vacuum_reference
             vacuum_options = args.train_schedule[0]['loss'].get('vacuum_potential', {})
             initialize_vacuum_reference(model, train_loader, args.device,
-                relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True)
+                relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True,
+                apply_potential_smearing=apply_smearing)
         condition_energy(model, train_loader, args.device)
     if getattr(args, 'enable_cueq', False) and not native_cueq:
         from .foundation import accelerate_backbone

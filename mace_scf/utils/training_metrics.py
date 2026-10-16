@@ -43,10 +43,11 @@ def training_error_sums(ref, pred, loss_fn):
     density_reference = getattr(functions.get("fourier_density"), "reference", "density")
     for index, key in ((3, "fourier_density"), (4, "fourier_potential")):
         observer = ("fourier_farfield_density" if key == "fourier_density"
-                    and density_reference == "farfield" else key)
+                    and density_reference == "farfield" and 'smooth_'+key not in pred else key)
         if pred.get(observer) is not None and pred.get(observer + "_dft") is not None:
             weights = ref.weight * getattr(ref, key + "_weight")
-            add(index, spectral_errors(ref, pred, observer), weights)
+            apply_smearing = getattr(functions.get(key), 'apply_smearing', False)
+            add(index, spectral_errors(ref, pred, observer, apply_smearing), weights)
     if (pred.get("vacuum_potential") is not None and pred.get("fermi_level") is not None
             and getattr(ref, "vacuum_potential", None) is not None
             and getattr(ref, "fermi_level", None) is not None):
