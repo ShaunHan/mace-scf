@@ -221,7 +221,7 @@ def make_vasp_calculator(atoms, directory, meta):
                     ibrion=-1, nsw=0, isif=2, ncore=32, ediff=1e-6, isym=0,
                     amix=0.02, bmix=0.0001, lmaxmix=4, lreal="auto", ismear=-1,
                     sigma=0.1, ivdw=11, prec="normal", istart=0, icharg=2,
-                    nelmdl=-5, ispin=1, nelm=500, lwave=False, lasph=True, lorbit=11,
+                    nelmdl=-5, ispin=1, nelm=300, lwave=False, lasph=True, lorbit=11,
                     lcharg=True, laechg=True, lvtot=False, lvhar=True,
                     directory=str(directory), command=COMMAND,
                     custom={"plugins/local_potential": ".TRUE.",
@@ -234,7 +234,11 @@ def make_vasp_calculator(atoms, directory, meta):
                         efield=-float(np.asarray(meta["external_field"]) @ normal))
         settings["custom"]["lvacpotav"] = ".TRUE."
     if meta["plugin"]:
-        settings.update(ldipol=False, idipol=0, efield=0.)
+        # Kerker damping suppresses long-wavelength charge sloshing without
+        # making every local density update as small as straight AMIX=0.02.
+        # AMIN must be explicit; its default would undo this damping.
+        settings.update(ldipol=False, idipol=0, efield=0.,
+                        amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12, lwave=True)
         settings["custom"].update({"plugins/force_and_stress": ".TRUE.",
                                    "lvacpotav": ".FALSE."})
     calc = Vasp(**settings)
@@ -257,12 +261,13 @@ def diagnose(atoms, outdir, meta):
     if not values:
         values = re.findall(r'E-fermi\s*:\s*([-+\d.eE]+)', outcar_text)
     fermi = float(values[-1])
-    converged = getattr(atoms.calc, 'converged', None)
-    report = dict(vasp_converged=bool(converged) if converged is not None else None,
+    converged = 'aborting loop because EDIFF is reached' in outcar_text
+    report = dict(vasp_converged=converged,
                   fermi_level_eV=fermi,
                   dos_fermi_level_eV=float(atoms.calc.get_fermi_level()))
     meta['fermi_level'] = fermi
     meta['potential_file'] = 'LOCPOT'
+    meta['electronic_converged'] = converged
     if meta['plugin']:
         with np.load(outdir/'plugin_observables.npz') as obs:
             # The saved native LOCPOT includes the final plugin contribution.
@@ -308,11 +313,16 @@ def diagnose(atoms, outdir, meta):
         if match:
             numbers = match[3].split()
             if len(numbers) >= 5:
-                steps.append([int(match[2]), *[float(numbers[i]) for i in (0,1,2,4)]])
+                steps.append([int(match[2]), *[float(numbers[i]) for i in (0,1,2,4)],
+                              float(numbers[5]) if len(numbers) > 5 else np.nan])
     if steps:
         np.savetxt(outdir/'scf_residuals.csv',steps,delimiter=',',
-                   header='step,energy_eV,dE_eV,d_eps_eV,rms',comments='')
-        report['last_electronic_step'] = dict(zip(('step','energy_eV','dE_eV','d_eps_eV','rms'),steps[-1]))
+                   header='step,energy_eV,dE_eV,d_eps_eV,rms,rms_c',comments='')
+        report['last_electronic_step'] = dict(zip(('step','energy_eV','dE_eV','d_eps_eV','rms'),steps[-1][:5]))
+        charge_residuals = [row[-1] for row in steps if np.isfinite(row[-1])]
+        report['last_density_residual_rms_c'] = charge_residuals[-1] if charge_residuals else None
+    gamma = re.findall(r'average eigenvalue GAMMA=\s*([-+\d.eE]+)', outcar_text)
+    report['last_mixing_mean_eigenvalue'] = float(gamma[-1]) if gamma else None
     length = 1/np.linalg.norm(np.linalg.inv(atoms.cell.array)[:,axis])
     z = np.arange(len(phi))*length/len(phi)
     az = atoms.get_scaled_positions()[:,axis]*length
@@ -320,6 +330,7 @@ def diagnose(atoms, outdir, meta):
     vacuum = distance > 3.
     report.update(vacuum_definition='planes more than 3 Å from every atomic plane',
                   vacuum_electrons=float(n[vacuum].sum()*atoms.get_volume()/len(n)),
+                  vacuum_density_min_e_A3=float(n[vacuum].min()) if vacuum.any() else None,
                   vacuum_density_max_e_A3=float(n[vacuum].max()) if vacuum.any() else None,
                   vacuum_min_phi_minus_fermi_V=float((phi-fermi)[vacuum].min()) if vacuum.any() else None)
     np.savetxt(outdir/'electrostatics_profile.csv',np.column_stack((z,phi,phi-fermi,n,distance)),
@@ -343,6 +354,7 @@ def run_vasp(atoms, outdir, source_index):
     (outdir / "vasp_plugin.py").write_text(PLUGIN, encoding="utf-8")
     atoms.get_potential_energy()
     diagnose(atoms, outdir, meta)
+    print(f"{outdir.name}: electronic convergence = {meta['electronic_converged']}", flush=True)
     meta['complete'] = True
     atoms.info = {key: value for key, value in meta.items() if value is not None}
     write(outdir / f"{SYSTEM}_vasp_sp.traj", atoms)
