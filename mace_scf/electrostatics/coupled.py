@@ -522,14 +522,14 @@ def factor_linear_system(matrix):
     ensure_cuda_linalg(matrix.device)
     with torch.no_grad():
         if not bool(torch.isfinite(matrix).all()):
-            raise RuntimeError('Nonfinite constrained linear operator before LU factorization')
+            raise SCFNumericalError('Nonfinite constrained linear operator before LU factorization')
         lu, pivots, info = torch.linalg.lu_factor_ex(matrix)
         n = matrix.shape[-1]
         # Invalid pivots must never reach a native permutation/indexing kernel.
         valid = ((info == 0).all() & torch.isfinite(lu).all()
                  & (pivots >= 1).all() & (pivots <= n).all())
         if not bool(valid):
-            raise RuntimeError('Constrained LU factorization failed its status/finite/pivot '
+            raise SCFNumericalError('Constrained LU factorization failed its status/finite/pivot '
                                'checks; no shift or fallback applied')
     return lu, pivots
 
@@ -543,7 +543,7 @@ class _CachedLinearSolve(torch.autograd.Function):
         scale = operator.abs() @ solved.abs() + right.abs()
         allowance = (64 * matrix.shape[-1] * torch.finfo(matrix.dtype).eps) * scale.clamp_min(1.)
         if not bool(torch.isfinite(solved).all() & (defect.abs() <= allowance).all()):
-            raise RuntimeError('Constrained linear solve failed its finite/backward-error '
+            raise SCFNumericalError('Constrained linear solve failed its finite/backward-error '
                                'check; no diagonal shift or solver substitution applied')
         ctx.adjoint = adjoint
         # Saving the output (not a detached internal copy) makes second and
@@ -590,7 +590,7 @@ def prepare_charge_factorization(softness, kernel, mask, constraint=None):
     if kernel.shape != (*mask.shape, mask.shape[-1]) or softness.shape != mask.shape:
         raise ValueError('Charge kernel/softness dimensions disagree with node mask')
     if not bool(torch.isfinite(kernel).all() & torch.isfinite(softness).all()) or bool((softness[present] <= 0).any()):
-        raise RuntimeError('Charge kernel/softness must be finite, with positive atomic softness')
+        raise SCFNumericalError('Charge kernel/softness must be finite, with positive atomic softness')
     s = softness * mask
     total = s.sum(-1, keepdim=True)
     root = torch.sqrt(torch.where(present, s/total, torch.ones_like(s))) * mask
@@ -1150,9 +1150,11 @@ class CoupledResponse(AtomicPotentialResponse):
         # Learn its deformation response; retain the reference in observers.
         # This is a formulation version, not an adjustable training parameter.
         self.response_reference = 'neutral'
+        self.raw_vacuum_boundary = True
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
+                'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
                 'source_basis': getattr(self, 'source_basis', 'difference'),
@@ -1207,6 +1209,7 @@ class CoupledResponse(AtomicPotentialResponse):
         if mode not in ('unroll_scf', 'implicit'):
             raise ValueError(f'Unknown saved solver mode {mode}')
         self.deployment_mode = mode
+        self.raw_vacuum_boundary = bool(state.get('raw_vacuum_boundary', False))
         reference = state.get('response_reference', 'total')
         if reference not in ('neutral', 'total'):
             raise ValueError(f'Unknown saved response reference {reference}')
@@ -1521,7 +1524,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         potential, field = spectral[-2:]
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1,2))
         if not bool(torch.isfinite(state).all() & torch.isfinite(residual).all()):
-            raise RuntimeError('Nonfinite coupled electronic state')
+            raise SCFNumericalError('Nonfinite coupled electronic state')
         state = state*g.present[..., None]
         moments = torch.cat((state[..., :1], state[..., 1:4]*r.density_width), -1)
         density_coefficients = g.unpack(moments)[..., [0, 2, 3, 1]]
@@ -1641,10 +1644,10 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
     from .potential import initialize_vacuum_reference
-    from .desmearing import configure_desmearing
+    from .desmearing import configure_desmearing, target_smearing_enabled
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
     potential_options = (loss_config or {}).get('fourier_potential', {})
-    apply_smearing = potential_options.get('apply_smearing', False) if isinstance(potential_options, dict) else False
+    apply_smearing = target_smearing_enabled(potential_options)
     initialize_response(model, loader, device, apply_potential_smearing=apply_smearing)
     vacuum_options = (loss_config or {}).get('vacuum_potential', {})
     initialize_vacuum_reference(model, loader, device,

@@ -31,7 +31,10 @@ def test_iridium_recipes_keep_the_step_curriculum_and_final_deployment_budget():
             assert options['mode'] in ('unroll_scf', 'shortcut_scf')
             assert options['scf']['num_scf_steps'] <= steps
             assert options['scf']['mixing_parameter'] == .5
-            assert stage['lr'] >= .001
+            assert 0 < stage['lr'] <= config['lr']
+            if stage['start'] >= 150:
+                assert stage['lr'] == .0001
+            assert stage['loss']['voltage'] == {'weight':100,'relative':True}
 
 
 def test_short_training_budget_is_supported_without_observation_banner(caplog):
@@ -60,7 +63,7 @@ def test_log_uses_requested_density_and_dipole_names(caplog):
     with caplog.at_level(logging.INFO):valid_err_log(1.,metrics,Logger(),'ElectrostaticRMSE',5)
     assert 'RMSE_dip_per_atom=2.0000 meA' in caplog.text
     assert 'RMSE_rho=1.0000 me/A^3' in caplog.text
-    assert 'RMSE_Phi(abs/rel)=150.0000/140.0000 mV' in caplog.text
+    assert 'RMSE_WF(abs/rel)=150.0000/140.0000 meV' in caplog.text
     assert 'RMSE_EF(abs/rel)=200.0000/50.0000 meV' in caplog.text
     assert 'RMSE_ESPvac(abs/rel)=200.0000/100.0000 mV' in caplog.text
     assert 'RMSE_ESP=100.0000 mV' in caplog.text
@@ -138,7 +141,7 @@ def test_ir_finetune_protects_transferred_features_during_head_initialization():
         assert stages[0]['freeze_foundation_backbone'] is True
         assert stages[1]['start']==10 and stages[1]['end']==49
         assert all(not stage.get('freeze_foundation_backbone',False) for stage in stages[1:])
-        assert all(stage['lr']>=.001 for stage in stages)
+        assert all(0 < right['lr'] <= left['lr'] for left,right in zip(stages,stages[1:]))
         assert stages[-1]['fixed_point_training_options']['scf']['num_scf_steps']==50
 
 
@@ -366,12 +369,12 @@ def test_resume_rescores_changed_loss_without_resetting_training_state(
     def evaluate(*args):
         assert optimizer_modes == ['eval']
         calls.append(True); torch.rand(4); np.random.rand(); random.random()
-        return 10., {'scf_residual_max':0.}
+        return (.01 if recorded and len(calls)==1 else 10.), {'scf_residual_max':0.}
     monkeypatch.setattr(module, 'evaluate', evaluate)
     loss = WeightedLoss({'dipole':weight, 'fermi_level':{'weight':100, 'relative':relative}})
     module._resume_loss_baseline(model, None, loss, [], [], optimizer, scheduler, restored, ema, 'cpu')
-    assert len(calls) == int(recheck)
-    assert optimizer_modes == (['eval'] if recheck else [])
+    assert len(calls) == int(recorded)+int(recheck)
+    assert optimizer_modes == ['eval']
     assert restored.best_loss == (10. if recheck else .01)
     assert restored.best_epoch == 5 and restored.loss_definition == loss.definition
     torch.testing.assert_close(torch.random.get_rng_state(), rng, rtol=0, atol=0)
@@ -383,7 +386,7 @@ def test_resume_rescores_changed_loss_without_resetting_training_state(
         for name, value in record.items():
             torch.testing.assert_close(optimizer.state_dict()['state'][key][name], value, rtol=0, atol=0)
     module._resume_loss_baseline(model, None, loss, [], [], optimizer, scheduler, restored, ema, 'cpu')
-    assert len(calls) == int(recheck)
+    assert len(calls) == int(recorded)+int(recheck)
 
 
 def test_recovered_best_marker_uses_latest_objective_metadata(tmp_path):

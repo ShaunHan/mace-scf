@@ -304,7 +304,7 @@ class WeightedFourierDensity(torch.nn.Module):
         if reference not in ('density', 'farfield'):
             raise ValueError('fourier_density reference must be density or farfield')
         self.reference = reference
-        self.apply_smearing = legacy.pop('apply_smearing', False)
+        self.apply_smearing = legacy.pop('apply_smearing', not desmearing)
         self.desmearing = desmearing and not self.apply_smearing
         if legacy:
             raise TypeError(f'Unknown density loss options: {list(legacy)}')
@@ -319,9 +319,10 @@ class WeightedFourierDensity(torch.nn.Module):
         square = spectral_errors(ref, pred, key, self.apply_smearing)/1.e-6
         if self.desmearing and 'smooth_'+key in pred:
             smooth = dict(pred, **{key: pred['smooth_'+key]})
-            # Preserve the tested smooth far-field objective (weight 10) and
-            # add the raw density objective (effective weight .01). The fixed
-            # ratio is a loss-balancing choice, independent of physical units.
+            # The smooth latent objective and raw reconstruction train jointly.
+            # The raw term has relative weight .001; the configured outer
+            # density weight multiplies both. RMSE diagnostics report each
+            # field separately, without this loss-balancing factor.
             square = (spectral_errors(ref, smooth, key, True)
                       +.001*spectral_errors(ref, pred, 'fourier_density'))/1.e-6
         weights = ref.weight*ref.fourier_density_weight
@@ -332,7 +333,7 @@ class WeightedFourierPotential(torch.nn.Module):
     """Real-space MSE of the retained potential after uniform-offset alignment."""
     def __init__(self, desmearing=True, **legacy):
         super().__init__()
-        self.apply_smearing = legacy.pop('apply_smearing', False)
+        self.apply_smearing = legacy.pop('apply_smearing', not desmearing)
         self.desmearing = desmearing and not self.apply_smearing
         if legacy:
             raise TypeError(f'Unknown potential loss options: {list(legacy)}')
@@ -430,10 +431,30 @@ class WeightedVacuumPotential(RelativeScalarLoss):
     key = 'vacuum_potential'
 
 
+class WeightedVoltage(RelativeScalarLoss):
+    """Supervise the observed vacuum-minus-Fermi difference, without a new head."""
+    key = 'voltage'
+
+    def weights(self, ref):
+        return (vacuum_observation_weight(ref)*ref.fermi_level_weight).reshape(-1)
+
+    def errors(self, ref, pred):
+        value = (pred['vacuum_potential']-pred['fermi_level']).reshape(-1)
+        weight = self.weights(ref).to(value)
+        target = (ref.vacuum_potential-ref.fermi_level).reshape(-1).to(value)
+        error = value-target
+        if bool(((weight > 0) & ~torch.isfinite(error)).any()):
+            raise FloatingPointError('Nonfinite observed voltage difference')
+        if not bool(torch.isfinite(weight).all()) or bool((weight < 0).any()):
+            raise ValueError('Voltage observation weights must be finite and nonnegative')
+        return torch.where(weight > 0, error, 0.), weight
+
+
 _LOSS_FUNCTIONS = {
     "fourier_density": WeightedFourierDensity,
     "fourier_potential": WeightedFourierPotential,
     "vacuum_potential": WeightedVacuumPotential,
+    "voltage": WeightedVoltage,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
     "stress": weighted_mean_squared_stress,
@@ -480,6 +501,21 @@ class WeightedLoss(torch.nn.Module):
                 self.loss_fns[name] = function(**options)
             else:
                 self.loss_fns[name] = function
+            if name in ('fourier_density', 'fourier_potential'):
+                # Store the resolved target convention so a resumed objective
+                # remains unambiguous when defaults evolve.
+                self.definition[name]['apply_smearing'] = self.loss_fns[name].apply_smearing
+
+    @classmethod
+    def from_checkpoint(cls, definition):
+        """Reconstruct the exact loss recorded before target smoothing was explicit."""
+        definition = deepcopy(definition)
+        for name in ('fourier_density', 'fourier_potential'):
+            if name in definition:
+                if not isinstance(definition[name], dict):
+                    definition[name] = {'weight':definition[name]}
+                definition[name].setdefault('apply_smearing', False)
+        return cls(definition)
         
     def normalizers(self, ref: Batch):
         """Full-batch denominators for exact graph-wise gradient accumulation.

@@ -11,7 +11,25 @@ from mace_scf.electrostatics.loss import spectral_errors, vacuum_reference_weigh
 
 
 RMSE_KEYS = ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom",
-             "rmse_rho", "rmse_esp", "rmse_phi_abs")
+             "rmse_rho", "rmse_esp", "rmse_phi_abs",
+             "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth")
+
+
+def smooth_field_errors(ref, pred):
+    """Smooth latent fields versus internally smoothed labels, in base units.
+
+    Raw input Fourier labels are assumed. The extra far-field density filter
+    is identified separately; none of these diagnostics changes the loss.
+    """
+    for name, key, label in (
+            ('rho_smooth', 'fourier_density', 'fourier_density'),
+            ('rho_farfield_smooth', 'fourier_farfield_density', 'fourier_density'),
+            ('esp_smooth', 'fourier_potential', 'fourier_potential')):
+        width = 'density_smearing_width' if label == 'fourier_density' else 'potential_smearing_width'
+        if key not in pred or key+'_dft' not in pred or width not in pred:
+            continue
+        latent = dict(pred, **{key: pred.get('smooth_'+key, pred[key])})
+        yield 'rmse_'+name, spectral_errors(ref, latent, key, True), ref.weight*getattr(ref, label+'_weight')
 
 
 @torch.no_grad()
@@ -39,15 +57,13 @@ def training_error_sums(ref, pred, loss_fn):
         error = (pred["dipole"] - ref.dipole).reshape(-1, 3) / counts[:, None]
         add(2, error.double().square(), ref.dipole_weight.reshape(-1, 3) > 0)
 
-    functions = getattr(loss_fn, "loss_fns", {})
-    density_reference = getattr(functions.get("fourier_density"), "reference", "density")
     for index, key in ((3, "fourier_density"), (4, "fourier_potential")):
-        observer = ("fourier_farfield_density" if key == "fourier_density"
-                    and density_reference == "farfield" and 'smooth_'+key not in pred else key)
-        if pred.get(observer) is not None and pred.get(observer + "_dft") is not None:
+        if pred.get(key) is not None and pred.get(key + "_dft") is not None:
             weights = ref.weight * getattr(ref, key + "_weight")
-            apply_smearing = getattr(functions.get(key), 'apply_smearing', False)
-            add(index, spectral_errors(ref, pred, observer, apply_smearing), weights)
+            # Keep the reported quantity independent of the chosen loss filter.
+            add(index, spectral_errors(ref, pred, key), weights)
+    for key, error, weights in smooth_field_errors(ref, pred):
+        add(RMSE_KEYS.index(key), error, weights)
     if (pred.get("vacuum_potential") is not None and pred.get("fermi_level") is not None
             and getattr(ref, "vacuum_potential", None) is not None
             and getattr(ref, "fermi_level", None) is not None):

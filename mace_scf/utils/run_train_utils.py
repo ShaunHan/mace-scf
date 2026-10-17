@@ -248,7 +248,8 @@ def build_model(
             initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
         else:
             potential_options = args.train_schedule[0]['loss'].get('fourier_potential', {})
-            apply_smearing = potential_options.get('apply_smearing', False) if isinstance(potential_options, dict) else False
+            from mace_scf.electrostatics.desmearing import target_smearing_enabled
+            apply_smearing = target_smearing_enabled(potential_options)
             initialize(model, train_loader, args.device, apply_potential_smearing=apply_smearing)
             from mace_scf.electrostatics.potential import initialize_vacuum_reference
             vacuum_options = args.train_schedule[0]['loss'].get('vacuum_potential', {})

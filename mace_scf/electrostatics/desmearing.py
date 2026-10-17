@@ -58,8 +58,10 @@ class SpectralDecoder(torch.nn.Module):
             moments = torch.cat((state[..., :1], state[..., 1:4]*sigma), -1)
             normal_dipole = (moments[..., 0]*g.tensors[10]
                 +(moments[..., 1:4]*g.normal[:, None]).sum(-1)).sum(-1)
-            known = g.ramp((g.external*g.normal).sum(-1)
-                -g.slab_factor*(normal_dipole+g.counter_moment), width=0.)
+            boundary_field = ((g.external*g.normal).sum(-1)
+                -g.slab_factor*(normal_dipole+g.counter_moment))
+            boundary = g.ramp(boundary_field, width=0.)
+            known = boundary
             # A counter-charge's width describes the physical charge, not label
             # smearing. Preserve it; do not deconvolve it with the learned gain.
             known = known-g.coulomb*g.counter_density
@@ -75,6 +77,10 @@ class SpectralDecoder(torch.nn.Module):
             output['smooth_vacuum_potential'] = output['vacuum_potential']
             output['vacuum_potential'] = output['vacuum_potential']+g.plane(
                 torch.view_as_complex(((raw-old)/g.ngrid).contiguous()))
+            if getattr(r, 'raw_vacuum_boundary', False):
+                boundary_correction = g.ramp_plane(boundary_field)-g.plane(boundary)
+                output['vacuum_potential'] = output['vacuum_potential']+boundary_correction
+                output['vacuum_boundary_correction'] = boundary_correction
             output['fourier_total_potential'] = output['fourier_total_potential']+raw-old
             output['fourier_potential'] = raw
             for key, value in (('fourier_carrier_potential', carrier), ('fourier_local_potential', local)):
@@ -98,7 +104,18 @@ def desmearing_enabled(options):
             and not options.get('apply_smearing', False))
 
 
+def target_smearing_enabled(options):
+    """Without reconstruction, supervise the Gaussian representation at its width.
+
+    An explicit legacy apply_smearing value retains the preceding objective,
+    including old checkpoints that fitted finite-width sources to raw labels.
+    """
+    options = options if isinstance(options, dict) else {}
+    return options.get('apply_smearing', not options.get('desmearing', True))
+
+
 def configure_desmearing(response, loss_config):
+    response.raw_vacuum_boundary = True
     if not hasattr(response, 'potential_amplitudes_smearing_width'):
         response.potential_amplitudes_smearing_width = (float(response.source_widths[0])
             if len(response.source_widths) else response.density_width)

@@ -366,6 +366,16 @@ class SpectralGeometry:
         phase = 2*math.pi*self.order*self.zfrac[:, None]
         return (spectrum*torch.complex(phase.cos(), phase.sin())*self.axial).real.sum(-1)
 
+    def ramp_plane(self, field):
+        """Exact zero-mean sawtooth at the vacuum plane; midpoint at its jump.
+
+        The measured vacuum scalar is not restricted to the retained FFT grid.
+        Evaluating this known term directly avoids Fourier ringing at the
+        dipole-correction discontinuity without changing any SCF field sample.
+        """
+        distance = (self.zfrac-self.branch).remainder(1.)
+        return field*self.length*torch.where(distance == 0, 0., distance-.5)*self.slab
+
 
 def conjugate_gradient(operator, rhs, diagonal, steps, constraint, charge):
     """Jacobi-preconditioned CG in the exact fixed-charge tangent space.

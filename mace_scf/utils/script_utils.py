@@ -61,7 +61,7 @@ def create_error_table(
     has_phi_observations = False
 
     if table_type == "ElectrostaticRMSE":
-        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "RMSE_dip_per_atom meA", "RMSE_rho me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_Phi(abs/rel) mV"]
+        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smooth/farfield) me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP(raw/smooth) mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_WF(abs/rel) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
@@ -173,6 +173,7 @@ def create_error_table(
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
             "rmse_fermi_level", "rmse_fermi_level_rel", "rmse_esp_vac", "rmse_esp_vac_rel", "rmse_phi_abs", "rmse_phi_rel", "rmse_rho",
+            "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
@@ -186,8 +187,10 @@ def create_error_table(
         # add new tables here...
         if table_type == "ElectrostaticRMSE":
             table.add_row([name]+[metrics[key] for key in
-                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_rho")]
-                +[metrics['rmse_fermi_level']+'/'+metrics['rmse_fermi_level_rel'],metrics['rmse_esp'],
+                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom")]
+                +['/'.join(metrics[key] for key in ('rmse_rho','rmse_rho_smooth','rmse_rho_farfield_smooth')),
+                  metrics['rmse_fermi_level']+'/'+metrics['rmse_fermi_level_rel'],
+                  metrics['rmse_esp']+'/'+metrics['rmse_esp_smooth'],
                   metrics['rmse_esp_vac']+'/'+metrics['rmse_esp_vac_rel'],
                   metrics['rmse_phi_abs']+'/'+metrics['rmse_phi_rel']])
         elif table_type == "DensityCoefficientsRMSE":
@@ -269,6 +272,6 @@ def create_error_table(
         for index,name in reversed(list(enumerate(table.field_names))):
             if index and all(row[index] in ('not found','not found/not found') for row in table.rows):
                 table.del_column(name)
-    if table_type == "ElectrostaticRMSE" and not has_phi_observations and "RMSE_Phi(abs/rel) mV" in table.field_names:
-        table.del_column("RMSE_Phi(abs/rel) mV")
+    if table_type == "ElectrostaticRMSE" and not has_phi_observations and "RMSE_WF(abs/rel) meV" in table.field_names:
+        table.del_column("RMSE_WF(abs/rel) meV")
     return table

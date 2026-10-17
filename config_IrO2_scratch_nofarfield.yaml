@@ -1,3 +1,4 @@
+# Raw Fourier labels: desmearing=false fits smooth targets; true adds raw reconstruction.
 heads:
   default:
     arrays_keys:
@@ -85,6 +86,9 @@ train_schedule:
       fermi_level:
         weight: 100
         relative: true
+      voltage:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -115,6 +119,9 @@ train_schedule:
       fermi_level:
         weight: 100
         relative: true
+      voltage:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -128,7 +135,7 @@ train_schedule:
     name: stage3
     start: 150
     end: 249
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 500
       forces: 500
@@ -145,6 +152,9 @@ train_schedule:
       fermi_level:
         weight: 100
         relative: true
+      voltage:
+        weight: 100
+        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -158,7 +168,7 @@ train_schedule:
     name: stage4
     start: 250
     end: 300
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 1000
       forces: 500
@@ -173,6 +183,9 @@ train_schedule:
         weight: 100
         relative: true
       fermi_level:
+        weight: 100
+        relative: true
+      voltage:
         weight: 100
         relative: true
     fixed_point_training_options:

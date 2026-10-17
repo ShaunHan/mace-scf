@@ -1,6 +1,7 @@
 import random
 import logging
 import time
+from copy import deepcopy
 from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
@@ -20,13 +21,14 @@ from mace.tools.utils import (
 )
 import os
 from mace_scf.utils.training_metrics import (
-    RMSE_KEYS, training_error_sums, training_error_metrics,
+    RMSE_KEYS, training_error_sums, training_error_metrics, smooth_field_errors,
 )
 from mace.tools.scatter import scatter_sum
 from mace_scf.electrostatics.loss import (
     vacuum_observation_weight, vacuum_reference_weights, RelativeScalarLoss,
     WeightedFermiLevel, WeightedVacuumPotential,
 )
+from mace_scf.electrostatics.coupled import SCFNumericalError
 
 
 class CheckpointHandler(NativeCheckpointHandler):
@@ -91,6 +93,8 @@ class CheckpointHandler(NativeCheckpointHandler):
         value["torch_rng"] = torch.random.get_rng_state()
         value["cuda_rng"] = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
         value['backbone_layout'] = getattr(state.model, 'backbone_layout', 'mul_ir')
+        value['training_guard'] = getattr(state.optimizer, '_training_guard', None)
+        value['guard_definition'] = getattr(state.optimizer, '_guard_definition', None)
         return value
 
     def save(self,state,epochs,keep_last=False):
@@ -138,6 +142,9 @@ class CheckpointHandler(NativeCheckpointHandler):
             raise ValueError('Checkpoint and requested backbone use different tensor-product layouts. '
                              'Keep the original enable_cueq setting to resume, or start a fresh CuEq run in a new checkpoint directory; Adam moments cannot be relabeled.')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
+        if value.get('training_guard') is not None:
+            state.optimizer._training_guard = value['training_guard']
+            state.optimizer._guard_definition = value.get('guard_definition')
         self.best_loss=value.get("best_loss",float("inf"))
         self.best_epoch=value.get("best_epoch")
         self.loss_definition=value.get('loss_definition')
@@ -178,6 +185,11 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     best = getattr(checkpoint_handler, "best_loss", float("inf"))
     stalled = 0
     best_epoch = None
+    coupled = getattr(getattr(model, 'field_dependent_charges_map', None), 'coupled', False)
+    definition = getattr(loss_fn, 'definition', None)
+    if coupled and getattr(optimizer, '_guard_definition', None) != definition:
+        optimizer._training_guard = None
+        optimizer._guard_definition = deepcopy(definition)
     for epoch in range(start_epoch, end_epoch+1):
         epoch_start = time.perf_counter()
         cuda_device = torch.device(device).type == 'cuda'
@@ -187,28 +199,36 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             train_sampler.set_epoch(epoch)
         if hasattr(optimizer, "train"):
             optimizer.train()
-        norms, retained, clipped, graphs_seen = [], [], 0, 0
-        epoch_errors = torch.zeros((len(RMSE_KEYS), 2), dtype=torch.float64, device=device)
-        for step, batch in enumerate(train_loader):
-            _, metrics = take_step(model if distributed_model is None else distributed_model,
-                model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
-                debug_log_grad_summary, debug_grad_log_frequency, step)
-            if "_rmse_sums" in metrics:
-                epoch_errors += metrics.pop("_rmse_sums")
-            norms.append(metrics["grad_norm_before_clip"])
-            retained.append(metrics["gradient_retained"])
-            graphs_seen += metrics["graphs"]
-            clipped += int(metrics["grad_clip_applied"])
+        snapshot = _training_snapshot(model, optimizer, ema, train_loader, device) if coupled else None
+        for attempt in range(5):
+            norms, retained, clipped, graphs_seen = [], [], 0, 0
+            epoch_errors = torch.zeros((len(RMSE_KEYS), 2), dtype=torch.float64, device=device)
+            try:
+                for step, batch in enumerate(train_loader):
+                    _, metrics = take_step(model if distributed_model is None else distributed_model,
+                        model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
+                        debug_log_grad_summary, debug_grad_log_frequency, step)
+                    if "_rmse_sums" in metrics:
+                        epoch_errors += metrics.pop("_rmse_sums")
+                    norms.append(metrics["grad_norm_before_clip"])
+                    retained.append(metrics["gradient_retained"])
+                    graphs_seen += metrics["graphs"]
+                    clipped += int(metrics["grad_clip_applied"])
+                break
+            except (FloatingPointError, SCFNumericalError) as error:
+                if snapshot is None:
+                    raise
+                _restore_training_snapshot(snapshot, model, optimizer, ema, train_loader, device)
+                if attempt == 4:
+                    raise FloatingPointError(f'Epoch {epoch} remained numerically unstable after four learning-rate reductions. '
+                        'Restored the complete pre-epoch state; no failed epoch was saved.') from error
+                for group in optimizer.param_groups:
+                    group['lr'] *= .5**(attempt+1)
+                logging.warning('Numerical training failure in epoch %d: %s. Restored model, Adam, EMA and RNG; '
+                    'replaying the complete epoch at lr=%s (retry %d/4). No configuration was skipped.',
+                    epoch, error, [g['lr'] for g in optimizer.param_groups], attempt+1)
         if torch.distributed.is_available() and torch.distributed.is_initialized():
             torch.distributed.all_reduce(epoch_errors)
-        if rank == 0 and logger is not None:
-            online = training_error_metrics(epoch_errors)
-            options = getattr(model_eval_wrapper, 'training_options', None)
-            scf = getattr(options, 'scf', None)
-            logger.log({**online, 'mode':'train', 'split':'training', 'epoch':epoch,
-                        'metric_context':'online_training', 'parameter_state':'optimizer',
-                        'scf_steps':getattr(scf, 'num_scf_steps', None)})
-            logging.debug('Training epoch %d, online RMSE (base units): %s', epoch, online)
         if epoch % eval_interval == 0 or epoch == end_epoch:
             if cuda_device:
                 torch.cuda.synchronize(device)
@@ -221,8 +241,16 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
                                             train_loader, device)
                 valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
+                if coupled and (not np.isfinite(valid_loss) or
+                        (np.isfinite(best) and valid_loss > 100*max(best, 1.e-12))):
+                    raise FloatingPointError(f'Validation loss exploded to {valid_loss:.6g} '
+                        f'from the stage best {best:.6g}; no failed checkpoint was committed.')
             except Exception:
-                if save_all_checkpoints:
+                if snapshot is not None:
+                    _restore_training_snapshot(snapshot, model, optimizer, ema, train_loader, device)
+                    logging.exception('Validation failed in epoch %d. Restored the complete pre-epoch state; '
+                                      'best and resumable checkpoints are unchanged.', epoch)
+                elif save_all_checkpoints:
                     checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=True)
                     logging.exception('Validation failed; retained epoch %d for diagnosis. The best checkpoint is unchanged.',epoch)
                 raise
@@ -261,8 +289,17 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             if improved or save_all_checkpoints:
                 checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=save_all_checkpoints)
             lr_scheduler.step(metrics=valid_loss)
+        if rank == 0 and logger is not None:
+            online = training_error_metrics(epoch_errors)
+            options = getattr(model_eval_wrapper, 'training_options', None)
+            scf = getattr(options, 'scf', None)
+            logger.log({**online, 'mode':'train', 'split':'training', 'epoch':epoch,
+                        'metric_context':'online_training', 'parameter_state':'optimizer',
+                        'scf_steps':getattr(scf, 'num_scf_steps', None)})
+            logging.debug('Training epoch %d, online RMSE (base units): %s', epoch, online)
         if hasattr(checkpoint_handler, "save_progress"):
             checkpoint_handler.save_progress(CheckpointState(model,optimizer,lr_scheduler),epoch)
+        del snapshot
         if stalled >= patience:
             logging.info("Stage early stopping after %d epochs without improvement", stalled)
             break
@@ -273,32 +310,72 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
                           optimizer, scheduler, handler, ema, device):
     """Compare resumed checkpoints on the current objective's scale."""
     from copy import deepcopy
+    from mace_scf.electrostatics.loss import WeightedLoss
     definition = getattr(loss_fn, 'definition', None)
     if definition is None:
         return
-    changed = getattr(handler, 'loss_definition', None) != definition
     epoch = getattr(handler, 'loaded_epoch', None)
-    if not changed or epoch is None:
+    old_definition = getattr(handler, 'loss_definition', None)
+    saved_objective = WeightedLoss.from_checkpoint(old_definition) if old_definition else None
+    changed = (None if saved_objective is None else saved_objective.definition) != definition
+    response = getattr(model, 'field_dependent_charges_map', None)
+    decoder = getattr(response, 'raw_decoder', None)
+    upgrade = (decoder is not None and bool(decoder.enabled[1])
+               and not getattr(response, 'raw_vacuum_boundary', False))
+    changed = changed or upgrade
+    old_best = getattr(handler, 'best_loss', float('inf'))
+    verify = (epoch is not None and old_definition and np.isfinite(old_best)
+              and not getattr(handler, '_resume_verified', False))
+    if epoch is None or (not changed and not verify):
+        if upgrade:
+            response.raw_vacuum_boundary = True
         handler.loss_definition = deepcopy(definition)
         return
     rng = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
     cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
+    generator = getattr(valid_loader, 'generator', None)
+    loader_rng = generator.get_state() if generator is not None else None
+    reference = getattr(response, 'scalar_reference', None)
+    old_reference = None if reference is None else reference.detach().clone()
     try:
         if hasattr(optimizer, 'eval'):
             optimizer.eval()
-        calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device)
-        value, metrics = evaluate(model, wrapper, loss_fn, ema, valid_loader, device)
+        if verify:
+            # Compare on the SAVED objective before accepting a changed recipe.
+            # A finite collapse must not replace its good historical baseline.
+            value, _ = evaluate(model, wrapper, saved_objective, ema, valid_loader, device)
+            if not np.isfinite(value) or value > 100*max(old_best, 1.e-12):
+                raise FloatingPointError(f'Resumed epoch {epoch} has loss {value:.6g} on its saved objective '
+                    f'(recorded best {old_best:.6g}). Restore a stable earlier checkpoint; '
+                    'optimizer, EMA and best-checkpoint selection were not advanced.')
+        if changed:
+            if upgrade:
+                response.raw_vacuum_boundary = True
+            calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device)
+            value, metrics = evaluate(model, wrapper, loss_fn, ema, valid_loader, device)
+            if not np.isfinite(value) or not np.isfinite(metrics.get('scf_residual_max', 0.)):
+                raise FloatingPointError('Nonfinite resumed validation baseline; checkpoint selection unchanged')
+    except Exception:
+        if upgrade:
+            response.raw_vacuum_boundary = False
+        if old_reference is not None:
+            reference.copy_(old_reference)
+        raise
     finally:
         random.setstate(rng[0]); np.random.set_state(rng[1]); torch.random.set_rng_state(rng[2])
         if cuda_rng is not None:
             torch.cuda.set_rng_state(cuda_rng, device)
-    if not np.isfinite(value) or not np.isfinite(metrics.get('scf_residual_max', 0.)):
-        raise FloatingPointError('Nonfinite resumed validation baseline; checkpoint selection unchanged')
+        if loader_rng is not None:
+            generator.set_state(loader_rng)
+    handler._resume_verified = True
+    if not changed:
+        handler.loss_definition = deepcopy(definition)
+        return
     handler.loss_definition = deepcopy(definition)
     handler.best_loss, handler.best_epoch = value, epoch
     handler.save(CheckpointState(model, optimizer, scheduler), epoch, keep_last=True)
-    logging.info('Re-evaluated resumed epoch %d with the current loss definition: loss=%.6g. '
-                 'The previous loss definition differed or was not recorded; optimizer and EMA state are retained.', epoch, value)
+    logging.info('Re-evaluated resumed epoch %d with the current objective and observer: loss=%.6g. '
+                 'The target convention, loss or vacuum observer changed; optimizer and EMA state are retained.', epoch, value)
 
 
 def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):
@@ -383,6 +460,12 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
             loss=loss_fn(pred=output,ref=piece,**({'normalizers':denominators} if adaptive else {}))
             if not bool(torch.isfinite(loss.detach())):
                 raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
+            history = getattr(optimizer, '_training_guard', None)
+            partial = loss.detach() if total is None else total+loss.detach()
+            if coupled and history is not None and history['count'] >= 8:
+                if float(partial) > 100*max(history['loss'], 1.e-12):
+                    raise FloatingPointError('Finite training loss explosion before backward/Adam: '
+                        f'{float(partial):.6g} versus running {history["loss"]:.6g}')
             torch.autograd.backward(loss,inputs=parameters)
             total=loss.detach() if total is None else total+loss.detach()
             observed = training_error_sums(piece, output, loss_fn)
@@ -424,9 +507,16 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     if (debug_log_grad_summary and logging.getLogger().isEnabledFor(logging.DEBUG)
             and (opt_step == 0 or (frequency is not None and frequency > 0 and opt_step % frequency == 0))):
         logging.debug('Optimizer gradient ownership before clipping: %s', _gradient_diagnostics(optimizer))
-    norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
-                                         error_if_nonfinite=True)
+    try:
+        norm = torch.nn.utils.clip_grad_norm_(parameters, float('inf') if max_grad_norm is None else max_grad_norm,
+                                             error_if_nonfinite=True)
+    except RuntimeError as error:
+        if 'non-finite' not in str(error):
+            raise
+        raise FloatingPointError('Nonfinite gradient; no optimizer/EMA update performed') from error
     norm_value = float(norm)
+    if coupled:
+        _check_training_growth(optimizer, float(loss.detach()), norm_value)
     metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": norm_value,
                "grad_clip_applied": max_grad_norm is not None and norm_value>max_grad_norm,
                "gradient_retained": min(1., max_grad_norm/(norm_value+1.e-6)) if max_grad_norm is not None else 1.,
@@ -437,6 +527,53 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         ema.update()
     metrics["time"] = time.time()-start
     return loss.detach(), metrics
+
+
+def _check_training_growth(optimizer, loss, norm):
+    """Catch finite numerical explosions that ordinary norm clipping misses.
+
+    This broad, dimensionless guard compares the current optimizer batch with
+    its running training scale; it never reads validation labels. It rejects a
+    whole update instead of clipping observables or silently omitting data.
+    """
+    previous = getattr(optimizer, '_training_guard', None)
+    if previous is not None and previous['count'] >= 8:
+        if loss > 100*max(previous['loss'], 1.e-12) or norm > 100*max(previous['norm'], 1.e-12):
+            raise FloatingPointError('Finite training explosion before Adam/EMA: '
+                f'loss={loss:.6g} (running {previous["loss"]:.6g}), '
+                f'gradient norm={norm:.6g} (running {previous["norm"]:.6g})')
+    if previous is None:
+        optimizer._training_guard = {'loss':loss, 'norm':norm, 'count':1}
+    else:
+        rate = max(.01, 1./(previous['count']+1))
+        optimizer._training_guard = {'loss':previous['loss']+rate*(loss-previous['loss']),
+            'norm':previous['norm']+rate*(norm-previous['norm']), 'count':previous['count']+1}
+
+
+def _training_snapshot(model, optimizer, ema, loader, device):
+    """Small parameter/optimizer snapshot; no activations or datasets copied."""
+    generator = getattr(loader, 'generator', None)
+    return {'model':deepcopy(model.state_dict()), 'optimizer':deepcopy(optimizer.state_dict()),
+        'ema':None if ema is None else deepcopy(ema.state_dict()),
+        'guard':deepcopy(getattr(optimizer, '_training_guard', None)),
+        'rng':torch.random.get_rng_state(), 'python':random.getstate(), 'numpy':np.random.get_state(),
+        'cuda':torch.cuda.get_rng_state(device) if torch.device(device).type=='cuda' else None,
+        'loader':generator.get_state() if generator is not None else None}
+
+
+def _restore_training_snapshot(snapshot, model, optimizer, ema, loader, device):
+    model.load_state_dict(snapshot['model'])
+    optimizer.load_state_dict(snapshot['optimizer'])
+    optimizer.zero_grad(set_to_none=True)
+    optimizer._training_guard = deepcopy(snapshot['guard'])
+    if ema is not None:
+        ema.load_state_dict(snapshot['ema'])
+    torch.random.set_rng_state(snapshot['rng'])
+    random.setstate(snapshot['python']); np.random.set_state(snapshot['numpy'])
+    if snapshot['cuda'] is not None:
+        torch.cuda.set_rng_state(snapshot['cuda'], device)
+    if snapshot['loader'] is not None:
+        loader.generator.set_state(snapshot['loader'])
 
 
 def _gradient_diagnostics(optimizer):
@@ -611,6 +748,7 @@ def _evaluate(
     delta_fermi_level_list = []
 
     voltage_errors = {"potential_difference": [], "vacuum_potential": [], "fourier_potential": [], "fourier_density": [], "fourier_total_potential": []}
+    smooth_errors = {}
     scf_residuals = []
     objective_sums = {}
     scalar_objectives = {}
@@ -677,12 +815,7 @@ def _evaluate(
                           if key == "fourier_total_potential" else getattr(batch,key+"_weight")*batch.weight)
                 if key+"_dft" not in output:
                     continue
-                density_reference = getattr(loss_fn.loss_fns.get('fourier_density'), 'reference', 'density')
-                observed_key = ('fourier_farfield_density' if key == 'fourier_density' and density_reference == 'farfield'
-                                and 'smooth_'+key not in output else key)
-                loss_key = 'fourier_potential' if key == 'fourier_total_potential' else key
-                apply_smearing = getattr(loss_fn.loss_fns.get(loss_key), 'apply_smearing', False)
-                error = spectral_errors(batch,output,observed_key,apply_smearing)
+                error = spectral_errors(batch,output,key)
             elif key == "potential_difference":
                 target, weight = vacuum_reference_weights(batch, output['vacuum_potential'])
                 weight = weight*(batch.fermi_level_weight>0)
@@ -723,6 +856,10 @@ def _evaluate(
             if bool((use & ~torch.isfinite(error)).any()):
                 raise FloatingPointError('Nonfinite observed '+key+' error')
             voltage_errors[key].append(torch.stack(((error[use]*weight[use]).sum(),weight[use].sum())))
+        for key, error, weight in smooth_field_errors(batch, output):
+            use = weight > 0
+            pair = torch.stack(((error[use]*weight[use]).sum(), weight[use].sum()))
+            smooth_errors[key] = smooth_errors.get(key, 0.)+pair
         if output.get("scf_residual") is not None:
             scf_residuals.append(output["scf_residual"].max())
             if debug_stability:
@@ -938,6 +1075,9 @@ def _evaluate(
             # per-batch correction or a shift installed in the deployed model.
             aux['phi_bias'] = float(first/weight)
             aux['rmse_phi_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+    for key, (square, weight) in smooth_errors.items():
+        if weight > 0:
+            aux[key] = float((square/weight).sqrt())
     for key, moments in scalar_metrics.items():
         weight, first, second, _ = moments
         if weight > 0:
@@ -997,16 +1137,25 @@ def valid_err_log(
     if log_errors == "ElectrostaticRMSE" or "rmse_phi_abs" in eval_metrics or "rmse_rho" in eval_metrics:
         pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key,label,unit in
                   (('rmse_e_per_atom','RMSE_E_per_atom','meV'), ('rmse_f','RMSE_F','meV/A'),
-                   ('rmse_mu_per_atom','RMSE_dip_per_atom','meA'), ('rmse_rho','RMSE_rho','me/A^3')) if key in eval_metrics]
+                   ('rmse_mu_per_atom','RMSE_dip_per_atom','meA')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
+        if 'rmse_rho' in eval_metrics:
+            label = 'RMSE_rho(raw/smooth/farfield)' if 'rmse_rho_smooth' in eval_metrics else 'RMSE_rho'
+            value = fmt('rmse_rho')
+            if 'rmse_rho_smooth' in eval_metrics:
+                value += '/'+fmt('rmse_rho_smooth')+'/'+fmt('rmse_rho_farfield_smooth')
+            pieces.append(label+'='+value+' me/A^3')
         if 'rmse_fermi_level' in eval_metrics:
             pieces.append('RMSE_EF(abs/rel)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
         if 'rmse_esp' in eval_metrics:
-            pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
+            if 'rmse_esp_smooth' in eval_metrics:
+                pieces.append('RMSE_ESP(raw/smooth)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
+            else:
+                pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:
             pieces.append('RMSE_ESPvac(abs/rel)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_phi_abs' in eval_metrics:
-            pieces.append('RMSE_Phi(abs/rel)='+fmt('rmse_phi_abs')+'/'+fmt('rmse_phi_rel')+' mV')
+            pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_phi_abs')+'/'+fmt('rmse_phi_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"
