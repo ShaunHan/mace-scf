@@ -87,9 +87,6 @@ train_schedule:
       fermi_level:
         weight: 100
         relative: true
-      voltage:
-        weight: 100
-        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -119,9 +116,6 @@ train_schedule:
         weight: 100
         relative: true
       fermi_level:
-        weight: 100
-        relative: true
-      voltage:
         weight: 100
         relative: true
     fixed_point_training_options:
@@ -155,9 +149,6 @@ train_schedule:
       fermi_level:
         weight: 100
         relative: true
-      voltage:
-        weight: 100
-        relative: true
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -187,9 +178,6 @@ train_schedule:
         weight: 100
         relative: true
       fermi_level:
-        weight: 100
-        relative: true
-      voltage:
         weight: 100
         relative: true
     fixed_point_training_options:

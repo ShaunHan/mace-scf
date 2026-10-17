@@ -34,7 +34,7 @@ def test_iridium_recipes_keep_the_step_curriculum_and_final_deployment_budget():
             assert 0 < stage['lr'] <= config['lr']
             if stage['start'] >= 150:
                 assert stage['lr'] == .0001
-            assert stage['loss']['voltage'] == {'weight':100,'relative':True}
+            assert 'voltage' not in stage['loss']
 
 
 def test_short_training_budget_is_supported_without_observation_banner(caplog):

@@ -431,30 +431,10 @@ class WeightedVacuumPotential(RelativeScalarLoss):
     key = 'vacuum_potential'
 
 
-class WeightedVoltage(RelativeScalarLoss):
-    """Supervise the observed vacuum-minus-Fermi difference, without a new head."""
-    key = 'voltage'
-
-    def weights(self, ref):
-        return (vacuum_observation_weight(ref)*ref.fermi_level_weight).reshape(-1)
-
-    def errors(self, ref, pred):
-        value = (pred['vacuum_potential']-pred['fermi_level']).reshape(-1)
-        weight = self.weights(ref).to(value)
-        target = (ref.vacuum_potential-ref.fermi_level).reshape(-1).to(value)
-        error = value-target
-        if bool(((weight > 0) & ~torch.isfinite(error)).any()):
-            raise FloatingPointError('Nonfinite observed voltage difference')
-        if not bool(torch.isfinite(weight).all()) or bool((weight < 0).any()):
-            raise ValueError('Voltage observation weights must be finite and nonnegative')
-        return torch.where(weight > 0, error, 0.), weight
-
-
 _LOSS_FUNCTIONS = {
     "fourier_density": WeightedFourierDensity,
     "fourier_potential": WeightedFourierPotential,
     "vacuum_potential": WeightedVacuumPotential,
-    "voltage": WeightedVoltage,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
     "stress": weighted_mean_squared_stress,
