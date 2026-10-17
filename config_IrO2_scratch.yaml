@@ -1,4 +1,3 @@
-# Pre-smoothed dataset: keep its original objective with desmearing: false.
 heads:
   default:
     arrays_keys:
@@ -10,12 +9,15 @@ heads:
       energy: vasp_free_energy
       external_field: external_field
       fermi_level: vasp_efermi
-      fourier_density: vasp_rho_fftn_shifted_1.5
-      fourier_potential: vasp_phi_fftn_shifted_1.5
-      fourier_proto_potential: vasp_proto_phi_fftn_shifted_1.5
+      fourier_density: vasp_rho_fftn_shifted
+      fourier_potential: vasp_phi_fftn_shifted
+      fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
       vacuum_potential: vacuum_potential
+      counter_charge: counter_charge
+      counter_charge_width: counter_charge_width
+      counter_charge_zfrac: counter_charge_zfrac
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -59,7 +61,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_scratch
+checkpoints_dir: checkpoints
 compute_forces: true
 train_schedule:
   0:
@@ -72,10 +74,10 @@ train_schedule:
       forces: 500
       dipole: 10
       fourier_density:
-        desmearing: false
         weight: 10
         reference: farfield
-      fourier_potential:
+        desmearing: false
+      fourier_potential: 
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -96,17 +98,17 @@ train_schedule:
   1:
     name: stage2
     start: 50
-    end: 349
+    end: 149
     lr: 0.001
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 500
+      dipole: 100
       fourier_density:
-        desmearing: false
-        weight: 10
+        weight: 100
         reference: farfield
-      fourier_potential:
+        desmearing: false
+      fourier_potential: 
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -126,18 +128,49 @@ train_schedule:
         use_autograd_forces: true
   2:
     name: stage3
-    start: 350
-    end: 400
+    start: 150
+    end: 249
     lr: 0.001
     loss:
-      energy_per_atom: 100
+      energy_per_atom: 500
       forces: 500
       dipole: 500
       fourier_density:
-        desmearing: false
-        weight: 10
+        weight: 100
         reference: farfield
-      fourier_potential:
+        desmearing: false
+      fourier_potential: 
+        weight: 100
+        desmearing: false
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
+    fixed_point_training_options:
+      mode: unroll_scf
+      scf:
+        num_scf_steps: 30
+        constant_charge: true
+        mixing_parameter: 0.5
+        initial_density: local_guess
+        initial_fermi_level: zero
+        use_autograd_forces: true
+  3:
+    name: stage4
+    start: 250
+    end: 300
+    lr: 0.001
+    loss:
+      energy_per_atom: 1000
+      forces: 500
+      dipole: 500
+      fourier_density:
+        weight: 100
+        reference: farfield
+        desmearing: false
+      fourier_potential: 
         weight: 100
         desmearing: false
       vacuum_potential:

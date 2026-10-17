@@ -1,5 +1,3 @@
-# Raw DFT labels: jointly train smooth SCF fields and their learned raw reconstruction.
-# desmearing defaults to true; false fits the supplied labels directly.
 heads:
   default:
     arrays_keys:
@@ -42,9 +40,9 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 potential_amplitudes_smearing_width: 1.5
-batch_size: 4
+batch_size: 8
 valid_batch_size: 4
-lr: 0.001
+lr: 0.003
 optimizer: adamw
 scheduler: none
 weight_decay: 0.001
@@ -63,47 +61,14 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_IrO2_finetune_raw_data
+checkpoints_dir: checkpoints
 compute_forces: true
-foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
   0:
-    name: heads
-    start: 0
-    end: 9
-    lr: 0.001
-    loss:
-      energy_per_atom: 100
-      forces: 500
-      dipole: 10
-      fourier_density:
-        weight: 10
-        reference: farfield
-        desmearing: true
-      fourier_potential:
-        weight: 100
-        desmearing: true
-      vacuum_potential:
-        weight: 100
-        relative: true
-      fermi_level:
-        weight: 100
-        relative: true
-    fixed_point_training_options:
-      mode: unroll_scf
-      scf:
-        num_scf_steps: 12
-        constant_charge: true
-        mixing_parameter: 0.5
-        initial_density: local_guess
-        initial_fermi_level: zero
-        use_autograd_forces: true
-    freeze_foundation_backbone: true
-  1:
     name: stage1
-    start: 10
+    start: 0
     end: 49
-    lr: 0.001
+    lr: 0.003
     loss:
       energy_per_atom: 100
       forces: 500
@@ -112,7 +77,7 @@ train_schedule:
         weight: 10
         reference: farfield
         desmearing: true
-      fourier_potential:
+      fourier_potential: 
         weight: 100
         desmearing: true
       vacuum_potential:
@@ -130,20 +95,20 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  2:
+  1:
     name: stage2
     start: 50
-    end: 349
+    end: 149
     lr: 0.001
     loss:
       energy_per_atom: 100
       forces: 500
-      dipole: 500
+      dipole: 100
       fourier_density:
-        weight: 10
+        weight: 100
         reference: farfield
         desmearing: true
-      fourier_potential:
+      fourier_potential: 
         weight: 100
         desmearing: true
       vacuum_potential:
@@ -161,20 +126,51 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  3:
+  2:
     name: stage3
-    start: 350
-    end: 400
+    start: 150
+    end: 249
     lr: 0.001
     loss:
-      energy_per_atom: 100
+      energy_per_atom: 500
       forces: 500
       dipole: 500
       fourier_density:
-        weight: 10
+        weight: 100
         reference: farfield
         desmearing: true
-      fourier_potential:
+      fourier_potential: 
+        weight: 100
+        desmearing: true
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
+    fixed_point_training_options:
+      mode: unroll_scf
+      scf:
+        num_scf_steps: 30
+        constant_charge: true
+        mixing_parameter: 0.5
+        initial_density: local_guess
+        initial_fermi_level: zero
+        use_autograd_forces: true
+  3:
+    name: stage4
+    start: 250
+    end: 300
+    lr: 0.001
+    loss:
+      energy_per_atom: 1000
+      forces: 500
+      dipole: 500
+      fourier_density:
+        weight: 100
+        reference: farfield
+        desmearing: true
+      fourier_potential: 
         weight: 100
         desmearing: true
       vacuum_potential:
