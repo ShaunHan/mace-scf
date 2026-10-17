@@ -1,4 +1,3 @@
-# Raw Fourier labels: desmearing=false fits smooth targets; true adds raw reconstruction.
 heads:
   default:
     arrays_keys:
@@ -62,7 +61,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints
+checkpoints_dir: runs/polar_finetune_smooth/checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
@@ -79,7 +78,7 @@ train_schedule:
         weight: 10
         reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -111,7 +110,7 @@ train_schedule:
         weight: 10
         reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -142,7 +141,7 @@ train_schedule:
         weight: 100
         reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -173,7 +172,7 @@ train_schedule:
         weight: 100
         reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
         desmearing: false
       vacuum_potential:
@@ -204,7 +203,7 @@ train_schedule:
         weight: 100
         reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
         desmearing: false
       vacuum_potential:

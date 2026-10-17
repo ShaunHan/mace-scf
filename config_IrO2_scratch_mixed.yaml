@@ -1,4 +1,3 @@
-# Raw Fourier labels: desmearing=false fits smooth targets; true adds raw reconstruction.
 heads:
   default:
     arrays_keys:
@@ -62,7 +61,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints
+checkpoints_dir: runs/scratch_mixed/checkpoints
 compute_forces: true
 train_schedule:
   0:
@@ -76,10 +75,11 @@ train_schedule:
       dipole: 10
       fourier_density:
         weight: 10
+        reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -106,10 +106,11 @@ train_schedule:
       dipole: 100
       fourier_density:
         weight: 100
+        reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -136,10 +137,11 @@ train_schedule:
       dipole: 500
       fourier_density:
         weight: 100
+        reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -166,10 +168,11 @@ train_schedule:
       dipole: 500
       fourier_density:
         weight: 100
+        reference: farfield
         desmearing: false
-      fourier_potential: 
+      fourier_potential:
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true

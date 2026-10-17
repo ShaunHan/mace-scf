@@ -1,4 +1,3 @@
-# Raw Fourier labels: desmearing=false fits smooth targets; true adds raw reconstruction.
 heads:
   default:
     arrays_keys:
