@@ -18,6 +18,14 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
+  pt_head:
+    info_keys:
+      energy: dft_free_energy
+      total_charge: charge
+      total_spin: spin
+      external_field: external_field
+    arrays_keys:
+      forces: dft_forces
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -41,8 +49,8 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 potential_amplitudes_smearing_width: 1.5
 batch_size: 8
-valid_batch_size: 4
-lr: 0.003
+valid_batch_size: 8
+lr: 0.0001
 optimizer: adamw
 scheduler: none
 weight_decay: 0.001
@@ -54,21 +62,36 @@ clip_grad: 10.0
 amsgrad: false
 eval_interval: 5
 patience: 1000
-max_num_epochs: 500
+max_num_epochs: 301
 restart_latest: false
 save_cpu: true
 keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: runs/scratch_smooth/checkpoints
+checkpoints_dir: checkpoints
 compute_forces: true
+foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
+log_dir: logs
+results_dir: results
+model_dir: models
+multiheads_finetuning: true
+log_level: DEBUG
+pseudolabel_replay: true
+force_mh_ft_lr: true
+pt_train_file: replay/pt_train.xyz
+pt_valid_file: replay/pt_valid.xyz
+energy_weight: 1.0
+forces_weight: 100.0
+weight_pt_head: 1.0
+filter_type_pt: none
+subselect_pt: random
 train_schedule:
   0:
-    name: stage1
+    name: heads
     start: 0
-    end: 49
-    lr: 0.003
+    end: 9
+    lr: 0.001
     loss:
       energy_per_atom: 100
       forces: 500
@@ -78,8 +101,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -95,11 +119,49 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    freeze_foundation_backbone: true
   1:
+    name: stage1
+    start: 10
+    end: 49
+    lr: 0.0001
+    loss:
+      energy_per_atom: 100
+      forces: 500
+      dipole: 10
+      fourier_density:
+        weight: 10
+        reference: farfield
+        desmearing: false
+      fourier_potential:
+        reference: smeared
+        weight: 100
+        desmearing: true
+      vacuum_potential:
+        weight: 100
+        relative: true
+      fermi_level:
+        weight: 100
+        relative: true
+    fixed_point_training_options:
+      mode: unroll_scf
+      scf:
+        num_scf_steps: 12
+        constant_charge: true
+        mixing_parameter: 0.5
+        initial_density: local_guess
+        initial_fermi_level: zero
+        use_autograd_forces: true
+    embedding_lr: 1.0e-05
+    interactions_decay_lr: 1.0e-05
+    interactions_no_decay_lr: 1.0e-05
+    products_lr: 1.0e-05
+    layer_feature_mixer_lr: 1.0e-05
+  2:
     name: stage2
     start: 50
     end: 149
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 100
       forces: 500
@@ -109,8 +171,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -126,11 +189,16 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  2:
+    embedding_lr: 1.0e-05
+    interactions_decay_lr: 1.0e-05
+    interactions_no_decay_lr: 1.0e-05
+    products_lr: 1.0e-05
+    layer_feature_mixer_lr: 1.0e-05
+  3:
     name: stage3
     start: 150
     end: 249
-    lr: 0.0001
+    lr: 5.0e-05
     loss:
       energy_per_atom: 500
       forces: 500
@@ -140,8 +208,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -157,11 +226,16 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-  3:
+    embedding_lr: 5.0e-06
+    interactions_decay_lr: 5.0e-06
+    interactions_no_decay_lr: 5.0e-06
+    products_lr: 5.0e-06
+    layer_feature_mixer_lr: 5.0e-06
+  4:
     name: stage4
     start: 250
     end: 300
-    lr: 0.0001
+    lr: 2.0e-05
     loss:
       energy_per_atom: 1000
       forces: 500
@@ -171,8 +245,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -188,3 +263,8 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    embedding_lr: 2.0e-06
+    interactions_decay_lr: 2.0e-06
+    interactions_no_decay_lr: 2.0e-06
+    products_lr: 2.0e-06
+    layer_feature_mixer_lr: 2.0e-06

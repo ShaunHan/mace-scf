@@ -48,6 +48,9 @@ def check_config_conflicts(args: argparse.Namespace):
 
 def check_and_fix_heads(args: argparse.Namespace):
     args.heads = ast.literal_eval(args.heads)
+    args.replay_head = args.heads.pop('pt_head', {})
+    if args.replay_head and not args.multiheads_finetuning:
+        raise ValueError('pt_head requires multiheads_finetuning=True')
     assert type(args.heads) == dict and len(args.heads) == 1, print(args.heads)
     
     # assert people are only using the info_keys and arrays_keys syntax
@@ -174,6 +177,15 @@ def check_train_test_files(args):
 
 
 def check_unsupported_training_options(args):
+    if args.multiheads_finetuning:
+        if args.model != 'FixedPoint' or not args.foundation_model or not args.pt_train_file:
+            raise ValueError('MACE-VOLT replay requires model=FixedPoint, foundation_model and pt_train_file')
+        if not args.force_mh_ft_lr:
+            args.lr, args.ema = 1.e-4, True
+            for stage in args.train_schedule:
+                stage['lr'] = min(stage['lr'], 1.e-4)
+        if args.filter_type_pt != 'none' or args.subselect_pt != 'random':
+            raise ValueError('Pass preselected replay XYZ files (filter_type_pt=none, subselect_pt=random)')
     if args.distributed:
         raise ValueError("Distributed training is not supported in this repo right now")
     if args.statistics_file is not None:
@@ -203,6 +215,15 @@ def fill_fixed_point_update_config(args):
     if args.fixed_point_update_config['type'] == 'CoupledResponse':
         args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
                                                   getattr(args, 'potential_amplitudes_smearing_width', 1.5))
+        from mace_scf.electrostatics.desmearing import desmearing_enabled
+        modes = {tuple(key in stage['loss'] and desmearing_enabled(
+                    stage['loss'][key], density=key == 'fourier_density')
+                    for key in ('fourier_density', 'fourier_potential'))
+                 for stage in args.train_schedule}
+        if len(modes) > 1:
+            raise ValueError('Keep each field decoder enabled or disabled across all stages; '
+                             'its parameters and optimizer ownership are initialized once. '
+                             'Use zero loss weight to postpone supervision.')
 
     cls_variables = [
         "type",

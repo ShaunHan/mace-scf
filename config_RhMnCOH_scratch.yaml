@@ -55,7 +55,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints_RhMnCOH_scratch_v374
+checkpoints_dir: checkpoints
 compute_forces: true
 train_schedule:
   0:

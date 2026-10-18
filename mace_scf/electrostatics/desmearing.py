@@ -93,15 +93,31 @@ class SpectralDecoder(torch.nn.Module):
         return output
 
 
-def desmearing_enabled(options):
-    """Raw-label training is the default; accept the preceding patch's switch.
+def field_loss_options(options, *, density=True):
+    """Resolve target resolution independently of optional raw reconstruction.
 
-    An explicit apply_smearing value requests that legacy objective. Remove it
-    from new configurations and use desmearing instead.
+    Keep the old density alias and explicit apply_smearing convention readable
+    so saved objectives retain their values when a checkpoint is restored.
     """
     options = options if isinstance(options, dict) else {}
-    return (options.get('desmearing', 'apply_smearing' not in options)
-            and not options.get('apply_smearing', False))
+    reference = options.get('reference', 'smeared')
+    if density and reference == 'density':
+        reference = 'smeared'
+    allowed = ('raw', 'smeared', 'farfield') if density else ('raw', 'smeared')
+    if reference not in allowed:
+        raise ValueError(f'Fourier {"density" if density else "potential"} reference must be one of {allowed}')
+    reconstruct = options.get('desmearing', 'apply_smearing' not in options)
+    smear = options.get('apply_smearing', not reconstruct)
+    if not isinstance(reconstruct, bool) or not isinstance(smear, bool):
+        raise TypeError('desmearing and legacy apply_smearing must be booleans')
+    reconstruct = reconstruct and not options.get('apply_smearing', False)
+    if reference == 'raw':
+        reconstruct = smear = False
+    return reference, reconstruct, smear
+
+
+def desmearing_enabled(options, *, density=True):
+    return field_loss_options(options, density=density)[1]
 
 
 def target_smearing_enabled(options):
@@ -110,8 +126,7 @@ def target_smearing_enabled(options):
     An explicit legacy apply_smearing value retains the preceding objective,
     including old checkpoints that fitted finite-width sources to raw labels.
     """
-    options = options if isinstance(options, dict) else {}
-    return options.get('apply_smearing', not options.get('desmearing', True))
+    return field_loss_options(options, density=False)[2]
 
 
 def configure_desmearing(response, loss_config):
@@ -119,7 +134,7 @@ def configure_desmearing(response, loss_config):
     if not hasattr(response, 'potential_amplitudes_smearing_width'):
         response.potential_amplitudes_smearing_width = (float(response.source_widths[0])
             if len(response.source_widths) else response.density_width)
-    enabled = [key in loss_config and desmearing_enabled(loss_config[key])
+    enabled = [key in loss_config and desmearing_enabled(loss_config[key], density=key == 'fourier_density')
                for key in ('fourier_density', 'fourier_potential')]
     if any(enabled):
         if getattr(response, 'raw_decoder', None) is None:

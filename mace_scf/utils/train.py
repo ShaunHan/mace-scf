@@ -178,7 +178,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
           rank=0, save_all_checkpoints=False, train_sampler=None, ema=None,
           distributed_model=None, max_grad_norm=10., log_wandb=False,
           test_loaders=None, debug_log_grad_summary=False,
-          debug_grad_log_frequency=None, wandb_watch="off"):
+          debug_grad_log_frequency=None, wandb_watch="off", replay=None):
     """Train each stage without resetting Adam moments or the EMA trajectory."""
     _resume_loss_baseline(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                           optimizer, lr_scheduler, checkpoint_handler, ema, device)
@@ -202,12 +202,21 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
         snapshot = _training_snapshot(model, optimizer, ema, train_loader, device) if coupled else None
         for attempt in range(5):
             norms, retained, clipped, graphs_seen = [], [], 0, 0
+            replay_iterator = iter(replay.train_loader) if replay is not None else None
             epoch_errors = torch.zeros((len(RMSE_KEYS), 2), dtype=torch.float64, device=device)
             try:
                 for step, batch in enumerate(train_loader):
+                    replay_batch = None
+                    if replay is not None:
+                        try:
+                            replay_batch = next(replay_iterator)
+                        except StopIteration:
+                            replay_iterator = iter(replay.train_loader)
+                            replay_batch = next(replay_iterator)
                     _, metrics = take_step(model if distributed_model is None else distributed_model,
                         model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
-                        debug_log_grad_summary, debug_grad_log_frequency, step)
+                        debug_log_grad_summary, debug_grad_log_frequency, step,
+                        replay=replay, replay_batch=replay_batch)
                     if "_rmse_sums" in metrics:
                         epoch_errors += metrics.pop("_rmse_sums")
                     norms.append(metrics["grad_norm_before_clip"])
@@ -255,6 +264,13 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                     logging.exception('Validation failed; retained epoch %d for diagnosis. The best checkpoint is unchanged.',epoch)
                 raise
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
+            if replay is not None:
+                replay_metrics = replay.evaluate(model, device, ema=ema)
+                logging.info('Replay validation epoch %d: RMSE_E/atom=%.3f meV, RMSE_F=%.3f meV/A, relative F RMSE=%.2f%%',
+                    epoch, 1000*replay_metrics['rmse_e_per_atom'], 1000*replay_metrics['rmse_f'], replay_metrics['rel_rmse_f'])
+                if logger is not None:
+                    logger.log({**replay_metrics, 'mode':'eval', 'split':'replay_valid', 'epoch':epoch,
+                                'metric_context':'replay_checkpoint_evaluation'})
             logging.debug("Optimizer epoch %d: lr=%s, mean gradient norm=%.5g, clipped=%d/%d", epoch,
                          [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)), clipped, len(norms))
             logging.debug('Epoch timing: train=%.3fs, validation=%.3fs, updates=%d, train/update=%.5fs, peak allocated=%.1f MiB, backbone=%s',
@@ -413,7 +429,7 @@ def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):
 
 def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
               max_grad_norm, device, debug_log_grad_summary=False,
-              debug_grad_log_frequency=None, opt_step=0):
+              debug_grad_log_frequency=None, opt_step=0, replay=None, replay_batch=None):
     """One atomic optimizer update, differentiating model parameters only."""
     start = time.time()
     model.train()
@@ -471,6 +487,8 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
             observed = training_error_sums(piece, output, loss_fn)
             metric_sums = observed if metric_sums is None else metric_sums+observed
             del output,loss,piece
+        if replay is not None:
+            total = total+replay.backward(model, replay_batch, parameters, device, limit)
         return total, metric_sums
 
     def attempt():
@@ -856,7 +874,7 @@ def _evaluate(
             if bool((use & ~torch.isfinite(error)).any()):
                 raise FloatingPointError('Nonfinite observed '+key+' error')
             voltage_errors[key].append(torch.stack(((error[use]*weight[use]).sum(),weight[use].sum())))
-        for key, error, weight in smooth_field_errors(batch, output):
+        for key, error, weight in smooth_field_errors(batch, output, loss_fn):
             use = weight > 0
             pair = torch.stack(((error[use]*weight[use]).sum(), weight[use].sum()))
             smooth_errors[key] = smooth_errors.get(key, 0.)+pair
@@ -1140,7 +1158,7 @@ def valid_err_log(
                    ('rmse_mu_per_atom','RMSE_dip_per_atom','meA')) if key in eval_metrics]
         fmt = lambda key: f"{1000*eval_metrics[key]:.4f}" if key in eval_metrics else 'n/a'
         if 'rmse_rho' in eval_metrics:
-            label = 'RMSE_rho(raw/smooth/farfield)' if 'rmse_rho_smooth' in eval_metrics else 'RMSE_rho'
+            label = 'RMSE_rho(raw/smeared/farfield)' if 'rmse_rho_smooth' in eval_metrics else 'RMSE_rho'
             value = fmt('rmse_rho')
             if 'rmse_rho_smooth' in eval_metrics:
                 value += '/'+fmt('rmse_rho_smooth')+'/'+fmt('rmse_rho_farfield_smooth')
@@ -1149,7 +1167,7 @@ def valid_err_log(
             pieces.append('RMSE_EF(abs/rel)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
         if 'rmse_esp' in eval_metrics:
             if 'rmse_esp_smooth' in eval_metrics:
-                pieces.append('RMSE_ESP(raw/smooth)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
+                pieces.append('RMSE_ESP(raw/smeared)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
             else:
                 pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:

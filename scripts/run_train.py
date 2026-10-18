@@ -244,6 +244,17 @@ def main() -> None:
         train_loader=train_loader,
     ).to(device)
 
+    if hasattr(model, "kspace_cutoff"):
+        logging.info(
+            "Fourier losses and RMSEs use common model/label support with model "
+            "cutoff %.6g Angstrom^-1. Raw denotes unsmoothed retained modes; "
+            "DFT modes outside this support are not included.",
+            float(model.kspace_cutoff),
+        )
+
+    from mace_scf.utils.replay import prepare_replay, deployment_model
+    replay = prepare_replay(args, model, tag)
+
     # Optimizer
     param_options = mace_scf.utils.run_train_utils.get_param_options(model, args)
     optimizer: torch.optim.Optimizer
@@ -421,6 +432,7 @@ def main() -> None:
             debug_log_grad_summary=args.debug_log_grad_summary,
             debug_grad_log_frequency=args.wandb_watch_log_freq,
             wandb_watch=args.wandb_watch,
+            replay=replay,
         )
 
     # Evaluation on test datasets
@@ -531,15 +543,27 @@ def main() -> None:
         if rank == 0:
             logging.info("\nFinal error table for stage %s", stage_name)
             logging.info("\n" + str(table))
+            if replay is not None:
+                from prettytable import PrettyTable
+                replay_table = PrettyTable(['split', 'RMSE_E_per_atom meV', 'RMSE_F meV/A', 'relative F RMSE %'])
+                for split in ('replay_train', 'replay_valid'):
+                    values = replay.evaluate(model, device, training_set=split=='replay_train')
+                    replay_table.add_row([split, f"{1000*values['rmse_e_per_atom']:.2f}",
+                        f"{1000*values['rmse_f']:.2f}", f"{values['rel_rmse_f']:.2f}"])
+                    final_logger.log({**values, 'mode':'eval', 'split':split, 'stage':stage_name,
+                        'epoch':latest_checkpoint_epoch, 'metric_context':'checkpoint_evaluation'})
+                logging.info('\nReplay error table\n%s', replay_table)
 
             # Save entire model before running any extra SCF convergence diagnostics.
             model_path = Path(args.checkpoints_dir) / (stage_tag + ".model")
             logging.info(f"Saving model to {model_path}")
+            export_model = deployment_model(model)
             if args.save_cpu:
-                model = model.to("cpu")
-            torch.save(model, model_path)
+                export_model = export_model.to("cpu")
+            torch.save(export_model, model_path)
             Path(args.model_dir).mkdir(parents=True, exist_ok=True)
-            torch.save(model, Path(args.model_dir) / (args.name + "_" + stage_name + ".model"))
+            torch.save(export_model, Path(args.model_dir) / (args.name + "_" + stage_name + ".model"))
+            del export_model
             stages_with_models.append((train_stage, stage_tag))
 
     if rank == 0 and args.scf_convergence_summary:

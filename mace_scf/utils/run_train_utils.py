@@ -217,7 +217,6 @@ def build_model(
         model.backbone_layout = 'ir_mul'
     if foundation is not None:
         install_foundation(model, foundation)
-        del foundation
     response = getattr(model, "field_dependent_charges_map", None)
     if getattr(response, "spectral", False):
         from mace_scf.electrostatics.potential import initialize_response
@@ -262,6 +261,9 @@ def build_model(
         if args.model not in ('FixedPoint','FixedPointCore'):
             raise ValueError('CuEq conversion is supported for FixedPoint, FixedPointCore, MACE and ScaleShiftMACE')
         accelerate_backbone(model, args.device)
+    if getattr(args, 'multiheads_finetuning', False):
+        from .replay import install_replay_head
+        install_replay_head(model, foundation)
     return model
 
 
@@ -394,6 +396,10 @@ def get_param_options(model, args):
             if id(parameter) in seen:
                 raise RuntimeError("A parameter has more than one optimizer owner")
             seen.add(id(parameter))
+    if hasattr(model, 'replay_head'):
+        replay_parameters = [p for p in model.replay_head.parameters() if p.requires_grad and id(p) not in seen]
+        param_options['params'].append({'name':'replay_head', 'params':replay_parameters, 'weight_decay':0.})
+        seen.update(id(p) for p in replay_parameters)
     missing = [p for p in model.parameters() if p.requires_grad and id(p) not in seen]
     if missing:
         param_options["params"].append({"name": "remaining", "params": missing, "weight_decay": args.weight_decay})

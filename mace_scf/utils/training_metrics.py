@@ -15,12 +15,15 @@ RMSE_KEYS = ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom",
              "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth")
 
 
-def smooth_field_errors(ref, pred):
+def smooth_field_errors(ref, pred, loss_fn=None):
     """Smooth latent fields versus internally smoothed labels, in base units.
 
     Raw input Fourier labels are assumed. The extra far-field density filter
     is identified separately; none of these diagnostics changes the loss.
     """
+    density=getattr(loss_fn, 'loss_fns', {}).get('fourier_density')
+    if density is not None:
+        pred=density.reference_fields(pred)
     for name, key, label in (
             ('rho_smooth', 'fourier_density', 'fourier_density'),
             ('rho_farfield_smooth', 'fourier_farfield_density', 'fourier_density'),
@@ -28,7 +31,15 @@ def smooth_field_errors(ref, pred):
         width = 'density_smearing_width' if label == 'fourier_density' else 'potential_smearing_width'
         if key not in pred or key+'_dft' not in pred or width not in pred:
             continue
-        latent = dict(pred, **{key: pred.get('smooth_'+key, pred[key])})
+        value = pred.get('smooth_'+key, pred[key])
+        function = getattr(loss_fn, 'loss_fns', {}).get(label)
+        direct_raw = (function is not None and not function.desmearing
+                      and not function.apply_smearing)
+        if direct_raw:
+            # A direct raw fit predicts the unsmeared observable. For its
+            # smeared diagnostic filter both prediction and label once.
+            value = pred[key]*torch.exp(-.5*pred[width]**2*pred['k_vectors'].square().sum(-1))[...,None]
+        latent = dict(pred, **{key: value})
         yield 'rmse_'+name, spectral_errors(ref, latent, key, True), ref.weight*getattr(ref, label+'_weight')
 
 
@@ -62,7 +73,7 @@ def training_error_sums(ref, pred, loss_fn):
             weights = ref.weight * getattr(ref, key + "_weight")
             # Keep the reported quantity independent of the chosen loss filter.
             add(index, spectral_errors(ref, pred, key), weights)
-    for key, error, weights in smooth_field_errors(ref, pred):
+    for key, error, weights in smooth_field_errors(ref, pred, loss_fn):
         add(RMSE_KEYS.index(key), error, weights)
     if (pred.get("vacuum_potential") is not None and pred.get("fermi_level") is not None
             and getattr(ref, "vacuum_potential", None) is not None

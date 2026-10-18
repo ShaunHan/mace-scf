@@ -38,6 +38,8 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     # those definitions intentionally instead of failing with duplicate flags.
     parser.conflict_handler = "resolve"
     parser._optionals.conflict_handler = "resolve"
+    # Preserve single-head behavior unless replay is explicitly requested.
+    parser.set_defaults(multiheads_finetuning=False)
     parser.add_argument("--amsgrad", type=strict_str2bool, nargs="?", const=True,
                         default=True, help="Use the AMSGrad optimizer variant")
     for action in parser._actions:

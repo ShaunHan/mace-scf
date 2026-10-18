@@ -40,9 +40,9 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 potential_amplitudes_smearing_width: 1.5
-batch_size: 4
-valid_batch_size: 4
-lr: 0.001
+batch_size: 8
+valid_batch_size: 8
+lr: 0.0001
 optimizer: adamw
 scheduler: none
 weight_decay: 0.001
@@ -54,16 +54,21 @@ clip_grad: 10.0
 amsgrad: false
 eval_interval: 5
 patience: 1000
-max_num_epochs: 500
+max_num_epochs: 301
 restart_latest: false
 save_cpu: true
 keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: runs/polar_finetune_smooth/checkpoints
+checkpoints_dir: checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
+log_dir: logs
+results_dir: results
+model_dir: models
+multiheads_finetuning: false
+log_level: DEBUG
 train_schedule:
   0:
     name: heads
@@ -79,8 +84,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -101,7 +107,7 @@ train_schedule:
     name: stage1
     start: 10
     end: 49
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 100
       forces: 500
@@ -111,8 +117,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -128,11 +135,16 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    embedding_lr: 1.0e-05
+    interactions_decay_lr: 1.0e-05
+    interactions_no_decay_lr: 1.0e-05
+    products_lr: 1.0e-05
+    layer_feature_mixer_lr: 1.0e-05
   2:
     name: stage2
     start: 50
     end: 149
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 100
       forces: 500
@@ -142,8 +154,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -159,11 +172,16 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    embedding_lr: 1.0e-05
+    interactions_decay_lr: 1.0e-05
+    interactions_no_decay_lr: 1.0e-05
+    products_lr: 1.0e-05
+    layer_feature_mixer_lr: 1.0e-05
   3:
     name: stage3
     start: 150
     end: 249
-    lr: 0.0001
+    lr: 5.0e-05
     loss:
       energy_per_atom: 500
       forces: 500
@@ -173,8 +191,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -190,11 +209,16 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    embedding_lr: 5.0e-06
+    interactions_decay_lr: 5.0e-06
+    interactions_no_decay_lr: 5.0e-06
+    products_lr: 5.0e-06
+    layer_feature_mixer_lr: 5.0e-06
   4:
     name: stage4
     start: 250
     end: 300
-    lr: 0.0001
+    lr: 2.0e-05
     loss:
       energy_per_atom: 1000
       forces: 500
@@ -204,8 +228,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
+        reference: smeared
         weight: 100
-        desmearing: false
+        desmearing: true
       vacuum_potential:
         weight: 100
         relative: true
@@ -221,3 +246,8 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+    embedding_lr: 2.0e-06
+    interactions_decay_lr: 2.0e-06
+    interactions_no_decay_lr: 2.0e-06
+    products_lr: 2.0e-06
+    layer_feature_mixer_lr: 2.0e-06

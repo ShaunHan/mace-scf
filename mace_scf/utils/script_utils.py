@@ -61,7 +61,7 @@ def create_error_table(
     has_phi_observations = False
 
     if table_type == "ElectrostaticRMSE":
-        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smooth/farfield) me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP(raw/smooth) mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_WF(abs/rel) meV"]
+        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "relative F RMSE %", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smeared/farfield) me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP(raw/smeared) mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_WF(abs/rel) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
@@ -187,7 +187,7 @@ def create_error_table(
         # add new tables here...
         if table_type == "ElectrostaticRMSE":
             table.add_row([name]+[metrics[key] for key in
-                ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom")]
+                ("rmse_e_per_atom", "rmse_f", "rel_rmse_f", "rmse_mu_per_atom")]
                 +['/'.join(metrics[key] for key in ('rmse_rho','rmse_rho_smooth','rmse_rho_farfield_smooth')),
                   metrics['rmse_fermi_level']+'/'+metrics['rmse_fermi_level_rel'],
                   metrics['rmse_esp']+'/'+metrics['rmse_esp_smooth'],

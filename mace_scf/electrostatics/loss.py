@@ -1,3 +1,4 @@
+import math
 import torch
 
 from mace.tools import TensorDict
@@ -11,6 +12,7 @@ from mace.modules.loss import (
     weighted_mean_squared_stress,
 )
 from .utils import compute_effective_index
+from .desmearing import field_loss_options
 
 
 def weighted_mean_squared_error_charge(ref: Batch, pred: TensorDict) -> torch.Tensor:
@@ -298,23 +300,44 @@ def vacuum_reference_weights(ref, reference):
 
 
 class WeightedFourierDensity(torch.nn.Module):
-    """Parseval error of the original or explicitly smoothed density observer."""
-    def __init__(self, reference='density', desmearing=True, **legacy):
+    """Raw, smeared or farfield density loss with optional raw reconstruction."""
+    def __init__(self, reference='smeared', desmearing=None, reference_width=None, **legacy):
         super().__init__()
-        if reference not in ('density', 'farfield'):
-            raise ValueError('fourier_density reference must be density or farfield')
-        self.reference = reference
-        self.apply_smearing = legacy.pop('apply_smearing', not desmearing)
-        self.desmearing = desmearing and not self.apply_smearing
-        if legacy:
-            raise TypeError(f'Unknown density loss options: {list(legacy)}')
-        if not isinstance(desmearing, bool) or not isinstance(self.apply_smearing, bool):
-            raise TypeError('desmearing must be a boolean')
+        unknown = set(legacy)-{'apply_smearing'}
+        if unknown:
+            raise TypeError(f'Unknown density loss options: {sorted(unknown)}')
+        options = dict(legacy, reference=reference)
+        if desmearing is not None:
+            options['desmearing'] = desmearing
+        self.reference, self.desmearing, self.apply_smearing = field_loss_options(options)
+        self.reference_width = None if reference_width is None else float(reference_width)
+        if self.reference_width is not None and (self.reference != 'farfield'
+                or not math.isfinite(self.reference_width) or self.reference_width <= 0):
+            raise ValueError('reference_width must be finite and positive, with reference=farfield')
 
     def extra_repr(self):
-        return f'reference={self.reference}, desmearing={self.desmearing}'
+        width='' if self.reference_width is None else f', reference_width={self.reference_width} Angstrom'
+        return f'reference={self.reference}, desmearing={self.desmearing}'+width
+
+    def reference_fields(self, pred):
+        """Change the density observation resolution, retaining the live SCF."""
+        if self.reference_width is None:
+            return pred
+        source_width=pred['density_smearing_width']
+        if self.reference_width < float(source_width):
+            raise ValueError('Density reference_width must be at least the Gaussian density source width')
+        filter=torch.exp(-.5*(self.reference_width**2-source_width**2)*pred['k_vectors'].square().sum(-1))[...,None]
+        result=dict(pred)
+        for source,target in (('fourier_density','fourier_farfield_density'),
+                ('smooth_fourier_density','smooth_fourier_farfield_density'),
+                ('fourier_density_dft','fourier_farfield_density_dft')):
+            if source in pred:result[target]=pred[source]*filter
+        if 'fourier_density_dft_mask' in pred:
+            result['fourier_farfield_density_dft_mask']=pred['fourier_density_dft_mask']
+        return result
 
     def forward(self, ref, pred):
+        pred=self.reference_fields(pred)
         key = 'fourier_farfield_density' if self.reference == 'farfield' else 'fourier_density'
         square = spectral_errors(ref, pred, key, self.apply_smearing)/1.e-6
         if self.desmearing and 'smooth_'+key in pred:
@@ -331,14 +354,18 @@ class WeightedFourierDensity(torch.nn.Module):
 
 class WeightedFourierPotential(torch.nn.Module):
     """Real-space MSE of the retained potential after uniform-offset alignment."""
-    def __init__(self, desmearing=True, **legacy):
+    def __init__(self, desmearing=None, reference='smeared', **legacy):
         super().__init__()
-        self.apply_smearing = legacy.pop('apply_smearing', not desmearing)
-        self.desmearing = desmearing and not self.apply_smearing
-        if legacy:
-            raise TypeError(f'Unknown potential loss options: {list(legacy)}')
-        if not isinstance(desmearing, bool) or not isinstance(self.apply_smearing, bool):
-            raise TypeError('desmearing must be a boolean')
+        unknown = set(legacy)-{'apply_smearing'}
+        if unknown:
+            raise TypeError(f'Unknown potential loss options: {sorted(unknown)}')
+        options = dict(legacy, reference=reference)
+        if desmearing is not None:
+            options['desmearing'] = desmearing
+        self.reference, self.desmearing, self.apply_smearing = field_loss_options(options, density=False)
+
+    def extra_repr(self):
+        return f'reference={self.reference}, desmearing={self.desmearing}'
 
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
@@ -485,6 +512,8 @@ class WeightedLoss(torch.nn.Module):
                 # Store the resolved target convention so a resumed objective
                 # remains unambiguous when defaults evolve.
                 self.definition[name]['apply_smearing'] = self.loss_fns[name].apply_smearing
+                self.definition[name]['reference'] = self.loss_fns[name].reference
+                self.definition[name]['desmearing'] = self.loss_fns[name].desmearing
 
     @classmethod
     def from_checkpoint(cls, definition):
@@ -494,7 +523,8 @@ class WeightedLoss(torch.nn.Module):
             if name in definition:
                 if not isinstance(definition[name], dict):
                     definition[name] = {'weight':definition[name]}
-                definition[name].setdefault('apply_smearing', False)
+                if definition[name].get('reference') not in ('raw', 'smeared'):
+                    definition[name].setdefault('apply_smearing', False)
         return cls(definition)
         
     def normalizers(self, ref: Batch):

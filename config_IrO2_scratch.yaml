@@ -54,7 +54,7 @@ clip_grad: 10.0
 amsgrad: false
 eval_interval: 5
 patience: 1000
-max_num_epochs: 500
+max_num_epochs: 301
 restart_latest: false
 save_cpu: true
 keep_checkpoints: true
@@ -63,6 +63,11 @@ error_table: ElectrostaticRMSE
 valid_set_seed: 7777
 checkpoints_dir: checkpoints
 compute_forces: true
+log_dir: logs
+results_dir: results
+model_dir: models
+multiheads_finetuning: false
+log_level: DEBUG
 train_schedule:
   0:
     name: stage1
@@ -76,8 +81,9 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-        desmearing: true
-      fourier_potential: 
+        desmearing: false
+      fourier_potential:
+        reference: smeared
         weight: 100
         desmearing: true
       vacuum_potential:
@@ -107,8 +113,9 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
-      fourier_potential: 
+        desmearing: false
+      fourier_potential:
+        reference: smeared
         weight: 100
         desmearing: true
       vacuum_potential:
@@ -138,8 +145,9 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
-      fourier_potential: 
+        desmearing: false
+      fourier_potential:
+        reference: smeared
         weight: 100
         desmearing: true
       vacuum_potential:
@@ -169,8 +177,9 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
-      fourier_potential: 
+        desmearing: false
+      fourier_potential:
+        reference: smeared
         weight: 100
         desmearing: true
       vacuum_potential:
