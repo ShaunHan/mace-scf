@@ -1,4 +1,8 @@
-# Finetuning hotfix: restore the previous global schedule; no per-group LR reductions.
+# Fresh training with raw DFT Fourier data; see RECOMMENDED_CONFIGS_README.txt.
+name: fit_0
+train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train_raw.xyz
+valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_valid_raw.xyz
+E0s: '{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}'
 heads:
   default:
     arrays_keys:
@@ -120,6 +124,7 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+      reference_conditioning: none
     freeze_foundation_backbone: true
   1:
     name: stage1
@@ -153,6 +158,7 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+      reference_conditioning: none
   2:
     name: stage2
     start: 50
@@ -185,6 +191,7 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+      reference_conditioning: none
   3:
     name: stage3
     start: 150
@@ -217,6 +224,7 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+      reference_conditioning: none
   4:
     name: stage4
     start: 250
@@ -249,3 +257,5 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
+      reference_conditioning: none
+swa: false
