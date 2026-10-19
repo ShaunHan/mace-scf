@@ -79,8 +79,8 @@ multiheads_finetuning: true
 log_level: DEBUG
 pseudolabel_replay: true
 force_mh_ft_lr: true
-pt_train_file: replay/pt_train.xyz
-pt_valid_file: replay/pt_valid.xyz
+pt_train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_train.xyz
+pt_valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_valid.xyz
 energy_weight: 1.0
 forces_weight: 100.0
 weight_pt_head: 1.0
