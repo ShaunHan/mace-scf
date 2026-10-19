@@ -400,8 +400,8 @@ def main() -> None:
             if latest_checkpoint_epoch is not None:
                 start_epoch = latest_checkpoint_epoch+1
 
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = train_stage.get(param_group["name"]+"_lr", train_stage["lr"])
+        # The stage schedule was applied above. If a checkpoint was loaded,
+        # keep its optimizer rates, including scheduler/recovery reductions.
 
         # train_loader = get_data_loader(train_dataset, train_stage["fixed_point_training_options"])
 

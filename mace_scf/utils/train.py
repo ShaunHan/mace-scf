@@ -31,6 +31,10 @@ from mace_scf.electrostatics.loss import (
 from mace_scf.electrostatics.coupled import SCFNumericalError
 
 
+class _TrainingGrowthError(FloatingPointError):
+    """Finite outlier requiring comparison on the same batch before rollback."""
+
+
 class CheckpointHandler(NativeCheckpointHandler):
     """Separate resumable raw parameters from deployable EMA parameters."""
     def __init__(self, *args, ema=None, deployment=False, **kwargs):
@@ -213,7 +217,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                         except StopIteration:
                             replay_iterator = iter(replay.train_loader)
                             replay_batch = next(replay_iterator)
-                    _, metrics = take_step(model if distributed_model is None else distributed_model,
+                    _, metrics = _guarded_take_step(snapshot, model if distributed_model is None else distributed_model,
                         model_eval_wrapper, loss_fn, batch, optimizer, ema, max_grad_norm, device,
                         debug_log_grad_summary, debug_grad_log_frequency, step,
                         replay=replay, replay_batch=replay_batch)
@@ -427,9 +431,60 @@ def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):
     return {key: value[1]/value[0].clamp_min(1.e-30) for key, value in moments.items()}
 
 
+def _guarded_take_step(snapshot, model, model_eval_wrapper, loss_fn, batch,
+                       optimizer, ema, max_grad_norm, device, *args, **kwargs):
+    """Check rare finite outliers against this batch at the start of the epoch.
+
+    An average over other batches is a trigger for this check, not evidence of
+    divergence. The probe does no Adam/EMA update and retains every label.
+    """
+    arguments = (model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
+                 max_grad_norm, device, *args)
+    if snapshot is None:
+        return take_step(*arguments, **kwargs)
+    rng = (random.getstate(), np.random.get_state(), torch.random.get_rng_state(),
+           torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None)
+
+    def restore_rng():
+        random.setstate(rng[0]); np.random.set_state(rng[1]); torch.random.set_rng_state(rng[2])
+        if rng[3] is not None:
+            torch.cuda.set_rng_state(rng[3], device)
+
+    try:
+        return take_step(*arguments, **kwargs)
+    except _TrainingGrowthError as error:
+        reason = str(error)
+    # Leave the exception scope to release the failed forward/backward graph
+    # before loading another parameter state.
+    target = getattr(model, 'module', model)
+    current = deepcopy(target.state_dict())
+    flags = [p.requires_grad for p in model.parameters()]
+    try:
+        target.load_state_dict(snapshot['model'])
+        restore_rng()
+        _, reference = take_step(*arguments, **kwargs, _update=False)
+    finally:
+        target.load_state_dict(current)
+        for parameter, flag in zip(model.parameters(), flags):
+            parameter.requires_grad_(flag)
+        optimizer.zero_grad(set_to_none=True)
+        restore_rng()
+    del current
+    baseline = {'loss': reference['loss'], 'norm': reference['grad_norm_before_clip']}
+    logging.warning('%s. Checking the same batch against its pre-epoch loss=%.6g, '
+                    'gradient norm=%.6g; no optimizer/EMA update was made by the probe.',
+                    reason, baseline['loss'], baseline['norm'])
+    # Require growth against both scales. An almost-zero reference derivative
+    # must not turn an ordinary gradient into an apparent explosion.
+    history = getattr(optimizer, '_training_guard', None) or {}
+    baseline = {key: max(value, history.get(key, 0.)) for key, value in baseline.items()}
+    return take_step(*arguments, **kwargs, _growth_reference=baseline)
+
+
 def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
               max_grad_norm, device, debug_log_grad_summary=False,
-              debug_grad_log_frequency=None, opt_step=0, replay=None, replay_batch=None):
+              debug_grad_log_frequency=None, opt_step=0, replay=None, replay_batch=None,
+              _growth_reference=None, _update=True):
     """One atomic optimizer update, differentiating model parameters only."""
     start = time.time()
     model.train()
@@ -476,12 +531,13 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
             loss=loss_fn(pred=output,ref=piece,**({'normalizers':denominators} if adaptive else {}))
             if not bool(torch.isfinite(loss.detach())):
                 raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
-            history = getattr(optimizer, '_training_guard', None)
+            history = (_growth_reference if _growth_reference is not None
+                       else getattr(optimizer, '_training_guard', None))
             partial = loss.detach() if total is None else total+loss.detach()
-            if coupled and history is not None and history['count'] >= 8:
+            if coupled and _update and history is not None and history.get('count', 8) >= 8:
                 if float(partial) > 100*max(history['loss'], 1.e-12):
-                    raise FloatingPointError('Finite training loss explosion before backward/Adam: '
-                        f'{float(partial):.6g} versus running {history["loss"]:.6g}')
+                    raise _TrainingGrowthError('Finite training loss outlier before backward/Adam: '
+                        f'{float(partial):.6g} versus reference {history["loss"]:.6g}')
             torch.autograd.backward(loss,inputs=parameters)
             total=loss.detach() if total is None else total+loss.detach()
             observed = training_error_sums(piece, output, loss_fn)
@@ -533,33 +589,34 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
             raise
         raise FloatingPointError('Nonfinite gradient; no optimizer/EMA update performed') from error
     norm_value = float(norm)
-    if coupled:
-        _check_training_growth(optimizer, float(loss.detach()), norm_value)
+    if coupled and _update:
+        _check_training_growth(optimizer, float(loss.detach()), norm_value, _growth_reference)
     metrics = {"loss": float(loss.detach()), "grad_norm_before_clip": norm_value,
                "grad_clip_applied": max_grad_norm is not None and norm_value>max_grad_norm,
                "gradient_retained": min(1., max_grad_norm/(norm_value+1.e-6)) if max_grad_norm is not None else 1.,
                "graphs": int(batch.num_graphs),
                "device_batch_size":limit, "_rmse_sums":metric_sums}
-    optimizer.step()
-    if ema is not None:
-        ema.update()
+    if _update:
+        optimizer.step()
+        if ema is not None:
+            ema.update()
     metrics["time"] = time.time()-start
     return loss.detach(), metrics
 
 
-def _check_training_growth(optimizer, loss, norm):
-    """Catch finite numerical explosions that ordinary norm clipping misses.
+def _check_training_growth(optimizer, loss, norm, reference=None):
+    """Flag finite growth for comparison with the same pre-epoch batch.
 
-    This broad, dimensionless guard compares the current optimizer batch with
-    its running training scale; it never reads validation labels. It rejects a
-    whole update instead of clipping observables or silently omitting data.
+    A running scale over different batches only triggers an additional probe.
+    Confirmed same-batch growth rejects the update before Adam/EMA.
     """
     previous = getattr(optimizer, '_training_guard', None)
-    if previous is not None and previous['count'] >= 8:
-        if loss > 100*max(previous['loss'], 1.e-12) or norm > 100*max(previous['norm'], 1.e-12):
-            raise FloatingPointError('Finite training explosion before Adam/EMA: '
-                f'loss={loss:.6g} (running {previous["loss"]:.6g}), '
-                f'gradient norm={norm:.6g} (running {previous["norm"]:.6g})')
+    baseline = reference if reference is not None else previous
+    if baseline is not None and baseline.get('count', 8) >= 8:
+        if loss > 100*max(baseline['loss'], 1.e-12) or norm > 100*max(baseline['norm'], 1.e-12):
+            raise _TrainingGrowthError('Finite training growth before Adam/EMA: '
+                f'loss={loss:.6g} (reference {baseline["loss"]:.6g}), '
+                f'gradient norm={norm:.6g} (reference {baseline["norm"]:.6g})')
     if previous is None:
         optimizer._training_guard = {'loss':loss, 'norm':norm, 'count':1}
     else:
@@ -581,7 +638,9 @@ def _training_snapshot(model, optimizer, ema, loader, device):
 
 def _restore_training_snapshot(snapshot, model, optimizer, ema, loader, device):
     model.load_state_dict(snapshot['model'])
-    optimizer.load_state_dict(snapshot['optimizer'])
+    # Optimizer loading can alias same-device tensors. Retries must not mutate
+    # the saved Adam moments that subsequent retries need to restore.
+    optimizer.load_state_dict(deepcopy(snapshot['optimizer']))
     optimizer.zero_grad(set_to_none=True)
     optimizer._training_guard = deepcopy(snapshot['guard'])
     if ema is not None:
