@@ -270,14 +270,16 @@ def build_model(
 def get_param_options(model, args):
     decay_interactions = {}
     no_decay_interactions = {}
+    nonlinear = getattr(mace.modules, 'RealAgnosticResidualNonLinearInteractionBlock', ())
+    polar_blocks = {name for name, block in model.interactions.named_children()
+                    if isinstance(block, nonlinear)}
     for name, param in model.interactions.named_parameters():
-        # POLAR's nonlinear blocks use linear_up/linear_1/linear_2/linear_res.
-        # Match those equivariant maps as well as the original MACE linear,
-        # without decaying biases, density scalars or radial-network weights.
+        # Preserve the original MACE grouping. Only POLAR's nonlinear blocks
+        # need the additional linear_* maps; ordinary MACE also has linear_up.
         module, parameter = name.rsplit('.', 2)[-2:]
-        if parameter == 'weight' and (
-            module == 'linear' or module.startswith('linear_') or module == 'skip_tp_full'
-        ):
+        legacy = 'linear.weight' in name or 'skip_tp_full.weight' in name
+        polar = name.split('.', 1)[0] in polar_blocks
+        if legacy or (polar and parameter == 'weight' and module.startswith('linear_')):
             decay_interactions[name] = param
         else:
             no_decay_interactions[name] = param
