@@ -271,7 +271,13 @@ def get_param_options(model, args):
     decay_interactions = {}
     no_decay_interactions = {}
     for name, param in model.interactions.named_parameters():
-        if "linear.weight" in name or "skip_tp_full.weight" in name:
+        # POLAR's nonlinear blocks use linear_up/linear_1/linear_2/linear_res.
+        # Match those equivariant maps as well as the original MACE linear,
+        # without decaying biases, density scalars or radial-network weights.
+        module, parameter = name.rsplit('.', 2)[-2:]
+        if parameter == 'weight' and (
+            module == 'linear' or module.startswith('linear_') or module == 'skip_tp_full'
+        ):
             decay_interactions[name] = param
         else:
             no_decay_interactions[name] = param
