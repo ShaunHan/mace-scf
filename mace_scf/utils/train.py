@@ -43,6 +43,8 @@ class CheckpointHandler(NativeCheckpointHandler):
         self.ema, self.deployment = ema, deployment
         self.progress_path = Path(kwargs["directory"])/"resume"/(kwargs["tag"]+".pt")
         self.best_loss = float("inf")
+        self.selection_metric = 'loss'
+        self.best_score = float("inf")
         self.best_epoch = None
         self.loss_definition = None
         self.loaded_epoch = None
@@ -90,6 +92,8 @@ class CheckpointHandler(NativeCheckpointHandler):
         value = self.builder.create_checkpoint(state)
         value["ema"] = None if self.ema is None else self.ema.state_dict()
         value["best_loss"] = self.best_loss
+        value["selection_metric"] = self.selection_metric
+        value["best_score"] = self.best_loss if self.selection_metric == 'loss' else self.best_score
         value["best_epoch"] = self.best_epoch
         value["loss_definition"] = self.loss_definition
         value["python_rng"] = random.getstate()
@@ -150,6 +154,8 @@ class CheckpointHandler(NativeCheckpointHandler):
             state.optimizer._training_guard = value['training_guard']
             state.optimizer._guard_definition = value.get('guard_definition')
         self.best_loss=value.get("best_loss",float("inf"))
+        self.selection_metric=value.get('selection_metric', 'loss')
+        self.best_score=value.get('best_score', self.best_loss)
         self.best_epoch=value.get("best_epoch")
         self.loss_definition=value.get('loss_definition')
         self.loaded_epoch=epoch
@@ -182,11 +188,14 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
           rank=0, save_all_checkpoints=False, train_sampler=None, ema=None,
           distributed_model=None, max_grad_norm=10., log_wandb=False,
           test_loaders=None, debug_log_grad_summary=False,
-          debug_grad_log_frequency=None, wandb_watch="off", replay=None):
+          debug_grad_log_frequency=None, wandb_watch="off", replay=None,
+          checkpoint_metric='loss'):
     """Train each stage without resetting Adam moments or the EMA trajectory."""
     _resume_loss_baseline(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
-                          optimizer, lr_scheduler, checkpoint_handler, ema, device)
+                          optimizer, lr_scheduler, checkpoint_handler, ema, device,
+                          checkpoint_metric=checkpoint_metric)
     best = getattr(checkpoint_handler, "best_loss", float("inf"))
+    best_score = best if checkpoint_metric == 'loss' else getattr(checkpoint_handler, "best_score", float("inf"))
     stalled = 0
     best_epoch = None
     coupled = getattr(getattr(model, 'field_dependent_charges_map', None), 'coupled', False)
@@ -254,6 +263,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
                                             train_loader, device)
                 valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
+                score = checkpoint_score(checkpoint_metric, valid_loss, metrics)
                 if coupled and (not np.isfinite(valid_loss) or
                         (np.isfinite(best) and valid_loss > 100*max(best, 1.e-12))):
                     raise FloatingPointError(f'Validation loss exploded to {valid_loss:.6g} '
@@ -297,18 +307,23 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             if finite_budget and residual > tolerance:
                 logging.debug('50-step finite-budget validation residual %.5g exceeds equilibrium tolerance %.5g; '
                              'metrics describe the exported finite trajectory, not a converged root', residual, tolerance)
-            improved = valid_loss < best and deployable
+            improved = score < best_score and deployable
             if not deployable:
                 logging.warning('50-step validation residual %.5g exceeds %.5g; keeping the previous deployable best checkpoint', residual, tolerance)
             if improved:
-                best, best_epoch, stalled = valid_loss, epoch, 0
+                best_score, best_epoch, stalled = score, epoch, 0
                 checkpoint_handler.best_epoch = epoch
             else:
                 stalled += eval_interval
+            if deployable:
+                best = min(best, valid_loss)
             checkpoint_handler.best_loss = best
+            checkpoint_handler.best_score = best_score
+            logging.info('Checkpoint selection epoch %d: %s=%.8g, best=%.8g, improved=%s',
+                         epoch, checkpoint_metric, score, best_score, improved)
             if improved or save_all_checkpoints:
                 checkpoint_handler.save(CheckpointState(model,optimizer,lr_scheduler),epoch,keep_last=save_all_checkpoints)
-            lr_scheduler.step(metrics=valid_loss)
+            lr_scheduler.step(metrics=score)
         if rank == 0 and logger is not None:
             online = training_error_metrics(epoch_errors)
             options = getattr(model_eval_wrapper, 'training_options', None)
@@ -326,8 +341,20 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     return best_epoch
 
 
+def checkpoint_score(metric, loss, metrics):
+    """A missing/nonfinite WF metric must never win checkpoint selection."""
+    if metric not in ('loss', 'rmse_phi_abs'):
+        raise ValueError('checkpoint_metric must be loss or rmse_phi_abs')
+    if metric != 'loss' and metric not in metrics:
+        raise ValueError('WF checkpoint selection requires paired vacuum/EF validation labels')
+    value = float(loss if metric == 'loss' else metrics[metric])
+    if not np.isfinite(value):
+        raise FloatingPointError(f'Nonfinite checkpoint metric {metric}')
+    return value
+
+
 def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
-                          optimizer, scheduler, handler, ema, device):
+                          optimizer, scheduler, handler, ema, device, checkpoint_metric='loss'):
     """Compare resumed checkpoints on the current objective's scale."""
     from copy import deepcopy
     from mace_scf.electrostatics.loss import WeightedLoss
@@ -337,7 +364,9 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     epoch = getattr(handler, 'loaded_epoch', None)
     old_definition = getattr(handler, 'loss_definition', None)
     saved_objective = WeightedLoss.from_checkpoint(old_definition) if old_definition else None
-    changed = (None if saved_objective is None else saved_objective.definition) != definition
+    selection_changed = getattr(handler, 'selection_metric', 'loss') != checkpoint_metric
+    changed = ((None if saved_objective is None else saved_objective.definition) != definition
+               or selection_changed)
     response = getattr(model, 'field_dependent_charges_map', None)
     decoder = getattr(response, 'raw_decoder', None)
     upgrade = (decoder is not None and bool(decoder.enabled[1])
@@ -350,6 +379,7 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
         if upgrade:
             response.raw_vacuum_boundary = True
         handler.loss_definition = deepcopy(definition)
+        handler.selection_metric = checkpoint_metric
         return
     rng = (random.getstate(), np.random.get_state(), torch.random.get_rng_state())
     cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
@@ -373,6 +403,7 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
                 response.raw_vacuum_boundary = True
             calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device)
             value, metrics = evaluate(model, wrapper, loss_fn, ema, valid_loader, device)
+            score = checkpoint_score(checkpoint_metric, value, metrics)
             if not np.isfinite(value) or not np.isfinite(metrics.get('scf_residual_max', 0.)):
                 raise FloatingPointError('Nonfinite resumed validation baseline; checkpoint selection unchanged')
     except Exception:
@@ -393,9 +424,11 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
         return
     handler.loss_definition = deepcopy(definition)
     handler.best_loss, handler.best_epoch = value, epoch
+    handler.selection_metric, handler.best_score = checkpoint_metric, score
     handler.save(CheckpointState(model, optimizer, scheduler), epoch, keep_last=True)
     logging.info('Re-evaluated resumed epoch %d with the current objective and observer: loss=%.6g. '
-                 'The target convention, loss or vacuum observer changed; optimizer and EMA state are retained.', epoch, value)
+                 'The objective, observer or selection metric changed; optimizer and EMA state are retained. '
+                 'Selection: %s=%.8g.', epoch, value, checkpoint_metric, score)
 
 
 def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):

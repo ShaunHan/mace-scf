@@ -1,3 +1,9 @@
+# Previous-baseline recipe; see WF_ACCURACY_AUDIT.txt for measured limits.
+# Preserve prev_decent epoch indices 0..300 and its LR/SCF curriculum.
+# WF is a checkpoint-selection metric only; no WF supervision is used.
+# Density remains farfield-only; potential retains raw + smeared supervision.
+# Recovered previous epoch-300 checkpoint: 105.3762 meV; <100 not certified.
+# Use a fresh output directory. Foundation/replay paths are installation-specific.
 heads:
   default:
     arrays_keys:
@@ -49,7 +55,7 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 potential_amplitudes_smearing_width: 1.5
 batch_size: 4
-valid_batch_size: 8
+valid_batch_size: 4
 lr: 0.001
 optimizer: adamw
 scheduler: none
@@ -69,22 +75,9 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: checkpoints
+checkpoints_dir: runs/prev_baseline_multihead_finetune/checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
-log_dir: logs
-results_dir: results
-model_dir: models
-multiheads_finetuning: true
-pseudolabel_replay: true
-force_mh_ft_lr: true
-pt_train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_train.xyz
-pt_valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_valid.xyz
-energy_weight: 1.0
-forces_weight: 100.0
-weight_pt_head: 1.0
-filter_type_pt: none
-subselect_pt: random
 train_schedule:
   0:
     name: heads
@@ -100,9 +93,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
-        reference: smeared
         weight: 100
         desmearing: true
+        reference: smeared
       vacuum_potential:
         weight: 100
         relative: true
@@ -120,6 +113,7 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     freeze_foundation_backbone: true
+    checkpoint_metric: rmse_phi_abs
   1:
     name: stage1
     start: 10
@@ -134,9 +128,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
-        reference: smeared
         weight: 100
         desmearing: true
+        reference: smeared
       vacuum_potential:
         weight: 100
         relative: true
@@ -153,6 +147,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
+    checkpoint_metric: rmse_phi_abs
   2:
     name: stage2
     start: 50
@@ -167,9 +162,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
-        reference: smeared
         weight: 100
         desmearing: true
+        reference: smeared
       vacuum_potential:
         weight: 100
         relative: true
@@ -186,6 +181,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
+    checkpoint_metric: rmse_phi_abs
   3:
     name: stage3
     start: 150
@@ -200,9 +196,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
-        reference: smeared
         weight: 100
         desmearing: true
+        reference: smeared
       vacuum_potential:
         weight: 100
         relative: true
@@ -219,6 +215,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
+    checkpoint_metric: rmse_phi_abs
   4:
     name: stage4
     start: 250
@@ -233,9 +230,9 @@ train_schedule:
         reference: farfield
         desmearing: false
       fourier_potential:
-        reference: smeared
         weight: 100
         desmearing: true
+        reference: smeared
       vacuum_potential:
         weight: 100
         relative: true
@@ -252,3 +249,17 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
+    checkpoint_metric: rmse_phi_abs
+multiheads_finetuning: true
+pseudolabel_replay: true
+force_mh_ft_lr: true
+pt_train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_train.xyz
+pt_valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_valid.xyz
+energy_weight: 1.0
+forces_weight: 100.0
+weight_pt_head: 1.0
+filter_type_pt: none
+subselect_pt: random
+log_dir: runs/prev_baseline_multihead_finetune/logs
+results_dir: runs/prev_baseline_multihead_finetune/results
+model_dir: runs/prev_baseline_multihead_finetune/models

@@ -433,6 +433,7 @@ def main() -> None:
             debug_grad_log_frequency=args.wandb_watch_log_freq,
             wandb_watch=args.wandb_watch,
             replay=replay,
+            checkpoint_metric=train_stage.get('checkpoint_metric', 'loss'),
         )
 
     # Evaluation on test datasets
@@ -491,6 +492,7 @@ def main() -> None:
     final_logger = (tools.MetricsLogger(directory=args.results_dir, tag=tag + "_final")
                     if rank == 0 else None)
     stages_with_models = []
+    best_wf_score = float('inf')
     for train_stage in args.train_schedule:
         stage_name = train_stage["name"]
         stage_tag = tag + "_" + stage_name
@@ -563,6 +565,13 @@ def main() -> None:
             torch.save(export_model, model_path)
             Path(args.model_dir).mkdir(parents=True, exist_ok=True)
             torch.save(export_model, Path(args.model_dir) / (args.name + "_" + stage_name + ".model"))
+            if (checkpoint_handler_stage.selection_metric == 'rmse_phi_abs'
+                    and checkpoint_handler_stage.best_score < best_wf_score):
+                best_wf_score = checkpoint_handler_stage.best_score
+                best_wf_path = Path(args.model_dir)/(args.name + "_best_wf.model")
+                torch.save(export_model, best_wf_path)
+                logging.info('Best WF across completed stages: %s, epoch %d, RMSE_WF=%.4f meV; %s',
+                             stage_name, latest_checkpoint_epoch, 1000*best_wf_score, best_wf_path)
             del export_model
             stages_with_models.append((train_stage, stage_tag))
 

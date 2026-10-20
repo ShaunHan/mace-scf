@@ -111,6 +111,8 @@ def fill_default_train_settings(train_stage_dict):
     for key, value in default_optional_settings.items():
         if key not in train_stage_dict:
             train_stage_dict[key] = value
+    if train_stage_dict.get('checkpoint_metric', 'loss') not in ('loss', 'rmse_phi_abs'):
+        raise ValueError('checkpoint_metric must be loss or rmse_phi_abs')
 
     loss_dict = {}
     for key, val in train_stage_dict["loss"].items():
