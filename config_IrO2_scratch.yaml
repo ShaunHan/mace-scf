@@ -67,7 +67,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: runs/prev_baseline_scratch/checkpoints
+checkpoints_dir: checkpoints
 compute_forces: true
 train_schedule:
   0:
@@ -103,7 +103,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   1:
     name: stage2
     start: 50
@@ -137,7 +137,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   2:
     name: stage3
     start: 150
@@ -171,7 +171,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   3:
     name: stage4
     start: 250
@@ -205,7 +205,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
-log_dir: runs/prev_baseline_scratch/logs
-results_dir: runs/prev_baseline_scratch/results
-model_dir: runs/prev_baseline_scratch/models
+    checkpoint_metric: rmse_wf_abs
+log_dir: logs
+results_dir: results
+model_dir: models

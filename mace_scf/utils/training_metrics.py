@@ -11,7 +11,7 @@ from mace_scf.electrostatics.loss import spectral_errors, vacuum_reference_weigh
 
 
 RMSE_KEYS = ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom",
-             "rmse_rho", "rmse_esp", "rmse_phi_abs",
+             "rmse_rho", "rmse_esp", "rmse_wf_abs",
              "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth")
 
 

@@ -67,7 +67,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: runs/prev_baseline_naive_finetune/checkpoints
+checkpoints_dir: checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
@@ -105,7 +105,7 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     freeze_foundation_backbone: true
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   1:
     name: stage1
     start: 10
@@ -139,7 +139,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   2:
     name: stage2
     start: 50
@@ -173,7 +173,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   3:
     name: stage3
     start: 150
@@ -207,7 +207,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   4:
     name: stage4
     start: 250
@@ -241,7 +241,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
-log_dir: runs/prev_baseline_naive_finetune/logs
-results_dir: runs/prev_baseline_naive_finetune/results
-model_dir: runs/prev_baseline_naive_finetune/models
+    checkpoint_metric: rmse_wf_abs
+log_dir: logs
+results_dir: results
+model_dir: models

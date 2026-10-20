@@ -58,7 +58,7 @@ def create_error_table(
     if log_wandb:
         import wandb
     table = PrettyTable()
-    has_phi_observations = False
+    has_wf_observations = False
 
     if table_type == "ElectrostaticRMSE":
         table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "relative F RMSE %", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smeared/farfield) me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP(raw/smeared) mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_WF(abs/rel) meV"]
@@ -156,7 +156,7 @@ def create_error_table(
             }
             wandb.log(wandb_log_dict)
 
-        has_phi_observations |= "rmse_phi_abs" in metrics
+        has_wf_observations |= "rmse_wf_abs" in metrics
 
         # catch missing metrics
         all_metric_name = [
@@ -172,14 +172,14 @@ def create_error_table(
             "rmse_esp",
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
-            "rmse_fermi_level", "rmse_fermi_level_rel", "rmse_esp_vac", "rmse_esp_vac_rel", "rmse_phi_abs", "rmse_phi_rel", "rmse_rho",
+            "rmse_fermi_level", "rmse_fermi_level_rel", "rmse_esp_vac", "rmse_esp_vac_rel", "rmse_wf_abs", "rmse_wf_rel", "rmse_rho",
             "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
                 metrics[metric_name] = "not found"
                 continue
-            if not ("rel" in metric_name) or metric_name in ('rmse_phi_rel','rmse_fermi_level_rel','rmse_esp_vac_rel'):
+            if not ("rel" in metric_name) or metric_name in ('rmse_wf_rel','rmse_fermi_level_rel','rmse_esp_vac_rel'):
                 metrics[metric_name] = f"{1000 * metrics[metric_name]:.2f}"
             else:
                 metrics[metric_name] = f"{metrics[metric_name]:.2f}"
@@ -192,7 +192,7 @@ def create_error_table(
                   metrics['rmse_fermi_level']+'/'+metrics['rmse_fermi_level_rel'],
                   metrics['rmse_esp']+'/'+metrics['rmse_esp_smooth'],
                   metrics['rmse_esp_vac']+'/'+metrics['rmse_esp_vac_rel'],
-                  metrics['rmse_phi_abs']+'/'+metrics['rmse_phi_rel']])
+                  metrics['rmse_wf_abs']+'/'+metrics['rmse_wf_rel']])
         elif table_type == "DensityCoefficientsRMSE":
             table.add_row(
                 [
@@ -272,6 +272,6 @@ def create_error_table(
         for index,name in reversed(list(enumerate(table.field_names))):
             if index and all(row[index] in ('not found','not found/not found') for row in table.rows):
                 table.del_column(name)
-    if table_type == "ElectrostaticRMSE" and not has_phi_observations and "RMSE_WF(abs/rel) meV" in table.field_names:
+    if table_type == "ElectrostaticRMSE" and not has_wf_observations and "RMSE_WF(abs/rel) meV" in table.field_names:
         table.del_column("RMSE_WF(abs/rel) meV")
     return table

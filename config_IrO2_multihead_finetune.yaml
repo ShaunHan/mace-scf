@@ -75,7 +75,7 @@ keep_checkpoints: true
 save_all_checkpoints: true
 error_table: ElectrostaticRMSE
 valid_set_seed: 7777
-checkpoints_dir: runs/prev_baseline_multihead_finetune/checkpoints
+checkpoints_dir: checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 train_schedule:
@@ -113,7 +113,7 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     freeze_foundation_backbone: true
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   1:
     name: stage1
     start: 10
@@ -147,7 +147,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   2:
     name: stage2
     start: 50
@@ -181,7 +181,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   3:
     name: stage3
     start: 150
@@ -215,7 +215,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
   4:
     name: stage4
     start: 250
@@ -249,7 +249,7 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-    checkpoint_metric: rmse_phi_abs
+    checkpoint_metric: rmse_wf_abs
 multiheads_finetuning: true
 pseudolabel_replay: true
 force_mh_ft_lr: true
@@ -260,6 +260,6 @@ forces_weight: 100.0
 weight_pt_head: 1.0
 filter_type_pt: none
 subselect_pt: random
-log_dir: runs/prev_baseline_multihead_finetune/logs
-results_dir: runs/prev_baseline_multihead_finetune/results
-model_dir: runs/prev_baseline_multihead_finetune/models
+log_dir: logs
+results_dir: results
+model_dir: models

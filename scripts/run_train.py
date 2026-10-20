@@ -565,7 +565,7 @@ def main() -> None:
             torch.save(export_model, model_path)
             Path(args.model_dir).mkdir(parents=True, exist_ok=True)
             torch.save(export_model, Path(args.model_dir) / (args.name + "_" + stage_name + ".model"))
-            if (checkpoint_handler_stage.selection_metric == 'rmse_phi_abs'
+            if (checkpoint_handler_stage.selection_metric == 'rmse_wf_abs'
                     and checkpoint_handler_stage.best_score < best_wf_score):
                 best_wf_score = checkpoint_handler_stage.best_score
                 best_wf_path = Path(args.model_dir)/(args.name + "_best_wf.model")
