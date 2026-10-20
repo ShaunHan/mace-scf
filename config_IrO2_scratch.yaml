@@ -1,8 +1,3 @@
-# Fresh training with raw DFT Fourier data; see RECOMMENDED_CONFIGS_README.txt.
-name: fit_0
-train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_train_raw.xyz
-valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_1733_vasp_sp_valid_raw.xyz
-E0s: '{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}'
 heads:
   default:
     arrays_keys:
@@ -72,7 +67,6 @@ log_dir: logs
 results_dir: results
 model_dir: models
 multiheads_finetuning: false
-log_level: DEBUG
 train_schedule:
   0:
     name: stage1
@@ -206,4 +200,3 @@ train_schedule:
         initial_fermi_level: zero
         use_autograd_forces: true
       reference_conditioning: none
-swa: false
