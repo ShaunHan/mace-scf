@@ -1767,10 +1767,14 @@ def initialize_reference(model, loader, device, options, loss_config):
                 target = torch.where(active[...,None],target/geom.ngrid,0.)
                 if getattr(function, 'apply_smearing', False):
                     width = getattr(r, 'potential_amplitudes_smearing_width', geom.width)
-                    target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
+                    smooth_target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
+                    target = (torch.cat((target, smooth_target), 1) if function.reference == 'raw+smeared'
+                              else smooth_target)
                 pw = batch.weight*batch.fourier_potential_weight
             else:
                 target = local.positions.new_zeros((*geom.k2.shape,2)); pw = batch.weight*0.
+                if getattr(function, 'reference', None) == 'raw+smeared':
+                    target = torch.cat((target, target), 1)
             vacuum, vw = vacuum_reference_weights(batch, batch.total_charge)
             labels = (target.flatten(1), batch.fermi_level[:,None], vacuum[:,None])
             availability = (pw, batch.weight*batch.fermi_level_weight, vw)
@@ -1804,6 +1808,9 @@ def initialize_reference(model, loader, device, options, loss_config):
                     predicted = r.raw_decoder(g, state, predicted)
                 key = 'smooth_fourier_potential' if getattr(function, 'apply_smearing', False) else 'fourier_potential'
                 spectrum = torch.where(active[...,None],predicted.get(key, predicted['fourier_potential'])/g.ngrid,0.)
+                if getattr(function, 'reference', None) == 'raw+smeared':
+                    raw = torch.where(active[...,None],predicted['fourier_potential']/g.ngrid,0.)
+                    spectrum = torch.cat((raw, spectrum), 1)
                 return (spectrum.flatten(1),(result[1]+model.fermi_level_offset+geom.vacuum_reference)[:,None],
                         predicted['vacuum_potential'][:,None])
             baseline = predict(zero)

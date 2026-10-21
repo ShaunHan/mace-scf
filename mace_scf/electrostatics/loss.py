@@ -349,7 +349,7 @@ class WeightedFourierDensity(torch.nn.Module):
 
 
 class WeightedFourierPotential(torch.nn.Module):
-    """Real-space MSE of the retained potential after uniform-offset alignment."""
+    """Selected Parseval MSE, or their explicit sum for raw+smeared."""
     def __init__(self, desmearing=None, reference=None, **legacy):
         super().__init__()
         unknown = set(legacy)-{'apply_smearing'}
@@ -367,9 +367,12 @@ class WeightedFourierPotential(torch.nn.Module):
 
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
-        if self.apply_smearing and 'smooth_fourier_potential' in pred:
-            pred = dict(pred, fourier_potential=pred['smooth_fourier_potential'])
-        square = spectral_errors(ref, pred, 'fourier_potential', self.apply_smearing)
+        square = pred['energy']*0.
+        if self.reference in ('raw', 'raw+smeared'):
+            square = spectral_errors(ref, pred, 'fourier_potential', False)
+        if self.reference in ('smeared', 'raw+smeared'):
+            smooth = dict(pred, fourier_potential=pred.get('smooth_fourier_potential', pred['fourier_potential']))
+            square = square+spectral_errors(ref, smooth, 'fourier_potential', True)
         return {'spatial': ((square*weights).sum(), weights.sum())}
 
     def forward(self, ref, pred):

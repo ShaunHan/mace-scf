@@ -191,7 +191,7 @@ def field_loss_options(options, *, density=True):
     reference = options.get('reference', 'smeared' if options.get('apply_smearing', True) else 'raw')
     if density and reference == 'density':
         reference = 'smeared'
-    allowed = ('raw', 'smeared', 'farfield') if density else ('raw', 'smeared')
+    allowed = ('raw', 'smeared', 'farfield') if density else ('raw', 'smeared', 'raw+smeared')
     if reference not in allowed:
         raise ValueError(f'Fourier {"density" if density else "potential"} reference must be one of {allowed}')
     reconstruct = options.get('desmearing', False)
