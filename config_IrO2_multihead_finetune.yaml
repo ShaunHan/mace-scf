@@ -1,6 +1,3 @@
-# Fresh-run recipe: restore the earlier response basis and sustained electronic LR.
-# Raw and smeared ESP are two resolutions of one prediction; density stays coarse.
-# WF is a checkpoint-selection metric only. No WF supervision is used.
 heads:
   default:
     arrays_keys:
@@ -75,6 +72,21 @@ valid_set_seed: 7777
 checkpoints_dir: checkpoints
 compute_forces: true
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
+multiheads_finetuning: true
+pseudolabel_replay: true
+force_mh_ft_lr: true
+pt_train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_train.xyz
+pt_valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_valid.xyz
+energy_weight: 1.0
+forces_weight: 100.0
+weight_pt_head: 1.0
+filter_type_pt: none
+subselect_pt: random
+log_dir: logs
+results_dir: results
+model_dir: models
+refit_fermi_readout: true
+fixed_point_update_config: '{''type'': ''CoupledResponse'', ''include_point_receiver'': True, ''source_basis'': ''difference''}'
 train_schedule:
   0:
     name: heads
@@ -267,18 +279,3 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
-multiheads_finetuning: true
-pseudolabel_replay: true
-force_mh_ft_lr: true
-pt_train_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_train.xyz
-pt_valid_file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/replay/pt_valid.xyz
-energy_weight: 1.0
-forces_weight: 100.0
-weight_pt_head: 1.0
-filter_type_pt: none
-subselect_pt: random
-log_dir: logs
-results_dir: results
-model_dir: models
-refit_fermi_readout: true
-fixed_point_update_config: '{''type'': ''CoupledResponse'', ''include_point_receiver'': True, ''source_basis'': ''difference''}'
