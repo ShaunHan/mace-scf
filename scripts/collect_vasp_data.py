@@ -12,8 +12,8 @@ PROTO_BASE_PATH = BASE_PATH.with_name("dft_proto")
 CHUNK_SIZE = 5
 N_PROCS = 64
 REUSE_HDF = False
-K_CUTOFF = 18.0
-FOURIER_CUTOFF_FACTOR = 1.25
+K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
+FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
 DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 6.0
@@ -62,8 +62,14 @@ def hermitian(coefficients):
 
 
 def truncate_fft(coefficients, shape):
-    # Preserve the supplied script's full-grid, unsmoothed FFT behavior.
-    return hermitian(coefficients)
+    """Keep matching reciprocal modes, without smoothing or changing amplitudes."""
+    # Odd grids preserve distinct +/- modes and avoid Nyquist aliasing.
+    shape = np.minimum(np.asarray(shape, dtype=int), coefficients.shape)
+    shape -= (shape % 2 == 0)
+    modes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
+    indices = np.ix_(*[k % n for k, n in zip(modes, coefficients.shape)])
+    target = coefficients[indices] * (float(np.prod(shape)) / coefficients.size)
+    return hermitian(target)
 
 
 def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
@@ -140,7 +146,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
             return {name: handle[name][...] for name in names}
 
-    shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int)
+    shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     data = {}
     if DENSITY_SIGMAS:
         density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
@@ -192,9 +198,18 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
 
 
 def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
-    """Keep full unsmoothed grids; SIGMAS remain the collection switches."""
+    """Compact, unsmoothed XYZ targets; higher-frequency data stay in the HDF."""
     if not sigmas:
         return
+    # Original bandwidth recipe; widths do NOT apply a Gaussian filter.
+    sigma = float(min(sigmas))
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("Fourier widths must be positive and finite")
+    cutoff = FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / sigma
+    shape = 2 * np.ceil(cutoff * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
+    if cutoff > K_CUTOFF or np.any(shape > coefficients.shape):
+        raise ValueError("XYZ Fourier bandwidth exceeds the HDF/VASP grid; increase its resolution")
+    coefficients = truncate_fft(coefficients, shape)
     target = np.empty((2, *coefficients.shape), dtype=np.float32)
     target[0], target[1] = coefficients.real, coefficients.imag
     if charge is not None:
