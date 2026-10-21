@@ -16,7 +16,9 @@ class SpectralDecoder(torch.nn.Module):
         super().__init__()
         self.coefficients = torch.nn.Parameter(torch.tensor([[-4., 0.], [-4., 0.]]))
         self.register_buffer('enabled', torch.tensor([density, potential], dtype=torch.bool))
-        self.register_buffer('consistent_smearing', torch.tensor(True))
+        # Restore the direct Gaussian-SCF auxiliary loss used by the working
+        # raw-plus-smeared baseline. Existing checkpoints keep their convention.
+        self.register_buffer('consistent_smearing', torch.tensor(False))
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):

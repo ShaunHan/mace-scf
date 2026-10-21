@@ -67,7 +67,7 @@ log_dir: logs
 results_dir: results
 model_dir: models
 refit_fermi_readout: true
-fixed_point_update_config: '{''type'': ''CoupledResponse'', ''include_point_receiver'': True, ''source_basis'': ''difference''}'
+fixed_point_update_config: "{'type': 'CoupledResponse', 'include_point_receiver': False, 'source_basis': 'gaussian'}"
 train_schedule:
   0:
     name: stage1
@@ -141,7 +141,7 @@ train_schedule:
     name: stage3
     start: 150
     end: 249
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 500
       forces: 500
@@ -175,7 +175,7 @@ train_schedule:
     name: stage4
     start: 250
     end: 300
-    lr: 0.001
+    lr: 0.0001
     loss:
       energy_per_atom: 1000
       forces: 500
