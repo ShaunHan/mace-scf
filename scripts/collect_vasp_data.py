@@ -62,14 +62,11 @@ def hermitian(coefficients):
 
 
 def truncate_fft(coefficients, shape):
-    """Keep matching reciprocal modes, without smoothing or changing amplitudes."""
-    # Odd grids preserve distinct +/- modes and avoid Nyquist aliasing.
-    shape = np.minimum(np.asarray(shape, dtype=int), coefficients.shape)
-    shape -= (shape % 2 == 0)
-    modes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
-    indices = np.ix_(*[k % n for k, n in zip(modes, coefficients.shape)])
-    target = coefficients[indices] * (float(np.prod(shape)) / coefficients.size)
-    return hermitian(target)
+    if np.any(np.asarray(shape) > coefficients.shape):
+        raise ValueError(f"Requested FFT shape {tuple(shape)} exceeds {coefficients.shape}")
+    axes = [np.rint(np.fft.fftfreq(n) * n).astype(int) for n in shape]
+    indices = np.ix_(*[k % n for k, n in zip(axes, coefficients.shape)])
+    return hermitian(coefficients[indices] * np.prod(shape) / coefficients.size)
 
 
 def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
