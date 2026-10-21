@@ -149,6 +149,14 @@ class CheckpointHandler(NativeCheckpointHandler):
         if value.get('backbone_layout', 'mul_ir') != layout:
             raise ValueError('Checkpoint and requested backbone use different tensor-product layouts. '
                              'Keep the original enable_cueq setting to resume, or start a fresh CuEq run in a new checkpoint directory; Adam moments cannot be relabeled.')
+        if not self.deployment:
+            mismatched = [name for name, parameter in state.model.named_parameters()
+                          if name not in value['model'] or value['model'][name].shape != parameter.shape]
+            if mismatched:
+                raise ValueError('Checkpoint parameter shapes differ from the requested model: '
+                                 + ', '.join(mismatched[:6])
+                                 + '. Resume with the original architecture, or start a fresh run. '
+                                   'Resizing learned receivers after optimizer construction would leave stale Adam/EMA owners.')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         if value.get('training_guard') is not None:
             state.optimizer._training_guard = value['training_guard']

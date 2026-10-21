@@ -1093,7 +1093,8 @@ class CoupledResponse(AtomicPotentialResponse):
     def __init__(self, node_feats_irreps, charges_irreps, num_elements,
                  potential_widths=None, density_width=1.5, field_widths=(1.5, 3.),
                  potential_amplitudes_smearing_width=1.5,
-                 include_local_energy=False, **kwargs):
+                 include_local_energy=False, include_point_receiver=False,
+                 source_basis='gaussian', **kwargs):
         irreps = o3.Irreps(node_feats_irreps)
         if o3.Irreps(charges_irreps).dim != 4:
             raise ValueError("CoupledResponse uses monopoles and dipoles (atomic_multipoles_max_l=1)")
@@ -1105,11 +1106,16 @@ class CoupledResponse(AtomicPotentialResponse):
         potential_widths = (sigma_phi, 2*sigma_phi) if potential_widths is None else potential_widths
         source_widths = sorted(set(float(w) for w in potential_widths))
         self.potential_amplitudes_smearing_width = sigma_phi
-        # The first channel supplies the density-width moment response. Keep
-        # the configured Gaussian channels separate; no extra point receiver.
+        # The first channel supplies the density-width moment response. A point
+        # sample resolves the retained ESP spectrum without adding a density
+        # source, changing the Fourier cutoff or inverting a Gaussian.
+        if not isinstance(include_point_receiver, bool):
+            raise TypeError('include_point_receiver must be bool')
         widths = [float(density_width)]+sorted(set(float(w) for w in field_widths)-{float(density_width)})
         if any(not math.isfinite(w) or w <= 0 for w in source_widths+widths):
             raise ValueError("Gaussian widths must be finite and positive")
+        if include_point_receiver:
+            widths.insert(1, 0.)
         scalar_slices, vector_slices = [], []
         for (mul, ir), sl in zip(irreps, irreps.slices()):
             if ir == o3.Irrep('0e'):
@@ -1124,9 +1130,12 @@ class CoupledResponse(AtomicPotentialResponse):
                          include_local_energy=include_local_energy)
         self.scalar_slices, self.vector_slices = scalar_slices, vector_slices
         self.coarse_dim = 4
-        # SpectralGeometry prepares the moment carrier. New models use plain
-        # Gaussian potential channels; saved models retain their original basis.
-        self.source_basis = 'gaussian'
+        # A radial contrast has zero integral and separates shape variation
+        # from the common amplitude. Both bases span exactly the same fields;
+        # their coordinates impose different optimization/decay conditioning.
+        if source_basis not in ('gaussian', 'difference'):
+            raise ValueError('source_basis must be gaussian or difference')
+        self.source_basis = source_basis
         self.potential_widths = ()
         channels=len(source_widths)
         self.state_irreps = o3.Irreps(f'0e+1o+{channels}x0e+{channels}x1o').simplify()

@@ -1,9 +1,6 @@
-# Previous-baseline recipe; see WF_ACCURACY_AUDIT.txt for measured limits.
-# Preserve prev_decent epoch indices 0..300 and its LR/SCF curriculum.
-# WF is a checkpoint-selection metric only; no WF supervision is used.
-# Density remains farfield-only; potential retains raw + smeared supervision.
-# Recovered previous epoch-300 checkpoint: 105.3762 meV; <100 not certified.
-# Use a fresh output directory. Foundation/replay paths are installation-specific.
+# Fresh-run recipe: restore the earlier response basis and sustained electronic LR.
+# Raw and smeared ESP are two resolutions of one prediction; density stays coarse.
+# WF is a checkpoint-selection metric only. No WF supervision is used.
 heads:
   default:
     arrays_keys:
@@ -142,7 +139,7 @@ train_schedule:
     name: stage3
     start: 150
     end: 249
-    lr: 0.0001
+    lr: 0.001
     loss:
       energy_per_atom: 500
       forces: 500
@@ -176,7 +173,7 @@ train_schedule:
     name: stage4
     start: 250
     end: 300
-    lr: 0.0001
+    lr: 0.001
     loss:
       energy_per_atom: 1000
       forces: 500
@@ -209,3 +206,5 @@ train_schedule:
 log_dir: logs
 results_dir: results
 model_dir: models
+refit_fermi_readout: true
+fixed_point_update_config: '{''type'': ''CoupledResponse'', ''include_point_receiver'': True, ''source_basis'': ''difference''}'

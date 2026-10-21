@@ -1,9 +1,6 @@
-# Previous-baseline recipe; see WF_ACCURACY_AUDIT.txt for measured limits.
-# Preserve prev_decent epoch indices 0..300 and its LR/SCF curriculum.
-# WF is a checkpoint-selection metric only; no WF supervision is used.
-# Density remains farfield-only; potential retains raw + smeared supervision.
-# Recovered previous epoch-300 checkpoint: 105.3762 meV; <100 not certified.
-# Use a fresh output directory. Foundation/replay paths are installation-specific.
+# Fresh-run recipe: restore the earlier response basis and sustained electronic LR.
+# Raw and smeared ESP are two resolutions of one prediction; density stays coarse.
+# WF is a checkpoint-selection metric only. No WF supervision is used.
 heads:
   default:
     arrays_keys:
@@ -140,6 +137,11 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
+    embedding_lr: 0.0001
+    interactions_decay_lr: 0.0001
+    interactions_no_decay_lr: 0.0001
+    products_lr: 0.0001
+    layer_feature_mixer_lr: 0.0001
   2:
     name: stage2
     start: 50
@@ -174,11 +176,21 @@ train_schedule:
         use_autograd_forces: true
       reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
+    embedding_lr: 0.0001
+    interactions_decay_lr: 0.0001
+    interactions_no_decay_lr: 0.0001
+    products_lr: 0.0001
+    layer_feature_mixer_lr: 0.0001
   3:
     name: stage3
     start: 150
     end: 249
-    lr: 0.0001
+    lr: 0.001
+    embedding_lr: 0.0001
+    interactions_decay_lr: 0.0001
+    interactions_no_decay_lr: 0.0001
+    products_lr: 0.0001
+    layer_feature_mixer_lr: 0.0001
     loss:
       energy_per_atom: 500
       forces: 500
@@ -212,7 +224,12 @@ train_schedule:
     name: stage4
     start: 250
     end: 300
-    lr: 0.0001
+    lr: 0.001
+    embedding_lr: 0.0001
+    interactions_decay_lr: 0.0001
+    interactions_no_decay_lr: 0.0001
+    products_lr: 0.0001
+    layer_feature_mixer_lr: 0.0001
     loss:
       energy_per_atom: 1000
       forces: 500
@@ -245,3 +262,5 @@ train_schedule:
 log_dir: logs
 results_dir: results
 model_dir: models
+refit_fermi_readout: true
+fixed_point_update_config: '{''type'': ''CoupledResponse'', ''include_point_receiver'': True, ''source_basis'': ''difference''}'

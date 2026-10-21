@@ -16,6 +16,15 @@ class SpectralDecoder(torch.nn.Module):
         super().__init__()
         self.coefficients = torch.nn.Parameter(torch.tensor([[-4., 0.], [-4., 0.]]))
         self.register_buffer('enabled', torch.tensor([density, potential], dtype=torch.bool))
+        self.register_buffer('consistent_smearing', torch.tensor(True))
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Old checkpoints retain their saved objective/observer convention.
+        state_dict = dict(state_dict)
+        state_dict.setdefault(prefix+'consistent_smearing', self.enabled.new_tensor(False))
+        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
+                                     missing_keys, unexpected_keys, error_msgs)
 
     def fraction(self, k2, width, index):
         t = .5*width**2*k2
@@ -86,10 +95,24 @@ class SpectralDecoder(torch.nn.Module):
             for key, value in (('fourier_carrier_potential', carrier), ('fourier_local_potential', local)):
                 output['smooth_'+key] = output[key]
                 output[key] = torch.view_as_real(value)*g.ngrid
+            if bool(getattr(self, 'consistent_smearing', False)):
+                # One observed ESP at two resolutions. The recurrent Gaussian
+                # coefficients remain a latent basis; partial reconstruction
+                # does not make that basis the Gaussian convolution of raw ESP.
+                gaussian = torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)[..., None]
+                for key in ('fourier_carrier_potential', 'fourier_local_potential'):
+                    output['latent_'+key] = output['smooth_'+key]
+                    output['smooth_'+key] = output[key]*gaussian
+                smooth = raw*gaussian
+                output['smooth_fourier_potential'] = smooth
+                output['smooth_vacuum_potential'] = g.plane(
+                    torch.view_as_complex((smooth/g.ngrid).contiguous()))+g.vacuum_reference
             if 'fourier_effective_density' in output:
                 output['smooth_fourier_effective_density'] = output['fourier_effective_density']
                 output['fourier_effective_density'] = torch.view_as_real(
                     (carrier+local)/torch.where(g.coulomb > 0, -g.coulomb, 1.))*g.ngrid
+                if bool(getattr(self, 'consistent_smearing', False)):
+                    output['smooth_fourier_effective_density'] = output['fourier_effective_density']*gaussian
         return output
 
 
@@ -173,7 +196,8 @@ def calibrate_desmearing(model, loader, device, steps=50, mixing=.5):
                 prediction, target = out['smooth_'+key], out[key+'_dft']
                 if i == 1:
                     mask &= k2 > 0
-                    prediction = out['smooth_fourier_carrier_potential']+out['smooth_fourier_local_potential']
+                    prefix = 'latent_' if 'latent_fourier_carrier_potential' in out else 'smooth_'
+                    prediction = out[prefix+'fourier_carrier_potential']+out[prefix+'fourier_local_potential']
                     known = out[key]-out['fourier_carrier_potential']-out['fourier_local_potential']
                     target = target-known
                 w = weight[:, None].expand_as(k2)/out['k_vectors_grid_shape'].prod().square()

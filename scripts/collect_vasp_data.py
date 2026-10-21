@@ -40,8 +40,19 @@ def get_output_dirs():
     return paths
 
 
-def read_grid(path, reader):
-    return np.asarray(reader.from_file(str(path)).data["total"], dtype=float)
+def read_grid(path, reader, atoms):
+    """Refuse volumetric labels belonging to a different atomic structure."""
+    grid = reader.from_file(str(path))
+    structure = grid.structure
+    delta = structure.frac_coords-atoms.get_scaled_positions(wrap=False)
+    if ([str(site.specie) for site in structure] != atoms.get_chemical_symbols()
+            or not np.allclose(structure.lattice.matrix, atoms.cell, rtol=0, atol=1.e-4)
+            or not np.allclose(delta-np.rint(delta), 0., rtol=0, atol=1.e-5)):
+        raise ValueError(f'Structure/grid mismatch: {path}')
+    values = np.asarray(grid.data['total'], dtype=float)
+    if values.ndim != 3 or not np.isfinite(values).all():
+        raise ValueError(f'Invalid volumetric data: {path}')
+    return values
 
 
 def hermitian(coefficients):
@@ -77,8 +88,10 @@ def fourier_data(outdir, atoms, parameters, axis):
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int)
     data = {}
     if COLLECT_DENSITY:
-        density = read_grid(outdir / "AECCAR1", Chgcar)
-        final_density = read_grid(outdir / "AECCAR2", Chgcar)
+        density = read_grid(outdir / "AECCAR1", Chgcar, atoms)
+        final_density = read_grid(outdir / "AECCAR2", Chgcar, atoms)
+        if density.shape != final_density.shape:
+            raise ValueError(f'AECCAR grid mismatch: {outdir}')
         density -= final_density
         density /= atoms.get_volume()  # Signed deformation charge, in e/Angstrom^3.
         data["fourier_density"] = truncate_fft(np.fft.fftn(density), shape)
@@ -88,8 +101,10 @@ def fourier_data(outdir, atoms, parameters, axis):
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
         # Native LOCPOT includes the plugin; the old callback-exported
         # LOCPOT_total could capture a trial electronic state.
-        potential = read_grid(outdir / 'LOCPOT', Locpot)
-        proto = read_grid(outdir / "LOCPOT_proto", Locpot)
+        potential = read_grid(outdir / 'LOCPOT', Locpot, atoms)
+        proto = read_grid(outdir / "LOCPOT_proto", Locpot, atoms)
+        if potential.shape != proto.shape:
+            raise ValueError(f'SCF/proto potential grid mismatch: {outdir}')
         if axis is not None:
             data["planar_potential"] = potential.mean(axis=tuple(i for i in range(3) if i != axis))
         potential -= proto  # No mean subtraction; retain the potential zero mode.
@@ -118,6 +133,8 @@ def add_fourier_targets(atoms, coefficients, prefix, charge=None):
 
 def add_vacuum_target(atoms, planar, axis, correction):
     key = f"vacuum_{'xyz'[axis]}frac"
+    if VACUUM_PLANE and set(VACUUM_PLANE) != {key}:
+        raise ValueError(f'For this slab axis, specify only {key}')
     if VACUUM_PLANE:
         fraction = float(VACUUM_PLANE[key])
     elif key in atoms.info:
@@ -125,6 +142,8 @@ def add_vacuum_target(atoms, planar, axis, correction):
     else:
         distances = (correction - atoms.get_scaled_positions()[:, axis]) % 1.0
         fraction = (correction - 0.5 * np.min(distances[distances > 1e-8])) % 1.0
+    if not np.isfinite(fraction):
+        raise ValueError('Vacuum fraction must be finite')
     fraction %= 1.0
     coordinate = fraction * len(planar)
     index = int(np.floor(coordinate))
@@ -144,6 +163,8 @@ def collect_job(outdir):
         with np.load(outdir/'plugin_observables.npz') as obs:
             forces = obs['expected_forces'].copy()
     energy = atoms.get_potential_energy(force_consistent=True)
+    if forces.shape != (len(atoms), 3) or not np.isfinite(forces).all() or not np.isfinite(energy):
+        raise ValueError(f'Invalid energy/forces: {outdir}')
 
     outcar = Outcar(str(outdir / "OUTCAR"))
     outcar.read_pseudo_zval()
@@ -151,6 +172,8 @@ def collect_job(outdir):
     # initialization. The executed NELECT input retains the electrode charge.
     charge = sum(outcar.zval_dict[s] for s in atoms.get_chemical_symbols()) - parameters['nelect']
     fermi = float(outcar.efermi)
+    if not np.isfinite(charge) or not np.isfinite(fermi):
+        raise ValueError(f'Nonfinite charge/Fermi level: {outdir}')
     counter = float(metadata["counter_charge"])
 
     # Charged slabs use a Python dipole correction with native LDIPOL=False.
@@ -176,6 +199,9 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
+    if (external_field.shape != (3,) or not np.isfinite(external_field).all()
+            or not np.isfinite(dipole).all() or not np.isfinite(counter)):
+        raise ValueError(f'Nonfinite or malformed electrostatic controls/labels: {outdir}')
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),

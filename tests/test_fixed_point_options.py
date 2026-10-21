@@ -83,12 +83,6 @@ def test_old_fixed_point_mode_is_rejected():
         validate_fixed_point_training_options({"mode": "fixed_point"})
 
 
-def test_shortcut_scf_is_a_supported_training_mode():
-    options = validate_fixed_point_training_options({'mode':'shortcut_scf', 'scf':{'num_scf_steps':12}})
-    assert options.mode == 'shortcut_scf'
-    assert options.scf.num_scf_steps == 12
-
-
 def test_old_scf_training_options_stage_key_is_converted():
     stage = {
         "loss": {"atomic_multipoles": {"weight": 1.0}},
@@ -114,14 +108,11 @@ def test_new_training_options_reject_flat_scf_fields():
         )
 
 
-def test_scf_training_modes_use_default_mixing_with_explicit_step_count():
-    options = validate_fixed_point_training_options(
-        {"mode": "unroll_scf", "scf": {"num_scf_steps": 8}}
-    )
-    assert options.scf.num_scf_steps == 8
-    assert options.scf.mixing_parameter == 0.25
+def test_scf_training_modes_require_explicit_step_count_and_mixing():
     with pytest.raises(ValueError, match="must explicitly set"):
-        validate_fixed_point_training_options({"mode": "unroll_scf", "scf": {}})
+        validate_fixed_point_training_options(
+            {"mode": "unroll_scf", "scf": {"num_scf_steps": 8}}
+        )
 
 
 def test_direct_mode_warns_and_ignores_old_flat_scf_fields():

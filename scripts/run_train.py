@@ -493,6 +493,7 @@ def main() -> None:
                     if rank == 0 else None)
     stages_with_models = []
     best_wf_score = float('inf')
+    best_wf_path = None
     for train_stage in args.train_schedule:
         stage_name = train_stage["name"]
         stage_tag = tag + "_" + stage_name
@@ -574,6 +575,41 @@ def main() -> None:
                              stage_name, latest_checkpoint_epoch, 1000*best_wf_score, best_wf_path)
             del export_model
             stages_with_models.append((train_stage, stage_tag))
+
+    if rank == 0 and args.refit_fermi_readout and best_wf_path is not None:
+        from mace_scf.utils.fermi_refit import refit_fermi_readout
+        from mace_scf.utils.train import evaluate
+        fitted = torch.load(best_wf_path, map_location=device, weights_only=False)
+        refit_loader = torch_geometric.dataloader.DataLoader(
+            train_loader.dataset, batch_size=args.valid_batch_size,
+            shuffle=False, drop_last=False, generator=torch.Generator().manual_seed(0))
+        report = refit_fermi_readout(fitted, refit_loader, device, seed=args.seed)
+        # This affine null coordinate changes EF only. Use all validation frames
+        # for model selection after the training-only fit; no validation fitting.
+        fit_wrapper = mace_scf.utils.make_model_wrapper(
+            model=fitted, optimizer=None, output_args={key:False for key in output_args},
+            fixed_point_training_options=args.train_schedule[-1].get('fixed_point_training_options'))
+        fit_loss = mace_scf.electrostatics.loss.WeightedLoss({
+            'fermi_level':{'weight':1., 'relative':False},
+            'vacuum_potential':{'weight':1., 'relative':False}})
+        _, metrics = evaluate(fitted, fit_wrapper, fit_loss, None, valid_loader, device)
+        report['validation_metrics'] = metrics
+        report['unrefitted_validation_RMSE_WF_meV'] = 1000*best_wf_score
+        score = float(metrics['rmse_wf_abs'])
+        report['selected'] = bool(np.isfinite(score) and score < best_wf_score)
+        final_logger.log({**metrics, 'mode':'eval', 'split':'validation',
+                          'metric_context':'training_EF_readout_refit', 'selected':report['selected']})
+        candidate = Path(args.model_dir)/(args.name+'_best_wf_ef_refit.model')
+        if args.save_cpu:
+            fitted = fitted.cpu()
+        torch.save(fitted, candidate)
+        if report['selected']:
+            torch.save(fitted, best_wf_path)
+        (Path(args.results_dir)/(tag+'_ef_refit.json')).write_text(
+            json.dumps(make_jsonable(report), indent=2), encoding='utf-8')
+        logging.info('Training-only EF readout fit: validation RMSE_WF %.4f -> %.4f meV; selected=%s; %s',
+                     1000*best_wf_score, 1000*score, report['selected'], candidate)
+        del fitted
 
     if rank == 0 and args.scf_convergence_summary:
         logging.info("Computing SCF convergence summaries")
