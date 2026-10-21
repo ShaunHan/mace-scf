@@ -35,7 +35,7 @@ def smooth_field_errors(ref, pred, loss_fn=None):
         function = getattr(loss_fn, 'loss_fns', {}).get(label)
         direct_raw = (function is not None and not function.desmearing
                       and not function.apply_smearing)
-        if direct_raw:
+        if direct_raw and 'smooth_'+key not in pred:
             # A direct raw fit predicts the unsmeared observable. For its
             # smeared diagnostic filter both prediction and label once.
             value = pred[key]*torch.exp(-.5*pred[width]**2*pred['k_vectors'].square().sum(-1))[...,None]

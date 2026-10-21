@@ -208,8 +208,10 @@ def fill_fixed_point_update_config(args):
             "nonlinearity_cls": "NoNonLinearity",
         }
     else:
-        args.fixed_point_update_config = ast.literal_eval(args.fixed_point_update_config)
-        assert "type" in args.fixed_point_update_config
+        if isinstance(args.fixed_point_update_config, str):
+            args.fixed_point_update_config = ast.literal_eval(args.fixed_point_update_config)
+        if not isinstance(args.fixed_point_update_config, dict) or 'type' not in args.fixed_point_update_config:
+            raise ValueError('fixed_point_update_config must be a mapping containing type')
 
     if isinstance(args.fixed_point_update_config.get("potential_widths"), str):
         args.fixed_point_update_config["potential_widths"] = ast.literal_eval(args.fixed_point_update_config["potential_widths"])
@@ -224,7 +226,7 @@ def fill_fixed_point_update_config(args):
                  for stage in args.train_schedule}
         if len(modes) > 1:
             raise ValueError('Keep each field decoder enabled or disabled across all stages; '
-                             'its parameters and optimizer ownership are initialized once. '
+                             'its frozen DFT map is initialized once. '
                              'Use zero loss weight to postpone supervision.')
 
     cls_variables = [

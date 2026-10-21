@@ -1168,6 +1168,7 @@ class CoupledResponse(AtomicPotentialResponse):
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
                 'source_basis': getattr(self, 'source_basis', 'difference'),
                 'proto_smearing_width': getattr(self, 'proto_smearing_width', None),
+                'fixed_dft_observations': getattr(self, 'fixed_dft_observations', False),
                 'density_reference_width': self.farfield_width,
                 'potential_amplitudes_smearing_width': getattr(self, 'potential_amplitudes_smearing_width',
                     float(self.source_widths[0]) if len(self.source_widths) else self.density_width)}
@@ -1186,11 +1187,15 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
                               missing_keys, unexpected_keys, error_msgs):
-        from .desmearing import SpectralDecoder
+        from .desmearing import SpectralDecoder, FrozenSpectralDecoder
         decoder_key = prefix+'raw_decoder.coefficients'
-        if decoder_key in state_dict and getattr(self, 'raw_decoder', None) is None:
+        frozen_key = prefix+'raw_decoder.variances'
+        if frozen_key in state_dict and not isinstance(getattr(self, 'raw_decoder', None), FrozenSpectralDecoder):
+            self.raw_decoder = FrozenSpectralDecoder().to(self.source_widths)
+        elif decoder_key in state_dict and (getattr(self, 'raw_decoder', None) is None
+                                            or isinstance(self.raw_decoder, FrozenSpectralDecoder)):
             self.raw_decoder = SpectralDecoder().to(self.source_widths)
-        elif decoder_key not in state_dict and getattr(self, 'raw_decoder', None) is not None:
+        elif decoder_key not in state_dict and frozen_key not in state_dict and getattr(self, 'raw_decoder', None) is not None:
             self.raw_decoder = None
         state_dict = dict(state_dict)
         saved_widths = state_dict.get(prefix+'receiver_widths')
@@ -1229,6 +1234,7 @@ class CoupledResponse(AtomicPotentialResponse):
         self.charge_response = charge
         self.source_basis = state.get('source_basis', 'difference')
         self.proto_smearing_width = state.get('proto_smearing_width')
+        self.fixed_dft_observations = state.get('fixed_dft_observations', False)
         if self.source_basis not in ('gaussian', 'difference'):
             raise ValueError('Unknown saved potential basis')
         width = float(state.get('density_reference_width', float(self.receiver_widths.max())))
@@ -1444,15 +1450,23 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         density = bare/torch.where(g.coulomb>0,-g.coulomb,1.)[..., None]
         density = density+torch.stack(((g.k2==0)*(net_charge/g.volume)[:, None],torch.zeros_like(g.k2)),-1)
         smoothing = r.farfield_filter(g.k2)
+        vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
+        potential_reference = g.vacuum_reference
+        if g.neutral_reference:
+            total = total+torch.view_as_real(g.observer_proto)
+            potential_reference = potential_reference-g.plane(g.observer_proto)
         result.update(fourier_density=density*g.ngrid,
                       fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
                       fourier_potential=(carrier+regular)*g.ngrid,
                       fourier_carrier_potential=bare*g.ngrid,
                       fourier_local_potential=regular*g.ngrid,
                       fourier_total_potential=total*g.ngrid,
-                      vacuum_potential=g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference,
+                      vacuum_potential=vacuum, potential_reference=potential_reference,
                       total_charge=net_charge, reference_charge_error=net_charge-target,
                       reference_charge_stiffness=stiffness)
+        if getattr(r, 'fixed_dft_observations', False):
+            from .desmearing import observe_smoothed_fields
+            result = observe_smoothed_fields(g, solved, result)
         if getattr(r, 'raw_decoder', None) is not None:
             result = r.raw_decoder(g, solved, result)
         masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
@@ -1465,7 +1479,8 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
         if not g.neutral_reference:
             use &= data['fourier_proto_potential_weight']>0
         measured = output[field_key+'_dft']/g.ngrid
-        if getattr(r, 'raw_decoder', None) is not None and bool(r.raw_decoder.enabled[1]):
+        if (getattr(r, 'fixed_dft_observations', False) or
+                (getattr(r, 'raw_decoder', None) is not None and bool(r.raw_decoder.enabled[1]))):
             measured = measured*torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)[..., None]
         rows = torch.arange(len(g.counts),device=state.device)[:, None]
         selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
@@ -1610,6 +1625,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             if reference is not None:
                 output['reference_response'] = reference
         decoder = getattr(r, 'raw_decoder', None)
+        if getattr(r, 'fixed_dft_observations', False):
+            from .desmearing import observe_smoothed_fields
+            output = observe_smoothed_fields(g, state, output)
         if decoder is not None:
             output = decoder(g, state, output)
         output = apply_scalar_reference(output, r)
@@ -1653,15 +1671,16 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
     from .potential import initialize_vacuum_reference
-    from .desmearing import configure_desmearing, target_smearing_enabled
+    from .desmearing import configure_desmearing, calibrate_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    potential_options = (loss_config or {}).get('fourier_potential', {})
-    apply_smearing = target_smearing_enabled(potential_options)
-    initialize_response(model, loader, device, apply_potential_smearing=apply_smearing)
+    calibrate_desmearing(model, loader, device)
+    # The frozen neutral-atom reference and independent vacuum labels are raw.
+    # A field-loss reference must not silently change either physical observer.
+    initialize_response(model, loader, device, apply_potential_smearing=False)
     vacuum_options = (loss_config or {}).get('vacuum_potential', {})
     initialize_vacuum_reference(model, loader, device,
         relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True,
-        apply_potential_smearing=apply_smearing)
+        apply_potential_smearing=False)
     r = model.field_dependent_charges_map
     ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
     for batch in calibration_loader(loader):
@@ -1699,11 +1718,6 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.scalar_field_scale.copy_((1.+ps/max(count,1.e-30)).sqrt())
     r.vector_field_scale.copy_((1.+fs/max(count,1.e-30)).sqrt())
     r.field_scales_initialized.fill_(True)
-    if getattr(r, 'raw_decoder', None) is not None:
-        from .desmearing import calibrate_desmearing
-        calibrate_desmearing(model, calibration_loader(loader), device,
-            steps=options.scf.num_scf_steps if options is not None else 50,
-            mixing=options.scf.mixing_parameter if options is not None else .5)
     logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
                  r.response_reference, r.source_channels, r.receiver_widths.tolist())
     logging.debug('Constitutive charge response: %s; stored in checkpoint metadata',
@@ -1745,14 +1759,13 @@ def initialize_reference(model, loader, device, options, loss_config):
             batch = batch.to(device); data = batch.to_dict()
             local = model.local_part(data, compute_force=False)
             geom = CoupledGeometry(model, data, local.positions)
+            function = objective.loss_fns.get('fourier_potential')
             target = _target_fft(data,'fourier_potential','fourier_potential_shape',geom.shape,local.positions.dtype)
             active = geom.mask & (geom.k2>0)
             if target is not None:
                 active &= target_mode_mask(data['fourier_potential_shape'], geom.modes)
                 target = torch.where(active[...,None],target/geom.ngrid,0.)
-                function = objective.loss_fns.get('fourier_potential')
-                if getattr(function, 'apply_smearing', False) or (
-                        getattr(function, 'desmearing', False) and getattr(r, 'raw_decoder', None) is not None):
+                if getattr(function, 'apply_smearing', False):
                     width = getattr(r, 'potential_amplitudes_smearing_width', geom.width)
                     target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
                 pw = batch.weight*batch.fourier_potential_weight
@@ -1769,9 +1782,30 @@ def initialize_reference(model, loader, device, options, loss_config):
                 if bool((update.convergence_residual(root,*args).abs().amax()>1.e-8)):
                     raise RuntimeError('Cold reference model is not affine; initialization must precede training')
                 result, fields = observe(state,*args,screened=False)
-                spectrum = torch.where(active[...,None],geom.expand_spectrum(fields[1]+fields[2]),0.)
+                total, carrier, regular = (g.expand_spectrum(value) for value in fields[:3])
+                if g.molecular is not None:
+                    correction = torch.view_as_real(g.molecular.spectrum(
+                        moment_sum(state, g.molecular_source)+g.molecular.counter))
+                    total, carrier = total+correction, carrier+correction
+                vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
+                potential_reference = g.vacuum_reference
+                if g.neutral_reference:
+                    total = total+torch.view_as_real(g.observer_proto)
+                    potential_reference = potential_reference-g.plane(g.observer_proto)
+                predicted = dict(fourier_potential=(carrier+regular)*g.ngrid,
+                    fourier_total_potential=total*g.ngrid,
+                    fourier_carrier_potential=g.expand_spectrum(fields[4])*g.ngrid,
+                    fourier_local_potential=regular*g.ngrid,
+                    vacuum_potential=vacuum, potential_reference=potential_reference)
+                if getattr(r, 'fixed_dft_observations', False):
+                    from .desmearing import observe_smoothed_fields
+                    predicted = observe_smoothed_fields(g, state, predicted)
+                if getattr(r, 'raw_decoder', None) is not None:
+                    predicted = r.raw_decoder(g, state, predicted)
+                key = 'smooth_fourier_potential' if getattr(function, 'apply_smearing', False) else 'fourier_potential'
+                spectrum = torch.where(active[...,None],predicted.get(key, predicted['fourier_potential'])/g.ngrid,0.)
                 return (spectrum.flatten(1),(result[1]+model.fermi_level_offset+geom.vacuum_reference)[:,None],
-                        (geom.plane(torch.view_as_complex(geom.expand_spectrum(fields[0]).contiguous()))+geom.vacuum_reference)[:,None])
+                        predicted['vacuum_potential'][:,None])
             baseline = predict(zero)
             columns = [[],[],[]]
             for i in range(size):

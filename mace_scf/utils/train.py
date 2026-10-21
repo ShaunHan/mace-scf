@@ -35,6 +35,69 @@ class _TrainingGrowthError(FloatingPointError):
     """Finite outlier requiring comparison on the same batch before rollback."""
 
 
+def _migrate_desmearing_checkpoint(value, state):
+    """Retain learned weights/Adam/EMA; replace only the obsolete live decoder.
+
+    The new model has already fitted its frozen map from training DFT labels.
+    The legacy coefficient tensor was one optimizer/EMA entry, not four entries.
+    Validate its ordering before removing that entry from the saved state.
+    """
+    from mace_scf.electrostatics.desmearing import FrozenSpectralDecoder
+    prefix = 'field_dependent_charges_map.raw_decoder.'
+    obsolete = prefix+'coefficients'
+    response = getattr(state.model, 'field_dependent_charges_map', None)
+    decoder = getattr(response, 'raw_decoder', None)
+    if not getattr(response, 'fixed_dft_observations', False):
+        return value, False
+    if decoder is not None and (not isinstance(decoder, FrozenSpectralDecoder)
+            or not bool((decoder.fitted | ~decoder.enabled).all())):
+        raise ValueError('Fit the frozen DFT map before migrating an old checkpoint')
+    expected = (torch.zeros(2, dtype=torch.bool) if decoder is None else decoder.enabled.cpu())
+    previous = value['model'].get(prefix+'enabled', torch.zeros(2, dtype=torch.bool)).cpu()
+    old_observer = not value['model'].get('field_dependent_charges_map._extra_state', {}).get('fixed_dft_observations', False)
+    if obsolete not in value['model'] and not old_observer and torch.equal(previous, expected):
+        return value, False
+    parameters = dict(state.model.named_parameters())
+    old_names = [key for key in value['model'] if key in parameters or key == obsolete]
+    if [name for name in old_names if name != obsolete] != list(parameters):
+        raise ValueError('Cannot safely identify legacy decoder ordering in checkpoint EMA')
+    value = deepcopy(value)
+    ema = value.get('ema')
+    if obsolete in old_names and ema is not None:
+        for key in ('shadow_params', 'collected_params'):
+            if ema.get(key) is not None:
+                if len(ema[key]) != len(old_names):
+                    raise ValueError('Legacy EMA parameter count differs from model')
+                ema[key].pop(old_names.index(obsolete))
+    if obsolete in old_names:
+        group = next(g for g in value['optimizer']['param_groups'] if g.get('name') == 'electronic_references')
+        references = [name for name in old_names if name.startswith('field_dependent_charges_map.')
+                      and not (name.endswith('weight') and value['model'][name].ndim >= 2)]
+        if len(group['params']) != len(references):
+            raise ValueError('Legacy electronic-reference optimizer ordering is ambiguous')
+        removed = group['params'].pop(references.index(obsolete))
+        value['optimizer']['state'].pop(removed, None)
+    requested = state.optimizer.param_groups
+    if len(requested) != len(value['optimizer']['param_groups']):
+        raise ValueError('Optimizer groups changed beyond the frozen decoder conversion')
+    for saved, current in zip(value['optimizer']['param_groups'], requested):
+        if saved.get('name') != current.get('name') or len(saved['params']) != len(current['params']):
+            raise ValueError('Optimizer ownership differs beyond the frozen decoder conversion')
+        for index, parameter in zip(saved['params'], current['params']):
+            moment = value['optimizer']['state'].get(index, {}).get('exp_avg')
+            if moment is not None and moment.shape != parameter.shape:
+                raise ValueError('Saved Adam moment shape differs during decoder conversion')
+    value['model'] = {key: tensor for key, tensor in value['model'].items() if not key.startswith(prefix)}
+    if decoder is not None:
+        value['model'].update({prefix+key: tensor.detach().clone() for key, tensor in decoder.state_dict().items()})
+    value['model']['field_dependent_charges_map._extra_state']['fixed_dft_observations'] = True
+    value['model']['field_dependent_charges_map._extra_state']['raw_vacuum_boundary'] = True
+    value.pop('training_guard', None)
+    logging.info('Applied the requested frozen-DFT output mapping; retained other model, Adam and EMA values. '
+                 'The changed objective/observer will receive a new validation baseline.')
+    return value, True
+
+
 class CheckpointHandler(NativeCheckpointHandler):
     """Separate resumable raw parameters from deployable EMA parameters."""
     def __init__(self, *args, ema=None, deployment=False, **kwargs):
@@ -157,6 +220,7 @@ class CheckpointHandler(NativeCheckpointHandler):
                                  + ', '.join(mismatched[:6])
                                  + '. Resume with the original architecture, or start a fresh run. '
                                    'Resizing learned receivers after optimizer construction would leave stale Adam/EMA owners.')
+        value, self._desmearing_migrated = _migrate_desmearing_checkpoint(value, state)
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         if value.get('training_guard') is not None:
             state.optimizer._training_guard = value['training_guard']
@@ -382,8 +446,10 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     upgrade = (decoder is not None and bool(decoder.enabled[1])
                and not getattr(response, 'raw_vacuum_boundary', False))
     changed = changed or upgrade
+    migrated = getattr(handler, '_desmearing_migrated', False)
+    changed = changed or migrated
     old_best = getattr(handler, 'best_loss', float('inf'))
-    verify = (epoch is not None and old_definition and np.isfinite(old_best)
+    verify = (not migrated and epoch is not None and old_definition and np.isfinite(old_best)
               and not getattr(handler, '_resume_verified', False))
     if epoch is None or (not changed and not verify):
         if upgrade:

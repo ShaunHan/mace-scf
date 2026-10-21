@@ -242,6 +242,21 @@ def build_model(
         model = model.to(args.device)
         if getattr(response, 'coupled', False):
             from mace_scf.utils.foundation import condition_readouts
+            if getattr(args, 'restart_latest', False):
+                # Initialization needs the frozen observer, but must not refit
+                # an already saved map before the main checkpoint load.
+                from .train import CheckpointHandler
+                from mace_scf.electrostatics.desmearing import configure_desmearing, restore_desmearing
+                configure_desmearing(response, args.train_schedule[0]['loss'])
+                tag = mace.tools.get_tag(name=args.name, seed=args.seed)
+                for stage in reversed(args.train_schedule):
+                    handler = CheckpointHandler(directory=args.checkpoints_dir,
+                        tag=tag+'_'+stage['name'], keep=args.keep_checkpoints)
+                    path = handler.progress_path if handler.progress_path.exists() else handler.io._get_latest_checkpoint_path(swa=False)
+                    if path is not None:
+                        saved = torch.load(path, map_location='cpu', weights_only=False)
+                        restore_desmearing(response, saved['model'])
+                        break
             condition_readouts(model, train_loader, args.device,
                 fit_forces=args.train_schedule[0]['loss'].get('forces',{}).get('weight',0)>0)
             initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])

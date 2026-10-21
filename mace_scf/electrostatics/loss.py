@@ -300,13 +300,15 @@ def vacuum_reference_weights(ref, reference):
 
 
 class WeightedFourierDensity(torch.nn.Module):
-    """Raw, smeared or farfield density loss with optional raw reconstruction."""
-    def __init__(self, reference='smeared', desmearing=None, reference_width=None, **legacy):
+    """Exactly one density reference; the frozen output map adds no losses."""
+    def __init__(self, reference=None, desmearing=None, reference_width=None, **legacy):
         super().__init__()
         unknown = set(legacy)-{'apply_smearing'}
         if unknown:
             raise TypeError(f'Unknown density loss options: {sorted(unknown)}')
-        options = dict(legacy, reference=reference)
+        options = dict(legacy)
+        if reference is not None:
+            options['reference'] = reference
         if desmearing is not None:
             options['desmearing'] = desmearing
         self.reference, self.desmearing, self.apply_smearing = field_loss_options(options)
@@ -339,27 +341,23 @@ class WeightedFourierDensity(torch.nn.Module):
     def forward(self, ref, pred):
         pred=self.reference_fields(pred)
         key = 'fourier_farfield_density' if self.reference == 'farfield' else 'fourier_density'
+        if self.apply_smearing and 'smooth_'+key in pred:
+            pred = dict(pred, **{key: pred['smooth_'+key]})
         square = spectral_errors(ref, pred, key, self.apply_smearing)/1.e-6
-        if self.desmearing and 'smooth_'+key in pred:
-            smooth = dict(pred, **{key: pred['smooth_'+key]})
-            # The smooth latent objective and raw reconstruction train jointly.
-            # The raw term has relative weight .001; the configured outer
-            # density weight multiplies both. RMSE diagnostics report each
-            # field separately, without this loss-balancing factor.
-            square = (spectral_errors(ref, smooth, key, True)
-                      +.001*spectral_errors(ref, pred, 'fourier_density'))/1.e-6
         weights = ref.weight*ref.fourier_density_weight
         return (square*weights).sum()/weights.sum().clamp_min(1.e-30)
 
 
 class WeightedFourierPotential(torch.nn.Module):
     """Real-space MSE of the retained potential after uniform-offset alignment."""
-    def __init__(self, desmearing=None, reference='smeared', **legacy):
+    def __init__(self, desmearing=None, reference=None, **legacy):
         super().__init__()
         unknown = set(legacy)-{'apply_smearing'}
         if unknown:
             raise TypeError(f'Unknown potential loss options: {sorted(unknown)}')
-        options = dict(legacy, reference=reference)
+        options = dict(legacy)
+        if reference is not None:
+            options['reference'] = reference
         if desmearing is not None:
             options['desmearing'] = desmearing
         self.reference, self.desmearing, self.apply_smearing = field_loss_options(options, density=False)
@@ -369,10 +367,9 @@ class WeightedFourierPotential(torch.nn.Module):
 
     def statistics(self, ref, pred):
         weights = ref.weight*ref.fourier_potential_weight
+        if self.apply_smearing and 'smooth_fourier_potential' in pred:
+            pred = dict(pred, fourier_potential=pred['smooth_fourier_potential'])
         square = spectral_errors(ref, pred, 'fourier_potential', self.apply_smearing)
-        if self.desmearing and 'smooth_fourier_potential' in pred:
-            smooth = dict(pred, fourier_potential=pred['smooth_fourier_potential'])
-            square = square+spectral_errors(ref, smooth, 'fourier_potential', True)
         return {'spatial': ((square*weights).sum(), weights.sum())}
 
     def forward(self, ref, pred):
@@ -511,20 +508,13 @@ class WeightedLoss(torch.nn.Module):
             if name in ('fourier_density', 'fourier_potential'):
                 # Store the resolved target convention so a resumed objective
                 # remains unambiguous when defaults evolve.
-                self.definition[name]['apply_smearing'] = self.loss_fns[name].apply_smearing
+                self.definition[name].pop('apply_smearing', None)
                 self.definition[name]['reference'] = self.loss_fns[name].reference
                 self.definition[name]['desmearing'] = self.loss_fns[name].desmearing
 
     @classmethod
     def from_checkpoint(cls, definition):
-        """Reconstruct the exact loss recorded before target smoothing was explicit."""
-        definition = deepcopy(definition)
-        for name in ('fourier_density', 'fourier_potential'):
-            if name in definition:
-                if not isinstance(definition[name], dict):
-                    definition[name] = {'weight':definition[name]}
-                if definition[name].get('reference') not in ('raw', 'smeared'):
-                    definition[name].setdefault('apply_smearing', False)
+        """Read saved options; explicit reference always defines the objective."""
         return cls(definition)
         
     def normalizers(self, ref: Batch):
@@ -649,6 +639,6 @@ class WeightedLoss(torch.nn.Module):
         for name in self.loss_fns:
             string += f"{name}_weight={self.loss_weights[name]}, "
             function = self.loss_fns[name]
-            if isinstance(function, (WeightedFourierDensity, RelativeScalarLoss)):
+            if isinstance(function, (WeightedFourierDensity, WeightedFourierPotential, RelativeScalarLoss)):
                 string += f'{name} options: {function.extra_repr()}, '
         return string + ")"

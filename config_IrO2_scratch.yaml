@@ -67,7 +67,10 @@ log_dir: logs
 results_dir: results
 model_dir: models
 refit_fermi_readout: true
-fixed_point_update_config: "{'type': 'CoupledResponse', 'include_point_receiver': False, 'source_basis': 'gaussian'}"
+fixed_point_update_config:
+  type: CoupledResponse
+  include_point_receiver: false
+  source_basis: gaussian
 train_schedule:
   0:
     name: stage1
@@ -81,7 +84,7 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-        desmearing: false
+        desmearing: true
       fourier_potential:
         weight: 100
         desmearing: true
@@ -115,7 +118,7 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: false
+        desmearing: true
       fourier_potential:
         weight: 100
         desmearing: true
@@ -149,7 +152,7 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: false
+        desmearing: true
       fourier_potential:
         weight: 100
         desmearing: true
@@ -183,7 +186,7 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: false
+        desmearing: true
       fourier_potential:
         weight: 100
         desmearing: true
