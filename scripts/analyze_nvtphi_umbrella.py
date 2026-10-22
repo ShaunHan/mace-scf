@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
-"""Conditional 1D WHAM profiles, overlap and block uncertainty for ONE replica.
+"""Conditional O-O PMFs with WHAM. Edit the settings below, then run.
 
-python scripts/analyse_nvtphi_umbrella.py umbrella_volt/umbrella_8/replica_0
-
-Forward/reverse profiles are kept separate. Different pairs/surface compositions
-are never pooled. A PMF along O-O distance is not automatically an OER barrier.
-Requires NumPy and SciPy; Matplotlib is optional for the preview figure.
+Each folder and sweep is analyzed separately; the profile is not a full OER barrier.
 """
-import argparse
 import csv
 import json
 from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize
 from scipy.special import logsumexp
+
+# ------------------------------ user settings ------------------------------ #
+RUN_FOLDERS = [f'umbrella_volt/umbrella_{i}/replica_0' for i in range(10, 20)]
+BIN_WIDTH = 0.02                           # O-O distance histogram width in A.
+BOOTSTRAPS = 50                            # Block resamples for PMF uncertainty.
+# -------------------------------------------------------------------------- #
 
 KB_EV_K = 8.617333262145e-5
 
@@ -69,7 +70,7 @@ def resample_blocks(values, block, rng):
     return values[ids.ravel()[:n]]
 
 
-def analyse(folder, bin_width=.02, bootstraps=50):
+def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
     folder = Path(folder)
     cfg = json.loads((folder/'run.json').read_text())
     if cfg.get('method') != 'fixed_window_OO':
@@ -197,11 +198,8 @@ def analyse(folder, bin_width=.02, bootstraps=50):
 
 
 if __name__=='__main__':
-    p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('folder',type=Path)
-    p.add_argument('--bin-width',type=float,default=.02)
-    p.add_argument('--bootstrap',type=int,default=50)
-    a=p.parse_args()
-    if a.bin_width<=0 or a.bootstrap<0:
-        p.error('Positive bin width and nonnegative bootstrap count required')
-    analyse(a.folder,a.bin_width,a.bootstrap)
+    if BIN_WIDTH <= 0 or not isinstance(BOOTSTRAPS, int) or BOOTSTRAPS < 0:
+        raise ValueError('BIN_WIDTH must be positive and BOOTSTRAPS a nonnegative integer')
+    for folder in RUN_FOLDERS:
+        print(f'Analyzing {folder}')
+        analyze(folder)

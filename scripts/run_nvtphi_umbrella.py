@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Fixed-window O-O sampling with MACE-VOLT; see README.txt before interpreting a PMF.
+"""Fixed-window O-O sampling with MACE-VOLT. Edit the settings below, then run.
 
-python scripts/run_nvtphi_umbrella.py --indices 8 20 --workers 2
-python scripts/run_nvtphi_umbrella.py --indices 8 20 --dry-run
-
-The driver controls electrode voltage, not proton chemical potential (pH).
-Random pairs define candidate pathways, not a complete OER mechanism.
+Voltage is controlled; pH is not imposed. Each selected pair defines one pathway.
 """
-import argparse
 import csv
 import hashlib
 import json
@@ -279,21 +274,21 @@ def last_csv(path):
         return reader.fieldnames, row
 
 
-def simulate(source, index, replica, model_file, model_sha, directory, calculator=None, max_steps=None):
-    """max_steps/calculator support small local tests; production supplies neither."""
-    from mace_scf.md import NVTPhiLangevin
+def simulate(source, index, replica, model_file, model_sha, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     lock = directory/'running.lock'
     fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.write(fd, f'{os.getpid()}\n'.encode()); os.close(fd)
     try:
-        return _simulate(source, index, replica, model_file, model_sha, directory, calculator, max_steps, NVTPhiLangevin)
+        return _simulate(source, index, replica, model_file, model_sha, directory)
     finally:
         lock.unlink(missing_ok=True)
 
 
-def _simulate(source, index, replica, model_file, model_sha, directory, calculator, max_steps, dynamics_class):
+def _simulate(source, index, replica, model_file, model_sha, directory):
+    from mace_scf.md import NVTPhiLangevin
+
     global _CALCULATOR
     atoms, fixed, environments, candidates = prepare_frame(source, index)
     stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
@@ -327,11 +322,9 @@ def _simulate(source, index, replica, model_file, model_sha, directory, calculat
         write_json(cfg_path, cfg)
     physical = physical_constraints(atoms, fixed)
     atoms.set_constraint(physical)
-    if calculator is None:
-        if _CALCULATOR is None:
-            _CALCULATOR = make_calculator(model_file)
-        calculator = _CALCULATOR
-    atoms.calc = calculator
+    if _CALCULATOR is None:
+        _CALCULATOR = make_calculator(model_file)
+    atoms.calc = _CALCULATOR
     atoms.calc.reset()
     if state is None:
         MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, force_temp=True, rng=rng)
@@ -350,7 +343,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory, calculat
     bias = DistanceUmbrella(atoms.info['oxygen_pair'], stages[stage_id]['center_A'], UMBRELLA_K)
     atoms.set_constraint([bias]+physical)
     with ExitStack() as stack:
-        dyn = stack.enter_context(dynamics_class(
+        dyn = stack.enter_context(NVTPhiLangevin(
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
             friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE,
             C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
@@ -417,19 +410,12 @@ def _simulate(source, index, replica, model_file, model_sha, directory, calculat
             bias.center = stage['center_A']       # Changed only BETWEEN complete integration steps.
             segment_start = dyn.nsteps-done
             remaining = stage['steps']-done
-            if max_steps is not None:
-                remaining = min(remaining, max_steps-(dyn.nsteps-start))
             if remaining > 0:
                 print(f'{index}/{replica} {stage["direction"]} w{stage["window"]} '
                       f'{stage["phase"]}: center={bias.center:.3f} A, {remaining} steps', flush=True)
                 dyn.run(remaining); record()
-            done = dyn.nsteps-segment_start
-            if done < stage['steps']:
-                break
             stage_id += 1; done = 0
-            if max_steps is not None and dyn.nsteps-start >= max_steps:
-                break
-        print(f'Saved step {dyn.nsteps}; '+('complete' if stage_id == len(stages) else 'resumable'), flush=True)
+        print(f'Saved step {dyn.nsteps}; complete', flush=True)
 
 
 def run_one(source, index, replica, model_file, model_sha, directory):
@@ -443,50 +429,41 @@ def run_one(source, index, replica, model_file, model_sha, directory):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--indices', nargs='+', type=int, default=RUN_INDEXES)
-    parser.add_argument('--workers', type=int, default=MAX_WORKERS)
-    parser.add_argument('--replicas', type=int, default=REPLICAS)
-    parser.add_argument('--atoms', default=ATOMS_FILE)
-    parser.add_argument('--model', default=MODEL_FILE)
-    parser.add_argument('--root', type=Path, default=Path(OUTPUT_ROOT))
-    parser.add_argument('--dry-run', action='store_true', help='Inspect pairs/budgets without loading a model or creating runs')
-    args = parser.parse_args()
-    if not args.indices or min(args.indices)<0 or len(set(args.indices))!=len(args.indices) or min(args.workers,args.replicas)<1:
-        parser.error('Unique nonnegative indices and positive worker/replica counts are required')
-    if min(OO_MIN, WINDOW_SPACING, UMBRELLA_K, TEMPERATURE_K, TIMESTEP_FS, GAUSSIAN_WIDTH,
-           CAPACITANCE, TAUPHI_FS, FRICTION_PER_FS, CHARGE_PROBE_E)>0 and all(
-           isinstance(x,int) and x>0 for x in (INITIAL_EQUIL_STEPS,EQUIL_STEPS,SAMPLE_STEPS,LOGINTERVAL)):
-        pass
-    else:
-        parser.error('Physical scales and stage/output step counts must be positive')
-    wanted, frames = set(args.indices), {}
-    for index, atoms in enumerate(iread(args.atoms, index=':')):
+    if not RUN_INDEXES or any(not isinstance(i, int) or i < 0 for i in RUN_INDEXES):
+        raise ValueError('RUN_INDEXES must contain nonnegative integers')
+    if len(set(RUN_INDEXES)) != len(RUN_INDEXES):
+        raise ValueError('RUN_INDEXES must not contain duplicates')
+    if any(not isinstance(n, int) or n <= 0 for n in
+           (MAX_WORKERS, REPLICAS, INITIAL_EQUIL_STEPS, EQUIL_STEPS, SAMPLE_STEPS, LOGINTERVAL)):
+        raise ValueError('Worker, replica and step counts must be positive integers')
+    if min(OO_MIN, WINDOW_SPACING, UMBRELLA_K, TEMPERATURE_K, TIMESTEP_FS,
+           GAUSSIAN_WIDTH, CAPACITANCE, TAUPHI_FS, FRICTION_PER_FS, CHARGE_PROBE_E) <= 0:
+        raise ValueError('Physical scales must be positive')
+    wanted, frames = set(RUN_INDEXES), {}
+    for index, atoms in enumerate(iread(ATOMS_FILE, index=':')):
         if index in wanted:
             frames[index] = atoms
         if index >= max(wanted):
             break
     if set(frames) != wanted:
-        parser.error(f'Missing source indexes: {sorted(wanted-set(frames))}')
-    for index in args.indices:
+        raise ValueError(f'Missing source indexes: {sorted(wanted-set(frames))}')
+    for index in RUN_INDEXES:
         atoms, _, envs, n = prepare_frame(frames[index], index)
         stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
         print(f'{index}: pair {atoms.info["oxygen_pair"]}, {[e["kind"] for e in envs]}, '
               f'{n} eligible; {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps/replica', flush=True)
-    if args.dry_run:
-        return
-    model = Path(args.model).resolve(strict=True)
+    model = Path(MODEL_FILE).resolve(strict=True)
     hasher = hashlib.sha256()
     with model.open('rb') as f:
         for chunk in iter(lambda:f.read(4*1024*1024), b''):
             hasher.update(chunk)
     model_sha = hasher.hexdigest()
     failures = []
-    with ProcessPoolExecutor(max_workers=min(args.workers,len(wanted)*args.replicas),
+    with ProcessPoolExecutor(max_workers=min(MAX_WORKERS,len(wanted)*REPLICAS),
                              mp_context=mp.get_context('spawn')) as pool:
         jobs = {pool.submit(run_one,frames[i],i,rep,str(model),model_sha,
-                            str((args.root/f'umbrella_{i}'/f'replica_{rep}').resolve())):(i,rep)
-                for rep in range(args.replicas) for i in args.indices}
+                            str((Path(OUTPUT_ROOT)/f'umbrella_{i}'/f'replica_{rep}').resolve())):(i,rep)
+                for rep in range(REPLICAS) for i in RUN_INDEXES}
         for job in as_completed(jobs):
             label = jobs[job]
             try:
