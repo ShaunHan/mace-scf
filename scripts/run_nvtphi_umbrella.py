@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+"""Fixed-window O-O sampling with MACE-VOLT; see README.txt before interpreting a PMF.
+
+python scripts/run_nvtphi_umbrella.py --indices 8 20 --workers 2
+python scripts/run_nvtphi_umbrella.py --indices 8 20 --dry-run
+
+The driver controls electrode voltage, not proton chemical potential (pH).
+Random pairs define candidate pathways, not a complete OER mechanism.
+"""
+import argparse
 import csv
 import hashlib
 import json
@@ -10,14 +19,13 @@ from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from itertools import combinations
 from pathlib import Path
 
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0].strip()
-for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
-    os.environ[name] = '1'
-
+for _name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
+    os.environ[_name] = '1'
+# Respect the scheduler's CUDA_VISIBLE_DEVICES; all workers use DEVICE below.
 import numpy as np
 from ase import units
 from ase.constraints import FixAtoms, FixConstraint, Hookean
-from ase.io import read
+from ase.io import iread
 from ase.io.trajectory import Trajectory
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
@@ -25,20 +33,28 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v383.model'
 RUN_INDEXES = list(range(10, 20))
-OXYGEN_PAIRS = {}  # Optional {frame_index: (oxygen_id, oxygen_id)}; ASE zero-based IDs.
-DEVICE = 'cuda:0'
-TARGET_POTENTIAL = 1.60 + 4.44  # V
-VACUUM_POTENTIAL_KEY, FERMI_LEVEL_KEY = 'vacuum_potential', 'fermi_level'
-COUNTER_SHEET_POINT, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0  # Angstrom; point on the Gaussian sheet.
-CAPACITANCE, TAUPHI_FS = 0.01, 10.0
+OUTPUT_ROOT = 'umbrella_volt'                 # Fresh folders; do not reuse old umbrella_* runs.
+MAX_WORKERS, REPLICAS = 2, 1                 # Two processes share one visible GPU.
+DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
+SCF_STEPS = None                            # None uses the exported model's deployment budget.
+OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
+INITIAL_U_SHE = {}                          # Optional independently known initial potentials.
+TARGET_U_SHE, SHE_ABSOLUTE_V = 1.60, 4.44    # Same explicit reference convention as the old run.
+COUNTER_SHEET_POINT, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0
+CAPACITANCE, TAUPHI_FS = 0.01, 100.0         # e/V for the whole cell; fs. Not an areal capacitance.
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
-PAIR_CUTOFF = 3.0  # Initial minimum-image distance, Angstrom.
+PAIR_CUTOFF, OO_MIN, WINDOW_SPACING = 3.0, 1.20, 0.05
+UMBRELLA_K, REACTANT_MARGIN = 20.0, 0.10     # eV/A^2; A. Center is not an enforced bond length.
+REQUIRE_ADSORBATE = True                    # Require an exposed, singly Ir-bound O with <=1 H.
+REVERSE_SWEEP = False                       # Enable a separate return sweep after inspecting the forward pilot.
 TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300., 0.5, 0.01
-OO_MIN, WINDOW_SPACING, UMBRELLA_K = 1.20, 0.05, 20.0  # A, A, eV/A^2.
-WINDOW_STEPS, EQUIL_STEPS = 10000, 2000  # Equilibrate separately in EACH fixed window.
-RELEASE_STEPS = 10000  # Final 5 ps without the O-O restraint; excluded from the PMF.
-LOGINTERVAL, SEED, SCF_STEPS = 10, 7777, 50
+INITIAL_EQUIL_STEPS = 10000                 # 5 ps at the initial distance and target voltage.
+EQUIL_STEPS, SAMPLE_STEPS = 4000, 20000      # 2 ps + 10 ps PER fixed window; starting budgets.
+LOGINTERVAL, SEED = 20, 7777                # 10 fs output; saved states allow continuation.
+MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1000., 100.
+CHECK_CHARGE_RESPONSE, CHARGE_PROBE_E = True, 0.02  # Three inexpensive frozen-geometry calls.
 # -------------------------------------------------------------------------- #
+_CALCULATOR = None
 
 
 def scalar(value):
@@ -49,85 +65,131 @@ def scalar(value):
 
 
 def jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
     return np.asarray(value).tolist()
 
 
-def oxygen_pair(atoms, index):
-    """Uniform random pair of mobile interfacial O atoms, without an H-count filter."""
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=jsonable).encode()).hexdigest()
+
+
+def write_json(path, value):
+    path = Path(path)
+    temporary = path.with_suffix('.tmp')
+    with temporary.open('w', encoding='utf-8') as f:
+        json.dump(value, f, indent=2, default=jsonable, allow_nan=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temporary, path)
+
+
+def settings():
+    names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_U_SHE SHE_ABSOLUTE_V '
+             'COUNTER_SHEET_POINT GAUSSIAN_WIDTH CAPACITANCE TAUPHI_FS Z_FIXED '
+             'Z_REPULSIVE WALL_K PAIR_CUTOFF OO_MIN WINDOW_SPACING UMBRELLA_K '
+             'REACTANT_MARGIN REQUIRE_ADSORBATE REVERSE_SWEEP TEMPERATURE_K '
+             'TIMESTEP_FS FRICTION_PER_FS INITIAL_EQUIL_STEPS EQUIL_STEPS SAMPLE_STEPS '
+             'LOGINTERVAL SEED MAX_TEMPERATURE_K MAX_FORCE_EV_A '
+             'CHECK_CHARGE_RESPONSE CHARGE_PROBE_E').split()
+    return {name: globals()[name] for name in names}
+
+
+def physical_constraints(atoms, fixed):
+    frozen = set(fixed)
+    return [FixAtoms(indices=fixed)] + [
+        Hookean(a1=i, a2=(0, 0, 1, -Z_REPULSIVE), k=WALL_K)
+        for i, atom in enumerate(atoms) if atom.symbol == 'O' and i not in frozen]
+
+
+def oxygen_environment(atoms, oxygen):
+    symbols = np.asarray(atoms.get_chemical_symbols())
+    ir, h = np.flatnonzero(symbols == 'Ir'), np.flatnonzero(symbols == 'H')
+    di, dh = atoms.get_distances(oxygen, ir, mic=True), atoms.get_distances(oxygen, h, mic=True)
+    n_ir, n_h = int(np.sum(di < 2.60)), int(np.sum(dh < 1.25))
+    above = float(atoms.positions[oxygen, 2] - atoms.positions[ir, 2].max())
+    # These are geometry-based selection labels, not a determination of chemical identity.
+    kind = ('water' if n_h >= 2 else 'lattice' if n_ir >= 3 or above <= .3
+            else 'adsorbate' if n_ir == 1 else 'surface_bridge' if n_ir == 2 else 'solution')
+    return dict(kind=kind, H_neighbors=n_h, Ir_neighbors=n_ir,
+                nearest_Ir_A=float(di.min()), height_above_Ir_A=above)
+
+
+def select_pair(atoms, index, fixed):
     symbols = np.asarray(atoms.get_chemical_symbols())
     ir = np.flatnonzero(symbols == 'Ir')
     if not len(ir):
-        raise ValueError('An Ir electrode is required to locate the interface')
+        raise ValueError('An Ir slab is required to locate this interface')
     top = atoms.positions[ir, 2].max()
-    ids = np.flatnonzero((symbols == 'O') & (atoms.positions[:, 2] >= Z_FIXED)
-                        & (atoms.positions[:, 2] > top-2.) & (atoms.positions[:, 2] < top+5.))
-    distances = atoms.get_all_distances(mic=True)
-    candidates = [p for p in combinations(ids.tolist(), 2)
-                  if OO_MIN < distances[p] <= PAIR_CUTOFF]
+    ids = [int(i) for i in np.flatnonzero((symbols == 'O') &
+           (atoms.positions[:, 2] > top-2.) & (atoms.positions[:, 2] < top+5.)) if i not in fixed]
+    environments = {i: oxygen_environment(atoms, i) for i in ids}
+    eligible = [p for p in combinations(ids, 2) if OO_MIN < atoms.get_distance(*p, mic=True) <= PAIR_CUTOFF]
     if index in OXYGEN_PAIRS:
         pair = tuple(sorted(OXYGEN_PAIRS[index]))
-        if pair not in candidates:
-            raise ValueError(f'Frame {index}: override is not an eligible interfacial O pair')
-        return pair
-    if not candidates:
-        raise ValueError(f'Frame {index}: no mobile interfacial O pair within {PAIR_CUTOFF} A')
-    rng = np.random.default_rng(np.random.SeedSequence([SEED, index, 1]))
-    return candidates[int(rng.integers(len(candidates)))]
-
-
-def physical_constraints(atoms, fixed_ids):
-    fixed = set(fixed_ids)
-    return [FixAtoms(indices=fixed_ids)] + [
-        Hookean(a1=i, a2=(0, 0, 1, -Z_REPULSIVE), k=WALL_K)
-        for i, a in enumerate(atoms) if a.symbol == 'O' and i not in fixed]
+        if pair not in eligible:
+            raise ValueError(f'{index}: override must be two mobile interfacial oxygens within PAIR_CUTOFF')
+    else:
+        eligible = [p for p in eligible if not REQUIRE_ADSORBATE or
+                    any(environments[o]['kind'] == 'adsorbate' for o in p)]
+        if not eligible:
+            raise ValueError(f'{index}: no eligible pair; inspect the interface or supply OXYGEN_PAIRS')
+        rng = np.random.default_rng(np.random.SeedSequence([SEED, index, 1]))
+        pair = eligible[int(rng.integers(len(eligible)))]
+    return list(pair), [environments[o] for o in pair], len(eligible)
 
 
 def prepare_frame(source, index):
     atoms, info = source.copy(), source.info
-    if not np.array_equal(atoms.pbc, [True, True, False]):
-        raise ValueError('Expected an xy-periodic slab with open z')
-    if not np.allclose(info['external_field'], 0.) or scalar(info['total_charge']) != 0.:
-        raise ValueError('The initial DFT reference must be neutral and at zero external field')
-    fermi_key = FERMI_LEVEL_KEY if FERMI_LEVEL_KEY in info else 'vasp_efermi'
-    vacuum, fermi = scalar(info[VACUUM_POTENTIAL_KEY]), scalar(info[fermi_key])
-    pair = oxygen_pair(atoms, index)
-    atoms.info = dict(vacuum_zfrac=scalar(info['vacuum_zfrac']),
-                      dipole_correction_zfrac=scalar(info['dipole_correction_zfrac']),
-                      dft_vacuum_potential=vacuum, dft_fermi_level=fermi,
-                      reference_potential=vacuum-fermi, source_index=index, oxygen_pair=list(pair),
-                      external_field=np.zeros(3), total_charge=0., counter_charge=0.,
-                      counter_charge_zfrac=float((np.asarray(COUNTER_SHEET_POINT) @ np.linalg.inv(atoms.cell.array))[2] % 1.),
-                      counter_charge_width=GAUSSIAN_WIDTH)
-    atoms.set_constraint(physical_constraints(atoms, np.flatnonzero(atoms.positions[:, 2] < Z_FIXED).tolist()))
-    return atoms
+    if not np.array_equal(atoms.pbc, [True, True, False]) or not np.allclose(atoms.cell.array[:2, 2], 0.):
+        raise ValueError('This driver expects an xy-periodic slab, open along Cartesian z')
+    fixed = set(np.flatnonzero(atoms.positions[:, 2] < Z_FIXED).tolist())
+    for constraint in atoms.constraints:
+        if not isinstance(constraint, FixAtoms):
+            raise ValueError('Input contains non-FixAtoms constraints; specify the physical restraints explicitly')
+        fixed.update(map(int, constraint.get_indices()))
+    pair, environments, candidates = select_pair(atoms, index, fixed)
+    charge = scalar(info.get('total_charge', 0.))
+    fraction = float((np.asarray(COUNTER_SHEET_POINT) @ np.linalg.inv(atoms.cell.array))[2] % 1.)
+    if charge != 0.:
+        if not np.isclose(scalar(info.get('counter_charge', np.nan)), -charge):
+            raise ValueError('A charged starting reference must already have counter_charge = -total_charge')
+        if ('counter_charge_center' in info or not np.isclose(scalar(info.get('counter_charge_zfrac', np.nan)), fraction)
+                or not np.isclose(scalar(info.get('counter_charge_width', np.nan)), GAUSSIAN_WIDTH)):
+            raise ValueError('The charged DFT reference and configured Gaussian sheet must have identical geometry')
+    if index in INITIAL_U_SHE:
+        reference = scalar(INITIAL_U_SHE[index])
+    else:
+        fermi = scalar(info['fermi_level'] if 'fermi_level' in info else info['vasp_efermi'])
+        reference = scalar(info['vacuum_potential']) - fermi - SHE_ABSOLUTE_V
+    # A fractional coordinate selects a sheet; counter_charge_center would select a 3D Gaussian.
+    atoms.info = dict(source_index=index, oxygen_pair=pair, reference_potential=reference,
+                      total_charge=charge, counter_charge=-charge,
+                      external_field=np.asarray(info.get('external_field', np.zeros(3)), dtype=float),
+                      counter_charge_zfrac=fraction, counter_charge_width=GAUSSIAN_WIDTH,
+                      vacuum_zfrac=scalar(info['vacuum_zfrac']),
+                      dipole_correction_zfrac=scalar(info['dipole_correction_zfrac']))
+    atoms.calc = None
+    fixed = sorted(fixed)
+    atoms.set_constraint(physical_constraints(atoms, fixed))
+    return atoms, fixed, environments, candidates
 
 
 class DistanceUmbrella(FixConstraint):
-    """V = k/2 (d-center)^2; the center is fixed throughout each sampling window."""
-    def __init__(self, dyn, protocol):
-        self.dyn, self.protocol = dyn, protocol
-        self.pair = dyn.atoms.info['oxygen_pair']
-
-    def schedule(self):
-        step = self.dyn.nsteps
-        window, offset = divmod(step, WINDOW_STEPS)
-        if window >= len(self.protocol['centers_A']):
-            return window, 'release', None
-        phase = 'equil' if offset < EQUIL_STEPS else 'sample'
-        return window, phase, self.protocol['centers_A'][window]
+    """Static V = k/2 (minimum-image distance - center)^2 during every MD call."""
+    def __init__(self, pair, center, stiffness):
+        self.pair, self.center, self.k = list(pair), float(center), float(stiffness)
 
     def evaluate(self, atoms):
         vector = atoms.get_distance(*self.pair, mic=True, vector=True)
-        distance = np.linalg.norm(vector)
+        distance = float(np.linalg.norm(vector))
         if not np.isfinite(distance) or distance < 1e-8:
-            raise ValueError('The O-O distance is invalid')
-        center = self.schedule()[2]
-        radial = 0. if center is None else -UMBRELLA_K*(distance-center)
+            raise ValueError('Invalid O-O distance')
+        radial = -self.k * (distance-self.center)
         forces = np.zeros((len(atoms), 3))
-        forces[self.pair[1]] = radial*vector/distance
+        forces[self.pair[1]] = radial * vector / distance
         forces[self.pair[0]] = -forces[self.pair[1]]
-        energy = 0. if center is None else .5*UMBRELLA_K*(distance-center)**2
-        return forces, energy, float(distance), float(radial)
+        return forces, .5*self.k*(distance-self.center)**2, distance, radial
 
     def adjust_forces(self, atoms, forces):
         forces += self.evaluate(atoms)[0]
@@ -141,271 +203,296 @@ class DistanceUmbrella(FixConstraint):
     def get_removed_dof(self, atoms):
         return 0
 
-    def __deepcopy__(self, memo):
-        return self
+
+def make_stages(distance):
+    high = distance + REACTANT_MARGIN
+    n = int(np.ceil((high-OO_MIN)/WINDOW_SPACING)) + 1
+    centers = np.linspace(high, OO_MIN, n).tolist()
+    stages = [dict(direction='initial', window=-1, phase='equil', center_A=distance,
+                   steps=INITIAL_EQUIL_STEPS)]
+    sweeps = [('forward', centers)] + ([('reverse', centers[::-1])] if REVERSE_SWEEP else [])
+    for direction, sweep in sweeps:
+        for window, center in enumerate(sweep):
+            for phase, steps in [('equil', EQUIL_STEPS), ('sample', SAMPLE_STEPS)]:
+                stages.append(dict(direction=direction, window=window, phase=phase,
+                                   center_A=center, steps=steps))
+    return stages
 
 
-def make_calculator(model_file, enable_cueq=True):
+def make_calculator(model_file):
     import torch
     from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
-    from mace_scf.utils.foundation import accelerate_backbone
-    if torch.device(DEVICE).type == 'cuda':
-        torch.cuda.set_device(DEVICE)
-        print(f'GPU: {torch.cuda.get_device_name(DEVICE)}', flush=True)
-    calc = MACEFixedPointSCF(
-        model_path=model_file, device=DEVICE, pbc_handling='slab', external_field_key='external_field',
-        total_charge_key='total_charge', counter_charge_width=GAUSSIAN_WIDTH, scf_restart=False,
-        scf_options=dict(num_scf_steps=SCF_STEPS, constant_charge=True, use_autograd_forces=True,
-                         initial_density='local_guess', initial_fermi_level='zero'),
-        ignore_nonconverged=True)
-    if enable_cueq:
+    torch.set_num_threads(1)
+    options = dict(constant_charge=True, use_autograd_forces=True,
+                   initial_density='local_guess', initial_fermi_level='zero')
+    if SCF_STEPS is not None:
+        options['num_scf_steps'] = int(SCF_STEPS)
+    calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64',
+                            pbc_handling='slab', scf_options=options, scf_restart=False,
+                            ignore_nonconverged=None, use_compile=False,
+                            counter_charge_width=GAUSSIAN_WIDTH)
+    heads = list(getattr(calc.model, 'heads', [calc.head]))
+    head = HEAD or (heads[0] if len(heads) == 1 else next((h for h in heads if h.lower() == 'default'), None))
+    if head not in heads:
+        raise ValueError(f'Set HEAD explicitly to the electrochemistry head; model heads are {heads}')
+    calc.head = head
+    if ENABLE_CUEQ:
+        from mace_scf.utils.foundation import accelerate_backbone
         accelerate_backbone(calc.model, DEVICE)
-    calc.model.field_dependent_charges_map.deployment_mode = 'unroll_scf'
     calc.model.eval().requires_grad_(False)
-    calc.enable_cueq = enable_cueq
-    return calc
+    print(f'head={head}; SCF={calc.scf_options.num_scf_steps}; '
+          f'deployment={getattr(calc.model.field_dependent_charges_map, "deployment_mode", "implicit")}', flush=True)
+    return calc                         # Do not change the fitted decoder, mixing or solver mode.
 
 
-def settings():
-    names = ('TARGET_POTENTIAL', 'VACUUM_POTENTIAL_KEY', 'FERMI_LEVEL_KEY', 'COUNTER_SHEET_POINT',
-             'GAUSSIAN_WIDTH', 'CAPACITANCE', 'TAUPHI_FS', 'Z_REPULSIVE', 'WALL_K',
-             'TEMPERATURE_K', 'TIMESTEP_FS', 'FRICTION_PER_FS', 'OO_MIN', 'WINDOW_SPACING',
-             'UMBRELLA_K', 'WINDOW_STEPS', 'EQUIL_STEPS', 'RELEASE_STEPS', 'SCF_STEPS', 'LOGINTERVAL')
-    return {k: globals()[k] for k in names}
+def charge_probe(atoms):
+    """A local diagnostic, not proof of energy/voltage conjugacy over a trajectory."""
+    q = scalar(atoms.info['total_charge'])
+    data = []
+    try:
+        for dq in (-CHARGE_PROBE_E, 0., CHARGE_PROBE_E):
+            atoms.info.update(total_charge=q+dq, counter_charge=-q-dq)
+            atoms.calc.reset()
+            energy = atoms.get_potential_energy(apply_constraint=False)
+            r = atoms.calc.results
+            data.append([energy, scalar(r['vacuum_potential'])-scalar(r['fermi_level'])])
+    finally:
+        atoms.info.update(total_charge=q, counter_charge=-q)
+        atoms.calc.reset()
+    derivative, slope = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
+    return dict(charge_e=q, dE_dQ_eV_per_e=float(derivative), model_WF_eV=data[1][1],
+                dWF_dQ_V_per_e=float(slope), E_curvature_eV_per_e2=float(
+                    (data[2][0]+data[0][0]-2*data[1][0])/CHARGE_PROBE_E**2),
+                note='Fixed geometry and counter_charge=-Q; reference/gauge and consistency across geometries still need validation.')
 
 
-def table(path):
-    """Read the last complete row and column order before opening an append handle."""
-    if not path.exists() or path.stat().st_size == 0:
+def last_csv(path):
+    if not path.exists():
         return None, None
-    with path.open() as stream:
-        reader = csv.DictReader(stream)
-        fields, row = reader.fieldnames, None
-        previous = -1
+    with path.open(newline='') as f:
+        reader = csv.DictReader(f)
+        previous, row = -1, None
         for row in reader:
             if None in row or None in row.values() or int(row['step']) <= previous:
-                raise ValueError(f'{path}: incomplete or nonmonotonic output; preserved for recovery')
+                raise ValueError('Incomplete/nonmonotonic CSV; preserve it and recover before resuming')
             previous = int(row['step'])
-    return fields, row
+        return reader.fieldnames, row
 
 
-def simulate(atoms, model_file, max_steps=None):
-    """max_steps is used by validation; normal runs complete the saved protocol."""
-    import torch
+def simulate(source, index, replica, model_file, model_sha, directory, calculator=None, max_steps=None):
+    """max_steps/calculator support small local tests; production supplies neither."""
     from mace_scf.md import NVTPhiLangevin
-    from mace_scf.md.logger import NVTPhiMDLogger
-    torch.set_num_threads(1)
-    restart = atoms.info.pop('restart_state', None)
-    saved_record = atoms.info.pop('md_record', None)
-    start = int(atoms.info['step']) if restart else 0
-    index, pair = atoms.info['source_index'], atoms.info['oxygen_pair']
-    physical = atoms.constraints.copy()
-    digest = hashlib.sha256(Path(model_file).read_bytes()).hexdigest()
-    cfg_path = Path('run.json')
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    lock = directory/'running.lock'
+    fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, f'{os.getpid()}\n'.encode()); os.close(fd)
+    try:
+        return _simulate(source, index, replica, model_file, model_sha, directory, calculator, max_steps, NVTPhiLangevin)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def _simulate(source, index, replica, model_file, model_sha, directory, calculator, max_steps, dynamics_class):
+    global _CALCULATOR
+    atoms, fixed, environments, candidates = prepare_frame(source, index)
+    stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
+    initial = dict(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell.array,
+                   pbc=atoms.pbc, info=atoms.info, fixed_ids=fixed)
+    identity = dict(method='fixed_window_OO', settings=settings(), model_sha256=model_sha,
+                    driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+                    initial=initial, replica=replica, stages=stages)
+    run_id = digest(identity)
+    cfg_path, traj_path, csv_path = [directory/n for n in ('run.json', 'md.traj', 'md.csv')]
+    rng = np.random.default_rng(np.random.SeedSequence([SEED, index, replica, 2]))
+    state = None
     if cfg_path.exists():
-        protocol = json.loads(cfg_path.read_text())
-        if protocol.get('method') != 'distance_umbrella' or restart is None:
-            raise ValueError('Use a fresh folder: restart is supported only for new umbrella runs')
-        previous = dict(protocol['settings'])
-        if 'COUNTER_CHARGE_CENTER' in previous:
-            previous['COUNTER_SHEET_POINT'] = previous.pop('COUNTER_CHARGE_CENTER')
-        if previous != settings() or protocol['model_sha256'] != digest:
-            raise ValueError('Saved umbrella settings/model differ; restore them before continuing')
-        if restart['run_id'] != protocol['run_id']:
-            raise ValueError('Trajectory and run.json belong to different runs')
-    else:
-        if restart:
-            raise ValueError('Restart requires the original run.json')
-        distance = atoms.get_distance(*pair, mic=True)
-        n = max(2, int(np.ceil(max(0., distance-OO_MIN)/WINDOW_SPACING))+1)
-        protocol = dict(method='distance_umbrella', source_index=index, oxygen_pair=pair,
-                        centers_A=np.linspace(distance, OO_MIN, n).tolist(),
-                        fixed_ids=physical[0].get_indices().tolist(), settings=settings(),
-                        model_sha256=digest, model_file=str(model_file))
-        protocol['run_id'] = hashlib.sha256(json.dumps(protocol, sort_keys=True).encode()).hexdigest()
-    rng = np.random.default_rng(SEED+index)
-    if restart:
-        rng.bit_generator.state = restart['rng_state']
-    atoms.calc = make_calculator(model_file, enable_cueq=True)
-    if not restart:
-        MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, force_temp=True, rng=rng)
-    dyn = NVTPhiLangevin(atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
-                        friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_POTENTIAL,
-                        C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
-                        vacuum_potential_key=VACUUM_POTENTIAL_KEY, fermi_level_key=FERMI_LEVEL_KEY,
-                        reference_potential=atoms.info['reference_potential'])
-    dyn.nsteps = start
-    if restart:
-        dyn._reference_model_potential = restart['reference_model_potential']
-    dyn._read_potential()
-    if not cfg_path.exists():
-        protocol.update(reference_model_potential=dyn._reference_model_potential,
-                        initial_rng_state=rng.bit_generator.state, initial_state=dict(
-                            numbers=atoms.numbers, positions=atoms.positions, momenta=atoms.get_momenta(),
-                            cell=atoms.cell.array, pbc=atoms.pbc, info=dict(atoms.info, step=0)))
-        temporary = cfg_path.with_suffix('.tmp')
-        with temporary.open('w') as stream:
-            json.dump(protocol, stream, indent=2, default=jsonable)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, cfg_path)
-    bias = DistanceUmbrella(dyn, protocol)
-    atoms.set_constraint([bias]+physical)
-    end = len(protocol['centers_A'])*WINDOW_STEPS+RELEASE_STEPS
-    print(f'Frame {index}: O pair {pair}; {len(protocol["centers_A"])} fixed windows '
-          f'to {OO_MIN} A, then {RELEASE_STEPS} release steps; resume={start}. '
-          f'CuEq={getattr(atoms.calc, "enable_cueq", True)}, SCF={SCF_STEPS}, no convergence gate.', flush=True)
-    symbols = np.asarray(atoms.get_chemical_symbols())
-    hydrogen, iridium = [np.flatnonzero(symbols == s) for s in ('H', 'Ir')]
-    with ExitStack() as stack:
-        fields, row = table(Path('md.csv'))
-        last_csv = -1 if row is None else int(row['step'])
-        log_path = Path('md.log')
-        lines = log_path.read_text().splitlines() if log_path.exists() else []
-        times = [float(line.split()[0]) for line in lines if line.strip() and not line.startswith('Time')]
-        last_log = round(times[-1]*1000/TIMESTEP_FS) if times else -1
-        if max(last_csv, last_log) > start:
-            raise ValueError('Logs are ahead of the last saved frame; refusing to overwrite')
-        stream = stack.enter_context(open('md.csv', 'a', newline='', buffering=1))
-        logger = NVTPhiMDLogger(dyn, atoms, 'md.log', header=not lines, mode='a',
-                               vacuum_potential_key=VACUUM_POTENTIAL_KEY, fermi_level_key=FERMI_LEVEL_KEY)
-        stack.callback(logger.close)
-        last_traj = -1
-        if Path('md.traj').exists() and Path('md.traj').stat().st_size:
-            with Trajectory('md.traj') as previous:
+        cfg = json.loads(cfg_path.read_text())
+        if cfg.get('run_id') != run_id:
+            raise ValueError('Source/model/physical settings differ from this run; use a fresh output folder')
+        if traj_path.exists():
+            with Trajectory(traj_path) as previous:
                 if len(previous):
-                    last_traj = int(previous[-1].info['step'])
-        trajectory = stack.enter_context(Trajectory('md.traj', 'a'))
+                    atoms = previous[-1]
+                    state = atoms.info.pop('restart_state')
+                    if state['run_id'] != run_id:
+                        raise ValueError('Trajectory belongs to a different run')
+                    rng.bit_generator.state = state['rng_state']
+    else:
+        if any(p.exists() for p in (traj_path, csv_path)):
+            raise ValueError('Output exists without matching run metadata; refusing to overwrite')
+        cfg = dict(identity, run_id=run_id, model_file=str(model_file),
+                   pair_environments=environments, eligible_pairs=candidates,
+                   proton_ensemble='Fixed atom counts; pH is not imposed by this driver.')
+        write_json(cfg_path, cfg)
+    physical = physical_constraints(atoms, fixed)
+    atoms.set_constraint(physical)
+    if calculator is None:
+        if _CALCULATOR is None:
+            _CALCULATOR = make_calculator(model_file)
+        calculator = _CALCULATOR
+    atoms.calc = calculator
+    atoms.calc.reset()
+    if state is None:
+        MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, force_temp=True, rng=rng)
+        if CHECK_CHARGE_RESPONSE:
+            probe = charge_probe(atoms)
+            write_json(directory/'charge_response.json', probe)
+            if probe['dWF_dQ_V_per_e'] <= 0.:
+                raise RuntimeError('Nonpositive local voltage response to electrode charge: inspect charge_response.json before MD')
+    fields, saved_csv = last_csv(csv_path)
+    last_step = -1 if saved_csv is None else int(saved_csv['step'])
+    start = 0 if state is None else int(atoms.info['step'])
+    if last_step > start or (state is None and last_step >= 0):
+        raise ValueError('CSV is ahead of the restart trajectory; outputs have been preserved')
+    stage_id = 0 if state is None else state['stage_id']
+    done = 0 if state is None else state['stage_done']
+    bias = DistanceUmbrella(atoms.info['oxygen_pair'], stages[stage_id]['center_A'], UMBRELLA_K)
+    atoms.set_constraint([bias]+physical)
+    with ExitStack() as stack:
+        dyn = stack.enter_context(dynamics_class(
+            atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
+            friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE,
+            C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
+            reference_potential=atoms.info['reference_potential']))
+        dyn.nsteps = start
+        if state is not None:
+            dyn._reference_model_potential = state['model_anchor']
+            dyn._read_potential()
+        trajectory = stack.enter_context(Trajectory(traj_path, 'a'))
+        stream = stack.enter_context(csv_path.open('a', newline='', buffering=1))
+
+        def write_row(row):
+            nonlocal fields, last_step
+            if fields is not None and fields != list(row):
+                raise ValueError('CSV columns differ; refusing to append')
+            writer = csv.DictWriter(stream, fieldnames=list(row))
+            if fields is None:
+                writer.writeheader(); fields = list(row)
+            writer.writerow(row); stream.flush(); os.fsync(stream.fileno())
+            last_step = int(row['step'])
+
+        if state is not None and last_step < start:
+            write_row(atoms.info['md_record'])  # Recover a completed trajectory write preceding a CSV write.
+        segment_start = dyn.nsteps-done
 
         def record():
-            nonlocal last_csv, last_log, last_traj, fields
-            energy = atoms.get_potential_energy()
-            results = atoms.calc.results
-            force, bias_energy, distance, radial = bias.evaluate(atoms)
-            window, phase, center = bias.schedule()
-            row = dict(step=dyn.nsteps, time_fs=dyn.get_time()/units.fs, window=window, phase=phase,
-                       distance_A=distance, center_A='' if center is None else center,
-                       k_eV_A2=0. if center is None else UMBRELLA_K, bias_eV=bias_energy,
-                       radial_bias_eV_A=radial, energy_eV=energy, temperature_K=atoms.get_temperature(),
-                       Phi_V=dyn._read_potential(), total_charge_e=scalar(atoms.info['total_charge']),
-                       vacuum_potential_V=scalar(results[VACUUM_POTENTIAL_KEY]),
-                       fermi_level_eV=scalar(results[FERMI_LEVEL_KEY]), scf_steps=results['num_scf_steps'],
-                       scf_residual=scalar(results['scf_residual']))
-            for j, o in enumerate(pair):
-                h = atoms.get_distances(o, hydrogen, mic=True)
-                ir = atoms.get_distances(o, iridium, mic=True)
-                row.update({f'O{j+1}_H_neighbors': int(np.sum(h < 1.25)),
-                            f'O{j+1}_Ir_neighbors': int(np.sum(ir < 2.60)),
-                            f'O{j+1}_nearest_Ir_A': float(ir.min())})
-            if dyn.nsteps > last_traj:
-                frame = atoms.copy()
-                frame.set_constraint(physical)
-                frame.info.update(row)
-                frame.info.update(md_record=row, restart_state=dict(run_id=protocol['run_id'],
-                    rng_state=rng.bit_generator.state, reference_model_potential=dyn._reference_model_potential))
-                trajectory.write(frame, energy=scalar(results['energy'])+bias_energy,
-                                 forces=atoms.calc.get_forces(atoms)+force)
-                last_traj = dyn.nsteps
-            if dyn.nsteps > last_csv:
-                if dyn.nsteps == start and saved_record:
-                    row = saved_record
-                if fields is not None and set(fields) != set(row):
-                    raise ValueError('md.csv columns differ; original data is preserved')
-                writer = csv.DictWriter(stream, fieldnames=fields or list(row))
-                if fields is None:
-                    fields = list(row)
-                    writer.writeheader()
-                writer.writerow(row)
-                stream.flush()
-                last_csv = dyn.nsteps
-            if dyn.nsteps > last_log:
-                logger()
-                last_log = dyn.nsteps
+            if dyn.nsteps <= last_step:
+                return
+            energy = scalar(atoms.get_potential_energy(apply_constraint=False))
+            r = atoms.calc.results
+            _, umbrella, distance, radial = bias.evaluate(atoms)
+            wall = sum(c.adjust_potential_energy(atoms) for c in physical if hasattr(c, 'adjust_potential_energy'))
+            forces = atoms.get_forces(md=True)
+            temperature = scalar(atoms.get_temperature())
+            residual = scalar(np.max(np.asarray(r['scf_residual'])))
+            if not np.isfinite(forces).all() or temperature > MAX_TEMPERATURE_K or np.max(np.linalg.norm(forces,axis=1)) > MAX_FORCE_EV_A:
+                raise RuntimeError('Nonfinite/excessive force or temperature; inspect the last saved valid state')
+            row = dict(step=dyn.nsteps, time_fs=dyn.get_time()/units.fs,
+                       direction=stages[stage_id]['direction'], window=stages[stage_id]['window'],
+                       phase=stages[stage_id]['phase'], phase_step=dyn.nsteps-segment_start,
+                       distance_A=distance, center_A=bias.center, k_eV_A2=bias.k,
+                       bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=energy,
+                       energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
+                       temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
+                       total_charge_e=scalar(atoms.info['total_charge']),
+                       vacuum_potential_V=scalar(r['vacuum_potential']), fermi_level_eV=scalar(r['fermi_level']),
+                       wf_eV=scalar(r['vacuum_potential'])-scalar(r['fermi_level']),
+                       scf_steps=int(r['num_scf_steps']), scf_residual=residual)
+            for j, o in enumerate(atoms.info['oxygen_pair'], 1):
+                env = oxygen_environment(atoms, o)
+                row.update({f'O{j}_{k}':env[k] for k in ('H_neighbors','Ir_neighbors','nearest_Ir_A')})
+            frame = atoms.copy()
+            frame.set_constraint([])  # Stored energy/forces include restraints exactly once.
+            frame.info.update(step=dyn.nsteps, md_record=row, restart_state=dict(
+                run_id=run_id, rng_state=rng.bit_generator.state, model_anchor=dyn._reference_model_potential,
+                stage_id=stage_id, stage_done=dyn.nsteps-segment_start))
+            trajectory.write(frame, energy=energy+wall+umbrella, forces=forces)
+            write_row(row)
 
-        record()  # Repair a missing final CSV/log row if a trajectory write completed first.
+        record()
         dyn.attach(record, interval=LOGINTERVAL)
-        steps = max(0, end-start)
-        dyn.run(steps if max_steps is None else min(steps, max_steps))
-        record()  # Save the final complete step even between log intervals.
-    print(f'Saved through step {dyn.nsteps}; run again to continue if incomplete.', flush=True)
+        while stage_id < len(stages):
+            stage = stages[stage_id]
+            bias.center = stage['center_A']       # Changed only BETWEEN complete integration steps.
+            segment_start = dyn.nsteps-done
+            remaining = stage['steps']-done
+            if max_steps is not None:
+                remaining = min(remaining, max_steps-(dyn.nsteps-start))
+            if remaining > 0:
+                print(f'{index}/{replica} {stage["direction"]} w{stage["window"]} '
+                      f'{stage["phase"]}: center={bias.center:.3f} A, {remaining} steps', flush=True)
+                dyn.run(remaining); record()
+            done = dyn.nsteps-segment_start
+            if done < stage['steps']:
+                break
+            stage_id += 1; done = 0
+            if max_steps is not None and dyn.nsteps-start >= max_steps:
+                break
+        print(f'Saved step {dyn.nsteps}; '+('complete' if stage_id == len(stages) else 'resumable'), flush=True)
 
 
-def load_atoms(source, index):
-    cfg_path = Path('run.json')
-    if not cfg_path.exists():
-        if any(Path(p).exists() for p in ('md.traj', 'md.csv', 'HILLS')):
-            raise ValueError('Existing outputs have no umbrella metadata; use a fresh folder')
-        if source is None:
-            raise FileNotFoundError('New runs require ATOMS_FILE')
-        return prepare_frame(source, index)
-    cfg = json.loads(cfg_path.read_text())
-    if cfg.get('method') != 'distance_umbrella':
-        raise ValueError('Method not supported')
-    if cfg['source_index'] != index:
-        raise ValueError('Restart folder and frame index differ')
-    atoms = None
-    if Path('md.traj').exists() and Path('md.traj').stat().st_size:
-        with Trajectory('md.traj') as trajectory:
-            if len(trajectory):
-                atoms = trajectory[-1]
-    if atoms is None:
-        from ase import Atoms
-        state = cfg['initial_state']
-        atoms = Atoms(numbers=state['numbers'], positions=state['positions'], momenta=state['momenta'],
-                      cell=state['cell'], pbc=state['pbc'], info=state['info'])
-        atoms.info['restart_state'] = dict(run_id=cfg['run_id'], rng_state=cfg['initial_rng_state'],
-                                          reference_model_potential=cfg['reference_model_potential'])
-    if 'restart_state' not in atoms.info or not atoms.has('momenta'):
-        raise ValueError('The trajectory lacks restart state or momenta')
-    # This script's earlier runs used a Gaussian sheet under the center key.
-    if 'COUNTER_CHARGE_CENTER' in cfg['settings'] and 'counter_charge_center' in atoms.info:
-        center = np.asarray(atoms.info.pop('counter_charge_center'))
-        atoms.info['counter_charge_zfrac'] = float((center @ np.linalg.inv(atoms.cell.array))[2] % 1.)
-    if index in OXYGEN_PAIRS and set(OXYGEN_PAIRS[index]) != set(atoms.info['oxygen_pair']):
-        raise ValueError('Cannot change the oxygen pair during continuation')
-    atoms.set_constraint(physical_constraints(atoms, cfg['fixed_ids']))
-    return atoms
-
-
-def run_one(source, index, model_file, directory):
-    Path(directory).mkdir(exist_ok=True)
-    os.chdir(directory)
-    atoms = load_atoms(source, index)  # Reject old runs before opening their output files.
-    with open('run.log', 'a', buffering=1) as stream, redirect_stdout(stream), redirect_stderr(stream):
-        print('\n--- NVT-Phi umbrella start/continuation ---', flush=True)
+def run_one(source, index, replica, model_file, model_sha, directory):
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    with open(Path(directory)/'run.log', 'a', buffering=1) as log, redirect_stdout(log), redirect_stderr(log):
         try:
-            simulate(atoms, model_file)
+            simulate(source, index, replica, model_file, model_sha, directory)
         except Exception:
-            traceback.print_exc()
-            raise
-    return index
+            traceback.print_exc(); raise
+    return index, replica
 
 
 def main():
-    indexes = list(RUN_INDEXES)
-    if not indexes or len(indexes) != len(set(indexes)) or any(type(i) is not int or i < 0 for i in indexes):
-        raise ValueError('RUN_INDEXES must contain unique nonnegative integer indexes')
-    if not 0 <= EQUIL_STEPS < WINDOW_STEPS or RELEASE_STEPS < 0:
-        raise ValueError('Require 0 <= EQUIL_STEPS < WINDOW_STEPS and RELEASE_STEPS >= 0')
-    if min(OO_MIN, WINDOW_SPACING, UMBRELLA_K, LOGINTERVAL, TIMESTEP_FS, TEMPERATURE_K) <= 0:
-        raise ValueError('Widths, stiffness, temperature and time intervals must be positive')
-    model_file = str(Path(MODEL_FILE).resolve(strict=True))
-    frames = read(ATOMS_FILE, index=':') if Path(ATOMS_FILE).exists() else None
-    if frames is not None and max(indexes) >= len(frames):
-        raise ValueError(f'Frame indexes must lie in 0..{len(frames)-1}')
-    directories = [str(Path(f'umbrella_{i}').resolve()) for i in indexes]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--indices', nargs='+', type=int, default=RUN_INDEXES)
+    parser.add_argument('--workers', type=int, default=MAX_WORKERS)
+    parser.add_argument('--replicas', type=int, default=REPLICAS)
+    parser.add_argument('--atoms', default=ATOMS_FILE)
+    parser.add_argument('--model', default=MODEL_FILE)
+    parser.add_argument('--root', type=Path, default=Path(OUTPUT_ROOT))
+    parser.add_argument('--dry-run', action='store_true', help='Inspect pairs/budgets without loading a model or creating runs')
+    args = parser.parse_args()
+    if not args.indices or min(args.indices)<0 or len(set(args.indices))!=len(args.indices) or min(args.workers,args.replicas)<1:
+        parser.error('Unique nonnegative indices and positive worker/replica counts are required')
+    if min(OO_MIN, WINDOW_SPACING, UMBRELLA_K, TEMPERATURE_K, TIMESTEP_FS, GAUSSIAN_WIDTH,
+           CAPACITANCE, TAUPHI_FS, FRICTION_PER_FS, CHARGE_PROBE_E)>0 and all(
+           isinstance(x,int) and x>0 for x in (INITIAL_EQUIL_STEPS,EQUIL_STEPS,SAMPLE_STEPS,LOGINTERVAL)):
+        pass
+    else:
+        parser.error('Physical scales and stage/output step counts must be positive')
+    wanted, frames = set(args.indices), {}
+    for index, atoms in enumerate(iread(args.atoms, index=':')):
+        if index in wanted:
+            frames[index] = atoms
+        if index >= max(wanted):
+            break
+    if set(frames) != wanted:
+        parser.error(f'Missing source indexes: {sorted(wanted-set(frames))}')
+    for index in args.indices:
+        atoms, _, envs, n = prepare_frame(frames[index], index)
+        stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
+        print(f'{index}: pair {atoms.info["oxygen_pair"]}, {[e["kind"] for e in envs]}, '
+              f'{n} eligible; {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps/replica', flush=True)
+    if args.dry_run:
+        return
+    model = Path(args.model).resolve(strict=True)
+    hasher = hashlib.sha256()
+    with model.open('rb') as f:
+        for chunk in iter(lambda:f.read(4*1024*1024), b''):
+            hasher.update(chunk)
+    model_sha = hasher.hexdigest()
     failures = []
-    with ProcessPoolExecutor(max_workers=len(indexes), mp_context=mp.get_context('spawn')) as pool:
-        jobs = {pool.submit(run_one, frames[i] if frames is not None else None, i, model_file, d): i
-                for i, d in zip(indexes, directories)}
+    with ProcessPoolExecutor(max_workers=min(args.workers,len(wanted)*args.replicas),
+                             mp_context=mp.get_context('spawn')) as pool:
+        jobs = {pool.submit(run_one,frames[i],i,rep,str(model),model_sha,
+                            str((args.root/f'umbrella_{i}'/f'replica_{rep}').resolve())):(i,rep)
+                for rep in range(args.replicas) for i in args.indices}
         for job in as_completed(jobs):
-            i = jobs[job]
+            label = jobs[job]
             try:
-                job.result()
-                print(f'umbrella_{i}: complete', flush=True)
+                job.result(); print(f'{label}: complete', flush=True)
             except Exception as error:
-                failures.append(i)
-                print(f'umbrella_{i}: failed ({error}); see run.log', flush=True)
+                failures.append(label); print(f'{label}: failed: {error}; see run.log', flush=True)
     if failures:
         raise RuntimeError(f'Failed runs: {failures}')
 
