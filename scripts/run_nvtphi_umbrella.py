@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""Fixed-window O-O sampling with MACE-VOLT. Edit the settings below, then run.
-
-Voltage is controlled; pH is not imposed. Each selected pair defines one pathway.
-"""
 import csv
 import hashlib
 import json
@@ -13,10 +8,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from itertools import combinations
 from pathlib import Path
-
 for _name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
     os.environ[_name] = '1'
-# Respect the scheduler's CUDA_VISIBLE_DEVICES; all workers use DEVICE below.
 import numpy as np
 from ase import units
 from ase.constraints import FixAtoms, FixConstraint, Hookean
@@ -25,13 +18,13 @@ from ase.io.trajectory import Trajectory
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 # ------------------------------ user settings ------------------------------ #
-ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
-MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v383.model'
-RUN_INDEXES = list(range(10, 20))
-OUTPUT_ROOT = 'umbrella_volt'                 # Fresh folders; do not reuse old umbrella_* runs.
-MAX_WORKERS, REPLICAS = 2, 1                 # Two processes share one visible GPU.
+ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
+MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_203/models/fit_0_best_wf.model'
+RUN_INDEXES = list(range(0, 10))
+OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
+MAX_WORKERS, REPLICAS = 10, 1                 # Two processes share one visible GPU.
 DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
-SCF_STEPS = None                            # None uses the exported model's deployment budget.
+SCF_STEPS = 50                              # None uses the exported model's deployment budget.
 OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
 INITIAL_U_SHE = {}                          # Optional independently known initial potentials.
 TARGET_U_SHE, SHE_ABSOLUTE_V = 1.60, 4.44    # Same explicit reference convention as the old run.
@@ -49,7 +42,6 @@ LOGINTERVAL, SEED = 20, 7777                # 10 fs output; saved states allow c
 MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1000., 100.
 CHECK_CHARGE_RESPONSE, CHARGE_PROBE_E = True, 0.02  # Three inexpensive frozen-geometry calls.
 # -------------------------------------------------------------------------- #
-_CALCULATOR = None
 
 
 def scalar(value):
@@ -223,9 +215,9 @@ def make_calculator(model_file):
     if SCF_STEPS is not None:
         options['num_scf_steps'] = int(SCF_STEPS)
     calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64',
-                            pbc_handling='slab', scf_options=options, scf_restart=False,
-                            ignore_nonconverged=None, use_compile=False,
-                            counter_charge_width=GAUSSIAN_WIDTH)
+                             pbc_handling='slab', scf_options=options, scf_restart=False,
+                             ignore_nonconverged=True, use_compile=False, enable_cueq=ENABLE_CUEQ,
+                             counter_charge_width=GAUSSIAN_WIDTH)
     heads = list(getattr(calc.model, 'heads', [calc.head]))
     head = HEAD or (heads[0] if len(heads) == 1 else next((h for h in heads if h.lower() == 'default'), None))
     if head not in heads:
@@ -289,7 +281,6 @@ def simulate(source, index, replica, model_file, model_sha, directory):
 def _simulate(source, index, replica, model_file, model_sha, directory):
     from mace_scf.md import NVTPhiLangevin
 
-    global _CALCULATOR
     atoms, fixed, environments, candidates = prepare_frame(source, index)
     stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
     initial = dict(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell.array,
@@ -322,9 +313,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
         write_json(cfg_path, cfg)
     physical = physical_constraints(atoms, fixed)
     atoms.set_constraint(physical)
-    if _CALCULATOR is None:
-        _CALCULATOR = make_calculator(model_file)
-    atoms.calc = _CALCULATOR
+    atoms.calc = make_calculator(model_file)
     atoms.calc.reset()
     if state is None:
         MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, force_temp=True, rng=rng)
@@ -347,6 +336,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
             friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE,
             C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
+            logfile=str(directory / 'md.log'), loginterval=LOGINTERVAL,
             reference_potential=atoms.info['reference_potential']))
         dyn.nsteps = start
         if state is not None:
