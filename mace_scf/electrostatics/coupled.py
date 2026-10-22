@@ -259,7 +259,7 @@ class AtomicPotentialResponse(nn.Module):
                 else self.chemical_vector(scaled_vector.transpose(-1,-2)).transpose(-1,-2))
         return chemical,vector
 
-    def state_embedding(self,state,chemical,vector,v,e,neighborhood=None):
+    def state_embedding(self,state,chemical,vector,v,e,neighborhood=None,prepared=None):
         # State coefficients do NOT form an extra neural input. Their physical
         # information enters solely through the common projected v and -grad(v).
         if neighborhood is None or neighborhood.ndim!=4 or neighborhood.shape[-1]!=4:
@@ -267,13 +267,26 @@ class AtomicPotentialResponse(nn.Module):
         # The full receiver coordinates carry the electrochemical drive;
         # local radial contrasts and angular/neighbor variation remain present.
         # Scalar and vector channels use one linear transport and one adjoint.
-        scalar_message,vector_message=neighbor_messages(neighborhood,v,e)
+        if prepared is None:
+            scalar_message,vector_message=neighbor_messages(neighborhood,v,e)
+            scalar_weight=torch.cat((self.state_scalar.weight,self.neighbor_scalar.weight,
+                                     self.neighbor_divergence.weight),-1)
+            vector_weight=torch.cat((self.state_vector.weight,self.neighbor_vector.weight,
+                                     self.neighbor_gradient.weight),-1)
+        else:
+            scalar_weight,vector_weight,transport=prepared
+            # Row sums have already been subtracted from the diagonal. One
+            # contraction carries all radial/directional neighbor differences.
+            c=v.shape[-1]
+            messages=torch.bmm(transport,torch.cat((v,e.flatten(-2)),-1)).reshape(
+                v.shape[0],4,v.shape[1],4*c)
+            radial=messages[:,0]
+            directional=messages[:,1:]
+            divergence=directional[...,c:].reshape(v.shape[0],3,v.shape[1],c,3).diagonal(dim1=1,dim2=4).sum(-1)
+            scalar_message=torch.cat((radial[...,:c],divergence),-1)
+            vector_message=torch.cat((radial[...,c:].reshape_as(e),directional[...,:c].permute(0,2,3,1)),-2)
         # Combine the same projections before their linear maps. This keeps
         # every feature and parameter while reducing small recurrent kernels.
-        scalar_weight=torch.cat((self.state_scalar.weight,self.neighbor_scalar.weight,
-                                 self.neighbor_divergence.weight),-1)
-        vector_weight=torch.cat((self.state_vector.weight,self.neighbor_vector.weight,
-                                 self.neighbor_gradient.weight),-1)
         scalar=chemical+F.linear(torch.asinh(torch.cat((v,scalar_message),-1)),scalar_weight)
         polar=vector_asinh(torch.cat((e,vector_message),-2))
         embedded=vector+F.linear(polar.transpose(-1,-2),vector_weight).transpose(-1,-2)
@@ -298,10 +311,10 @@ class AtomicPotentialResponse(nn.Module):
         return (levels-mean[:, None, None]+(target/total)[:, None, None])/self.scalar_field_scale
 
     def _invariants(self,state,chemical,vector,potential,field,mask,neighborhood,
-                    electronic_reference,target):
+                    electronic_reference,target,prepared=None):
         v=self.potential_coordinates(potential,mask,electronic_reference,target)
         e=field/self.vector_field_scale[:,None]
-        scalar,embedded=self.state_embedding(state,chemical,vector,v,e,neighborhood)
+        scalar,embedded=self.state_embedding(state,chemical,vector,v,e,neighborhood,prepared)
         inv=torch.cat((scalar,torch.asinh(embedded.square().sum(-1)),
                        torch.asinh((vector*embedded).sum(-1))),-1)
         return inv,embedded
@@ -396,14 +409,14 @@ class AtomicPotentialResponse(nn.Module):
 
     def forward(self,state,chemical,vector,species_level,potential,field,p0,mask,target,
                 neighborhood=None,*,include_energy=True,reference_offset=None,
-                observe_chemical_level=True):
+                observe_chemical_level=True,prepared=None):
         """Respond using geometry features and prepared per-atom scalar levels."""
         extra=3
         if reference_offset is None or reference_offset.shape!=(*state.shape[:-1],state.shape[-1]+extra):
             raise ValueError('Missing/mismatched differentiable geometry/electrochemical reference')
         offset,electronic_reference=reference_offset[...,:-extra],reference_offset[...,-2:]
         inv,embedded=self._invariants(state,chemical,vector,potential,field,mask,neighborhood,
-                                     electronic_reference,target)
+                                     electronic_reference,target,prepared)
         computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True,include_dipole=False)
         scalars, polar = computed[:2]
         # The geometry reference conditions the descriptors; it does not replace
@@ -440,6 +453,17 @@ class AtomicPotentialResponse(nn.Module):
             energy=(self.energy_readout(energy_inv)-self.energy_readout(refinv)).squeeze(-1)*mask
         else:energy=state.new_zeros(mask.shape)
         return proposal,mu,f,response,levels,chemical_level,energy,neutral
+
+    def recurrent_coefficients(self,state,chemical,vector,species_level,potential,field,p0,
+                               mask,target,neighborhood,reference,prepared):
+        """Only the nonlinear levels/completion enter the screened update."""
+        inv,embedded=self._invariants(state,chemical,vector,potential,field,mask,neighborhood,
+                                     reference[...,-2:],target,prepared)
+        scalars,polar=self._constitutive_outputs(inv,vector,embedded,include_dipole=False)
+        geometry_charge=self.source_channels and getattr(self,'charge_response','geometry')=='geometry'
+        levels=reference[...,-2] if geometry_charge else species_level+scalars[...,0]+p0[...,0]
+        completion=(torch.cat((scalars[...,2:],polar.flatten(-2)),-1)+reference[...,4:-3])*mask[...,None]
+        return levels,completion
 
 def coefficient_kernels(geometry,density_width,source_volume,base_width):
     """Geometry-only kernels prepared once; no K x atom x basis tensor."""
@@ -682,6 +706,38 @@ def screen_coupled(current, proposal, reference, completion, mask, factors, *, m
                               proposal[..., 1:4]+dipole, proposal[..., 4:]), -1)
     return screen_moments(current, proposal, reference, mask, factors,
                           materialized=materialized)
+
+
+def prepare_screen_action(reference, completion, mask, factors, geometry, p0, target, sigma):
+    """Eliminate the affine moment block of the SAME screened update.
+
+    In old + (I-L)^-1*(F(old)-old), the linear moment response L cancels
+    exactly. The remaining drive is the nonlinear chemical level and NEW
+    completion, plus the fixed external/geometry field. Keep every derivative
+    through this per-call composition, including inverse, softness and position.
+    """
+    inverse, root, _, _ = factors
+    present=mask[...,None].expand(-1,-1,4).flatten(-2)
+    divisor=torch.where(present.bool(),root,torch.ones_like(root))
+    action=root[...,None]*inverse[:,:-1,:-1]/divisor[:,None,:]
+    action=action*present[...,None]*present[:,None,:]
+    soft,_,_=moment_coordinates(reference,mask)
+    levels=action.reshape(action.shape[0],action.shape[1],mask.shape[1],4)[...,0]*reference[:,:,-1][:,None,:]
+    sources=action@(soft[...,None]*completion)
+    zero=p0.new_zeros((*mask.shape,completion.shape[-1]//mask.shape[1]+4))
+    values,field=sample_state_spectrum(geometry[7]+geometry[9],zero,geometry)
+    base=torch.cat(((reference[...,-1]*values[...,0])[...,None],
+                    p0[...,1:4]/sigma+reference[...,1:4]-reference[...,-3:-2]*sigma*field[...,0,:]),-1)
+    offset=(action@(base*mask[...,None]).flatten(1)[...,None]).squeeze(-1)
+    offset=offset+root*inverse[:,:-1,-1]*target[:,None]
+    return torch.cat((levels,sources),-1),offset
+
+
+def apply_screen_action(levels, completion, mask, target, action, offset):
+    right=torch.cat((levels,completion.flatten(1)),-1)
+    value=((action@right[...,None]).squeeze(-1)+offset).reshape(*mask.shape,4)*mask[...,None]
+    charge=value[...,0]+mask*((target-value[...,0].sum(-1))/mask.sum(-1))[:,None]
+    return torch.cat((charge[...,None],value[...,1:4],completion),-1)
 
 
 @dataclass(frozen=True)
@@ -1342,6 +1398,14 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
         identity = torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device).expand_as(matrix)
         inverse = solve_factored_system(matrix, lu, pivots, identity)
         factors = (inverse, root, lu, pivots)
+    prepared=()
+    if not functional:
+        radial=transport.permute(0,3,1,2)
+        difference=radial-torch.diag_embed(radial.sum(-1))
+        prepared=(*prepare_screen_action(reference,completion,mask,factors,g.tensors,p0,target,r.density_width),
+                  torch.cat((r.state_scalar.weight,r.neighbor_scalar.weight,r.neighbor_divergence.weight),-1),
+                  torch.cat((r.state_vector.weight,r.neighbor_vector.weight,r.neighbor_gradient.weight),-1),
+                  difference.flatten(1,2))
     parameters = tuple(r.parameters())
     names = tuple(name for name,_ in r.named_parameters())
     # All geometry, reference and parameter dependencies are explicit for the
@@ -1350,7 +1414,7 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     # recurrent neural features contain geometry, fields and messages only.
     # Keep this scalar attached to autograd for training and implicit response.
     fixed = (chemical, vector, species_level, p0, mask, target, transport, reference,
-             completion, *factors, *g.tensors, *g.kernels)
+             completion, *factors, *g.tensors, *g.kernels, *prepared)
     count = len(fixed)
     geometry_end = 13+len(g.tensors)
 
@@ -1361,13 +1425,21 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
         spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
                     if observe else (total_spectrum(z*present[..., None], geometry, kernels, r.density_width),))
         potential, field = sample_state_spectrum(spectral[0], z*present[..., None], geometry)
+        if screened and not observe and not functional:
+            levels,source=r.recurrent_coefficients(z,chem,vec,level,potential,field,initial,present,
+                charge,neighbors,ref,args[geometry_end+4:geometry_end+7])
+            proposal=apply_screen_action(levels,source,present,charge,*args[geometry_end+2:geometry_end+4])
+            return (proposal,), (*spectral,potential,field)
         inputs = (z, chem, vec, level, potential, field, initial, present, charge, neighbors)
         options = {'include_energy': include_energy, 'reference_offset': ref,
                    'observe_chemical_level': observe}
+        if not functional:
+            options['prepared']=args[geometry_end+4:geometry_end+7]
         result = (functional_call(r, dict(zip(names, args[count:])), inputs, options, strict=False)
                   if functional else r(*inputs, **options))
-        proposal = screen_coupled(z, result[0], ref, coupling, present, factor,
-                                  materialized=not functional) if screened else result[0]
+        proposal = result[0]
+        if screened:
+            proposal=screen_coupled(z,proposal,ref,coupling,present,factor,materialized=not functional)
         return (proposal, *result[1:]), (*spectral, potential, field)
 
     def update(z, *args):

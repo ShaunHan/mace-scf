@@ -1,7 +1,7 @@
 import random
 import logging
 import time
-from copy import deepcopy
+from copy import copy, deepcopy
 from contextlib import nullcontext
 from typing import Any, Dict, Optional, Tuple
 
@@ -199,6 +199,7 @@ class CheckpointHandler(NativeCheckpointHandler):
 
     def load_latest(self,state,swa=False,device=None,strict=True):
         if not self.deployment and self.progress_path.exists():
+            logging.info('Loading resumable state: %s', self.progress_path)
             value=torch.load(self.progress_path,map_location=device,weights_only=False)
             epoch=value["epoch"]
         else:
@@ -600,7 +601,6 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     options = getattr(model_eval_wrapper, 'training_options', None)
     if (getattr(options, 'reference_conditioning', None) == 'electronic'
             and getattr(loss_fn.loss_fns.get('fermi_level'), 'relative', False)):
-        from copy import copy
         from dataclasses import replace
         if not getattr(model_eval_wrapper, '_logged_relative_teacher', False):
             logging.info('Relative EF gauge: retaining measured-field -> EF supervision; '
@@ -619,22 +619,33 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     coupled=getattr(getattr(model,'field_dependent_charges_map',None),'coupled',False)
     adaptive=(coupled and torch.device(device).type=='cuda'
               and getattr(loss_fn,'supports_graph_accumulation',False))
-    graphs=batch.to_data_list() if adaptive else None
-    capacity=getattr(optimizer,'_device_batch_size',len(graphs)) if adaptive else batch.num_graphs
-    limit=min(len(graphs),capacity) if adaptive else capacity
+    graphs=None
+    logical=batch.num_graphs
+    capacity=getattr(optimizer,'_device_batch_size',logical) if adaptive else logical
+    limit=min(logical,capacity)
     normalizers=({key:value.to(device) for key,value in loss_fn.normalizers(batch).items()}
                  if adaptive else None)
 
-    def backward_batch():
+    def pieces():
+        nonlocal graphs
         from mace.tools.torch_geometric import Batch
+        if not adaptive or limit >= logical:
+            # Data.to mutates its container: keep the original CPU batch for
+            # a possible OOM retry, without unbatching/rebuilding every graph.
+            yield copy(batch)
+        else:
+            if graphs is None:
+                graphs=batch.to_data_list()
+            for i in range(0,logical,limit):
+                yield Batch.from_data_list(graphs[i:i+limit])
+
+    def backward_batch():
         total=None
         metric_sums=None
         denominators = dict(normalizers) if normalizers is not None else None
-        if adaptive and limit < len(graphs) and loss_fn.relative_scalar_losses:
-            pieces = (Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit))
-            denominators.update(_relative_batch_centers(model, model_eval_wrapper, loss_fn, pieces, device))
-        pieces=(Batch.from_data_list(graphs[i:i+limit]) for i in range(0,len(graphs),limit)) if adaptive else (batch,)
-        for piece in pieces:
+        if adaptive and limit < logical and loss_fn.relative_scalar_losses:
+            denominators.update(_relative_batch_centers(model, model_eval_wrapper, loss_fn, pieces(), device))
+        for piece in pieces():
             piece=piece.to(device)
             output=model_eval_wrapper(model,piece.to_dict(),training=True)
             loss=loss_fn(pred=output,ref=piece,**({'normalizers':denominators} if adaptive else {}))
@@ -734,11 +745,23 @@ def _check_training_growth(optimizer, loss, norm, reference=None):
             'norm':previous['norm']+rate*(norm-previous['norm']), 'count':previous['count']+1}
 
 
+def _cpu_training_copy(value):
+    if torch.is_tensor(value):
+        return value.detach().to(device='cpu', copy=True)
+    if isinstance(value, dict):
+        result=copy(value)
+        result.update({key:_cpu_training_copy(item) for key,item in value.items()})
+        return result
+    if isinstance(value, (list, tuple)):
+        return type(value)(_cpu_training_copy(item) for item in value)
+    return deepcopy(value)
+
+
 def _training_snapshot(model, optimizer, ema, loader, device):
-    """Small parameter/optimizer snapshot; no activations or datasets copied."""
+    """Keep rollback parameters/Adam/EMA on CPU, not resident on the GPU."""
     generator = getattr(loader, 'generator', None)
-    return {'model':deepcopy(model.state_dict()), 'optimizer':deepcopy(optimizer.state_dict()),
-        'ema':None if ema is None else deepcopy(ema.state_dict()),
+    return {'model':_cpu_training_copy(model.state_dict()), 'optimizer':_cpu_training_copy(optimizer.state_dict()),
+        'ema':None if ema is None else _cpu_training_copy(ema.state_dict()),
         'guard':deepcopy(getattr(optimizer, '_training_guard', None)),
         'rng':torch.random.get_rng_state(), 'python':random.getstate(), 'numpy':np.random.get_state(),
         'cuda':torch.cuda.get_rng_state(device) if torch.device(device).type=='cuda' else None,
@@ -878,8 +901,19 @@ def _evaluation_batches(model, wrapper, data_loader, device, ema):
         if not adaptive:
             yield attempt(batch)
             continue
+        if capacity is None:capacity=batch.num_graphs
+        if capacity >= batch.num_graphs:
+            result=attempt(copy(batch))
+            if result is not None:
+                yield result
+                del result
+                wrapper._evaluation_device_batch_size=capacity
+                continue
+            import gc
+            gc.collect();torch.cuda.empty_cache()
+            capacity=max(1,batch.num_graphs//2)
+            logging.warning('Validation allocation OOM: reducing device batch to %d graphs; every graph is still evaluated',capacity)
         graphs=batch.to_data_list()
-        if capacity is None:capacity=len(graphs)
         index=0
         while index<len(graphs):
             count=min(capacity,len(graphs)-index)

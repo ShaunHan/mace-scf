@@ -211,11 +211,17 @@ class ReplayTraining:
         self.weight = weight
 
     def backward(self, model, batch, parameters, device, limit):
-        graphs = batch.to_data_list()
+        from copy import copy
         normalizers = {k:v.to(device) for k,v in self.loss_fn.normalizers(batch).items()}
         total = 0.
-        for start in range(0, len(graphs), limit):
-            piece = torch_geometric.Batch.from_data_list(graphs[start:start+limit]).to(device)
+        if batch.num_graphs <= limit:
+            pieces = (copy(batch),)
+        else:
+            graphs = batch.to_data_list()
+            pieces = (torch_geometric.Batch.from_data_list(graphs[start:start+limit])
+                      for start in range(0,len(graphs),limit))
+        for piece in pieces:
+            piece = piece.to(device)
             output = model.replay_head(piece.to_dict(), training=True, compute_force=True)
             loss = self.weight*self.loss_fn(ref=piece, pred=output, normalizers=normalizers)
             if not bool(torch.isfinite(loss.detach())):

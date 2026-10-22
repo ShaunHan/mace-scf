@@ -98,6 +98,24 @@ def _resume_training(args, tag, state, ema, device):
     return 0
 
 
+def set_stage_learning_rates(optimizer, stage, resumed=False):
+    """Apply edited stage rates after loading Adam, without resetting moments.
+
+    Remember the requested rate separately from scheduler/numerical-recovery
+    reductions. An unchanged restart preserves those reductions; an edited
+    recipe (or an older checkpoint without this record) uses the YAML rates.
+    """
+    for group in optimizer.param_groups:
+        requested = stage.get(group['name']+'_lr', stage['lr'])
+        previous = group.get('stage_lr')
+        if not resumed or previous != requested:
+            group['lr'] = requested
+        group['stage_lr'] = requested
+    logging.info('Stage %s learning rates after checkpoint restore: %s (requested %s)',
+                 stage['name'], [g['lr'] for g in optimizer.param_groups],
+                 [g['stage_lr'] for g in optimizer.param_groups])
+
+
 def main() -> None:
     args = mace_scf.utils.extended_arg_parser().parse_args()
     check_config_conflicts(args)
@@ -376,21 +394,13 @@ def main() -> None:
             output_args=output_args,
             fixed_point_training_options=train_stage.get("fixed_point_training_options"),
         )
-        logging.info(f"Setting global learning rate to {train_stage['lr']}")
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = train_stage["lr"]
-            if param_group["name"]+"_lr" in train_stage:
-                new_lr = train_stage[param_group["name"]+"_lr"]
-                logging.info(f"Setting learning rate to {new_lr} for {param_group['name']}")
-                param_group["lr"] = new_lr
-        logging.debug(f"Optimizer: {optimizer}")
-
         checkpoint_handler_stage = CheckpointHandler(
                 ema=ema,
             directory=args.checkpoints_dir,
             tag=tag+"_"+stage_name,
             keep=args.keep_checkpoints,
         )
+        latest_checkpoint_epoch = None
         if args.restart_latest:
             latest_checkpoint_epoch = checkpoint_handler_stage.load_latest(
                 state=tools.CheckpointState(model, optimizer, lr_scheduler),
@@ -400,8 +410,8 @@ def main() -> None:
             if latest_checkpoint_epoch is not None:
                 start_epoch = latest_checkpoint_epoch+1
 
-        # The stage schedule was applied above. If a checkpoint was loaded,
-        # keep its optimizer rates, including scheduler/recovery reductions.
+        set_stage_learning_rates(optimizer, train_stage,
+                                 resumed=latest_checkpoint_epoch is not None)
 
         # train_loader = get_data_loader(train_dataset, train_stage["fixed_point_training_options"])
 
