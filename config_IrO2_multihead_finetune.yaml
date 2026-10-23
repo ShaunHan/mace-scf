@@ -18,7 +18,7 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
-      vacuum_reservoir: vacuum_reservoir
+      vacuum_reservoir: vacuum_reservoir  # Read the per-frame boundary tag; absent means false.
   pt_head:
     info_keys:
       energy: dft_free_energy
@@ -86,7 +86,7 @@ subselect_pt: random
 log_dir: logs
 results_dir: results
 model_dir: models
-refit_fermi_readout: false
+# Joint absolute DFT targets; WF is a checkpoint metric, not a loss.
 train_schedule:
   0:
     name: heads

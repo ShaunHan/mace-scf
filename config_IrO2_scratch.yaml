@@ -18,7 +18,7 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
-      vacuum_reservoir: vacuum_reservoir
+      vacuum_reservoir: vacuum_reservoir  # Read the per-frame boundary tag; absent means false.
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -67,7 +67,7 @@ compute_forces: true
 log_dir: logs
 results_dir: results
 model_dir: models
-refit_fermi_readout: false
+# Joint absolute DFT targets; WF is a checkpoint metric, not a loss.
 train_schedule:
   0:
     name: stage1
