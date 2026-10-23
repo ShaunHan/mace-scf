@@ -1,11 +1,3 @@
-#!/usr/bin/env python3
-"""MACE-VOLT active-learning scans. Edit settings below, then run directly.
-
-Surface/water proton transfers conserve the number of atoms; pH is not imposed.
-For future pH studies, supply separately prepared excess-proton/composition states
-and consistent DFT charge references. Bias frequencies do not represent pH.
-Saved energies/forces are model predictions without restraints; relabel with DFT.
-"""
 import csv
 import hashlib
 import json
@@ -29,8 +21,8 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_203/models/fit_0_best_wf.model'
 RUN_INDEXES = list(range(0, 10))
-OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_active_learning'
-MAX_WORKERS, REPLICAS = 10, 1                # Concurrent configurations on one GPU; independent repeats.
+OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
+MAX_WORKERS, REPLICAS = 10, 1                 # Two processes share one visible GPU.
 DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
 SCF_STEPS = 50                              # None uses the exported model's deployment budget.
 OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
@@ -39,17 +31,15 @@ TARGET_U_SHE, SHE_ABSOLUTE_V = 1.60, 4.44    # Same explicit reference conventio
 COUNTER_SHEET_POINT, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0
 CAPACITANCE, TAUPHI_FS = 0.01, 100.0         # e/V for the whole cell; fs. Not an areal capacitance.
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
-PAIR_CUTOFF, OO_MIN, N_WINDOWS = 3.0, 1.20, 13
+PAIR_CUTOFF, OO_MIN = 3.0, 1.20
+WINDOW_SPACING = 0.15        # Å
+INITIAL_EQUIL_STEPS = 2000   # 1 ps
+EQUIL_STEPS = 500           # 0.25 ps per window
+SAMPLE_STEPS = 1000         # 0.50 ps per window
 UMBRELLA_K, REACTANT_MARGIN = 20.0, 0.10     # eV/A^2; A. Center is not an enforced bond length.
 REQUIRE_ADSORBATE = True                    # Require an exposed, singly Ir-bound O with <=1 H.
 REVERSE_SWEEP = False                       # Enable a separate return sweep after inspecting the forward pilot.
 TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300., 0.5, 0.01
-INITIAL_EQUIL_STEPS = 2000                  # 1 ps; total forward scan = 41,000 steps (20.5 ps).
-EQUIL_STEPS, SAMPLE_STEPS = 1000, 2000       # 0.5 ps + 1 ps per window, for structure collection.
-SURFACE_DIVERSITY = True                    # One local proton-transfer or adsorption bias per window.
-DIVERSITY_K, DIVERSITY_FORCE = 2.0, 1.0      # eV/A^2 and max CV force (eV/A); smooth force-limited bias.
-PROTON_TARGET = 0.70                       # Target r(donor,H) - r(acceptor,H), A.
-ADSORPTION_DISTANCE, DESORPTION_DISTANCE = 2.10, 3.30  # O-Ir targets, A.
 LOGINTERVAL, SEED = 20, 7777                # 10 fs output; saved states allow continuation.
 MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1000., 100.
 CHECK_CHARGE_RESPONSE, CHARGE_PROBE_E = True, 0.02  # Three inexpensive frozen-geometry calls.
@@ -86,12 +76,11 @@ def write_json(path, value):
 def settings():
     names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_U_SHE SHE_ABSOLUTE_V '
              'COUNTER_SHEET_POINT GAUSSIAN_WIDTH CAPACITANCE TAUPHI_FS Z_FIXED '
-             'Z_REPULSIVE WALL_K PAIR_CUTOFF OO_MIN N_WINDOWS UMBRELLA_K '
+             'Z_REPULSIVE WALL_K PAIR_CUTOFF OO_MIN WINDOW_SPACING UMBRELLA_K '
              'REACTANT_MARGIN REQUIRE_ADSORBATE REVERSE_SWEEP TEMPERATURE_K '
              'TIMESTEP_FS FRICTION_PER_FS INITIAL_EQUIL_STEPS EQUIL_STEPS SAMPLE_STEPS '
              'LOGINTERVAL SEED MAX_TEMPERATURE_K MAX_FORCE_EV_A '
-             'CHECK_CHARGE_RESPONSE CHARGE_PROBE_E SURFACE_DIVERSITY DIVERSITY_K '
-             'DIVERSITY_FORCE PROTON_TARGET ADSORPTION_DISTANCE DESORPTION_DISTANCE').split()
+             'CHECK_CHARGE_RESPONSE CHARGE_PROBE_E').split()
     return {name: globals()[name] for name in names}
 
 
@@ -204,103 +193,10 @@ class DistanceUmbrella(FixConstraint):
         return 0
 
 
-class SurfaceBias(DistanceUmbrella):
-    """A conservative, force-limited restraint on a distance or distance difference."""
-    def __init__(self, spec=None):
-        self.spec = spec or dict(mode='off', ids=[], target_A=0.)
-
-    def evaluate(self, atoms):
-        ids = self.spec['ids']
-        forces = np.zeros((len(atoms), 3))
-        if not ids:
-            return forces, 0., 0., 0.
-        # Transfer IDs are [donor O, H, acceptor O]; adsorption IDs are [O, Ir].
-        terms = [(ids[0], ids[1], 1.)]
-        if len(ids) == 3:
-            terms.append((ids[2], ids[1], -1.))
-        gradients, value = [], 0.
-        for a, b, sign in terms:
-            vector = atoms.get_distance(a, b, mic=True, vector=True)
-            length = float(np.linalg.norm(vector))
-            if not np.isfinite(length) or length < 1.e-8:
-                raise ValueError('Invalid distance in surface bias')
-            value += sign*length
-            gradients.append((a, b, sign*vector/length))
-        z = DIVERSITY_K*(value-self.spec['target_A'])/DIVERSITY_FORCE
-        scale = np.hypot(1., z)
-        energy = DIVERSITY_FORCE**2/DIVERSITY_K*(scale-1.)
-        force = -DIVERSITY_FORCE*z/scale
-        for a, b, gradient in gradients:
-            forces[b] += force*gradient
-            forces[a] -= force*gradient
-        return forces, float(energy), float(value), float(force)
-
-
-def choose_surface_bias(atoms, fixed, index, replica, stage):
-    """Select an existing local motif; never insert atoms or force distant proton transfers."""
-    off = dict(mode='off', ids=[], target_A=0.)
-    if not SURFACE_DIVERSITY or stage['direction'] == 'initial':
-        return off
-    modes = ('deprotonate', 'protonate', 'adsorb', 'desorb')
-    mode = modes[(stage['window'] + index + replica) % len(modes)]
-    numbers, frozen = atoms.numbers, set(fixed)
-    ir = np.flatnonzero(numbers == 77)
-    top = atoms.positions[ir, 2].max()
-    oxygens = np.flatnonzero(numbers == 8)
-    mobile = [int(o) for o in oxygens if o not in frozen and
-              top+.3 < atoms.positions[o, 2] < top+5.]
-    env = {o: oxygen_environment(atoms, o) for o in mobile}
-    surface = [o for o in mobile if env[o]['Ir_neighbors'] == 1]
-    water = [o for o in mobile if env[o]['Ir_neighbors'] == 0 and env[o]['H_neighbors'] >= 1]
-    candidates = []
-    if mode in ('deprotonate', 'protonate'):
-        donors, acceptors = (surface, water) if mode == 'deprotonate' else (water, surface)
-        # A proton belongs to its closest oxygen; fixed H atoms cannot be steered.
-        attached = {o: [] for o in donors}
-        for h in np.flatnonzero(numbers == 1):
-            if h in frozen:
-                continue
-            distances = atoms.get_distances(int(h), oxygens, mic=True)
-            owner = int(oxygens[np.argmin(distances)])
-            if owner in attached and distances.min() < 1.25:
-                attached[owner].append(int(h))
-        for donor in donors:
-            if mode == 'protonate' and env[donor]['H_neighbors'] < 2:
-                continue
-            for acceptor in acceptors:
-                limit = 3 if mode == 'deprotonate' else 2
-                if env[acceptor]['H_neighbors'] >= limit:
-                    continue
-                if not 2.3 < atoms.get_distance(donor, acceptor, mic=True) < 3.3:
-                    continue
-                for h in attached[donor]:
-                    if 1.3 < atoms.get_distance(acceptor, h, mic=True) < 2.4:
-                        candidates.append([donor, h, acceptor])
-        target = PROTON_TARGET
-    else:
-        sites = [int(i) for i in ir if i not in frozen and atoms.positions[i, 2] > top-.75]
-        occupied = {i for i in sites if any(atoms.get_distance(o, i, mic=True) < 2.6 for o in surface)}
-        pool = water if mode == 'adsorb' else surface
-        for o in pool:
-            # Keep adsorption steering separate from the restrained O-O pair.
-            if o in atoms.info['oxygen_pair'] or env[o]['H_neighbors'] < 1:
-                continue
-            for i in sites:
-                d = atoms.get_distance(o, i, mic=True)
-                if ((mode == 'adsorb' and i not in occupied and 2.6 < d < 4.) or
-                        (mode == 'desorb' and d < 2.6)):
-                    candidates.append([o, i])
-        target = ADSORPTION_DISTANCE if mode == 'adsorb' else DESORPTION_DISTANCE
-    if not candidates:
-        return dict(mode=mode+'_skipped', ids=[], target_A=0.)
-    seed = [SEED, index, replica, stage['window'], int(stage['direction'] == 'reverse'), 3]
-    rng = np.random.default_rng(np.random.SeedSequence(seed))
-    return dict(mode=mode, ids=candidates[int(rng.integers(len(candidates)))], target_A=target)
-
-
 def make_stages(distance):
     high = distance + REACTANT_MARGIN
-    centers = np.linspace(high, OO_MIN, N_WINDOWS).tolist()
+    n = int(np.ceil((high-OO_MIN)/WINDOW_SPACING)) + 1
+    centers = np.linspace(high, OO_MIN, n).tolist()
     stages = [dict(direction='initial', window=-1, phase='equil', center_A=distance,
                    steps=INITIAL_EQUIL_STEPS)]
     sweeps = [('forward', centers)] + ([('reverse', centers[::-1])] if REVERSE_SWEEP else [])
@@ -391,7 +287,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
     stages = make_stages(atoms.get_distance(*atoms.info['oxygen_pair'], mic=True))
     initial = dict(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell.array,
                    pbc=atoms.pbc, info=atoms.info, fixed_ids=fixed)
-    identity = dict(method='active_learning_OO_surface', settings=settings(), model_sha256=model_sha,
+    identity = dict(method='fixed_window_OO', settings=settings(), model_sha256=model_sha,
                     driver_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                     initial=initial, replica=replica, stages=stages)
     run_id = digest(identity)
@@ -415,10 +311,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             raise ValueError('Output exists without matching run metadata; refusing to overwrite')
         cfg = dict(identity, run_id=run_id, model_file=str(model_file),
                    pair_environments=environments, eligible_pairs=candidates,
-                   proton_ensemble='Fixed atom counts; pH is not imposed by this driver.',
-                   composition=atoms.get_chemical_formula(), hydrogen_count=int(np.sum(atoms.numbers == 1)),
-                   sampling='Biased active-learning candidates; not a one-dimensional equilibrium PMF.',
-                   trajectory_labels='Unbiased MACE-VOLT predictions; recompute selected structures with DFT.')
+                   proton_ensemble='Fixed atom counts; pH is not imposed by this driver.')
         write_json(cfg_path, cfg)
     physical = physical_constraints(atoms, fixed)
     atoms.set_constraint(physical)
@@ -439,9 +332,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
     stage_id = 0 if state is None else state['stage_id']
     done = 0 if state is None else state['stage_done']
     bias = DistanceUmbrella(atoms.info['oxygen_pair'], stages[stage_id]['center_A'], UMBRELLA_K)
-    surface_bias = SurfaceBias(None if state is None else state['surface_bias'])
-    surface_window = None if state is None else state['surface_window']
-    atoms.set_constraint([bias, surface_bias]+physical)
+    atoms.set_constraint([bias]+physical)
     with ExitStack() as stack:
         dyn = stack.enter_context(NVTPhiLangevin(
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
@@ -476,7 +367,6 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             energy = scalar(atoms.get_potential_energy(apply_constraint=False))
             r = atoms.calc.results
             _, umbrella, distance, radial = bias.evaluate(atoms)
-            _, surface_energy, surface_cv, _ = surface_bias.evaluate(atoms)
             wall = sum(c.adjust_potential_energy(atoms) for c in physical if hasattr(c, 'adjust_potential_energy'))
             forces = atoms.get_forces(md=True)
             temperature = scalar(atoms.get_temperature())
@@ -488,11 +378,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        phase=stages[stage_id]['phase'], phase_step=dyn.nsteps-segment_start,
                        distance_A=distance, center_A=bias.center, k_eV_A2=bias.k,
                        bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=energy,
-                       energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella+surface_energy,
-                       surface_mode=surface_bias.spec['mode'],
-                       surface_atom_ids=json.dumps(surface_bias.spec['ids']),
-                       surface_cv_A=surface_cv, surface_target_A=surface_bias.spec['target_A'],
-                       surface_bias_eV=surface_energy,
+                       energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
                        temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
                        total_charge_e=scalar(atoms.info['total_charge']),
                        vacuum_potential_V=scalar(r['vacuum_potential']), fermi_level_eV=scalar(r['fermi_level']),
@@ -501,16 +387,12 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             for j, o in enumerate(atoms.info['oxygen_pair'], 1):
                 env = oxygen_environment(atoms, o)
                 row.update({f'O{j}_{k}':env[k] for k in ('H_neighbors','Ir_neighbors','nearest_Ir_A')})
-            surface_env = [oxygen_environment(atoms, o) for o in surface_bias.spec['ids'] if atoms.numbers[o] == 8]
-            row.update(surface_H_counts=json.dumps([e['H_neighbors'] for e in surface_env]),
-                       surface_Ir_counts=json.dumps([e['Ir_neighbors'] for e in surface_env]))
             frame = atoms.copy()
-            frame.set_constraint([])
-            frame.info.update(step=dyn.nsteps, sample_purpose='active_learning', md_record=row, restart_state=dict(
+            frame.set_constraint([])  # Stored energy/forces include restraints exactly once.
+            frame.info.update(step=dyn.nsteps, md_record=row, restart_state=dict(
                 run_id=run_id, rng_state=rng.bit_generator.state, model_anchor=dyn._reference_model_potential,
-                stage_id=stage_id, stage_done=dyn.nsteps-segment_start,
-                surface_bias=surface_bias.spec, surface_window=surface_window))
-            trajectory.write(frame, energy=energy, forces=atoms.get_forces(apply_constraint=False))
+                stage_id=stage_id, stage_done=dyn.nsteps-segment_start))
+            trajectory.write(frame, energy=energy+wall+umbrella, forces=forces)
             write_row(row)
 
         record()
@@ -518,11 +400,6 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
         while stage_id < len(stages):
             stage = stages[stage_id]
             bias.center = stage['center_A']       # Changed only BETWEEN complete integration steps.
-            key = [stage['direction'], stage['window']]
-            if key != surface_window:
-                surface_bias.spec = choose_surface_bias(atoms, fixed, index, replica, stage)
-                surface_window = key
-                print(f'Surface bias: {surface_bias.spec}', flush=True)
             segment_start = dyn.nsteps-done
             remaining = stage['steps']-done
             if remaining > 0:
@@ -549,12 +426,9 @@ def main():
     if len(set(RUN_INDEXES)) != len(RUN_INDEXES):
         raise ValueError('RUN_INDEXES must not contain duplicates')
     if any(not isinstance(n, int) or n <= 0 for n in
-           (MAX_WORKERS, REPLICAS, N_WINDOWS, INITIAL_EQUIL_STEPS, EQUIL_STEPS, SAMPLE_STEPS, LOGINTERVAL)):
+           (MAX_WORKERS, REPLICAS, INITIAL_EQUIL_STEPS, EQUIL_STEPS, SAMPLE_STEPS, LOGINTERVAL)):
         raise ValueError('Worker, replica and step counts must be positive integers')
-    if N_WINDOWS < 2:
-        raise ValueError('N_WINDOWS must be at least 2')
-    if min(OO_MIN, UMBRELLA_K, TEMPERATURE_K, TIMESTEP_FS, DIVERSITY_K, DIVERSITY_FORCE,
-           PROTON_TARGET, ADSORPTION_DISTANCE, DESORPTION_DISTANCE,
+    if min(OO_MIN, WINDOW_SPACING, UMBRELLA_K, TEMPERATURE_K, TIMESTEP_FS,
            GAUSSIAN_WIDTH, CAPACITANCE, TAUPHI_FS, FRICTION_PER_FS, CHARGE_PROBE_E) <= 0:
         raise ValueError('Physical scales must be positive')
     wanted, frames = set(RUN_INDEXES), {}
