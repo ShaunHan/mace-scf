@@ -52,6 +52,7 @@ def create_error_table(
     metrics_logger=None,
     epoch=None,
     stage=None,
+    metrics_out=None,
 ) -> PrettyTable:
     assert table_type in NEW_TABLE_TYPES
 
@@ -61,7 +62,7 @@ def create_error_table(
     has_wf_observations = False
 
     if table_type == "ElectrostaticRMSE":
-        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "relative F RMSE %", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smeared/farfield) me/A^3", "RMSE_EF(abs/rel) meV", "RMSE_ESP(raw/smeared) mV", "RMSE_ESPvac(abs/rel) mV", "RMSE_WF(abs/rel) meV"]
+        table.field_names = ["split", "RMSE_E_per_atom meV", "RMSE_F meV/A", "relative F RMSE %", "RMSE_dip_per_atom meA", "RMSE_rho(raw/smeared/farfield) me/A^3", "RMSE_EF(abs/centered) meV", "RMSE_ESP(raw/smeared) mV", "RMSE_ESPvac(abs/centered) mV", "RMSE_WF(abs/centered) meV"]
     elif table_type == "DensityCoefficientsRMSE":
         table.field_names = [
             "config_type", 
@@ -135,6 +136,8 @@ def create_error_table(
             device=device,
             split=name,
         )
+        if metrics_out is not None:
+            metrics_out[name] = dict(metrics)  # Keep numeric values before table formatting.
         if metrics_logger is not None:
             metrics_logger.log({**metrics, 'mode':'eval', 'split':name,
                                 'epoch':epoch, 'stage':stage,
@@ -272,6 +275,6 @@ def create_error_table(
         for index,name in reversed(list(enumerate(table.field_names))):
             if index and all(row[index] in ('not found','not found/not found') for row in table.rows):
                 table.del_column(name)
-    if table_type == "ElectrostaticRMSE" and not has_wf_observations and "RMSE_WF(abs/rel) meV" in table.field_names:
-        table.del_column("RMSE_WF(abs/rel) meV")
+    if table_type == "ElectrostaticRMSE" and not has_wf_observations and "RMSE_WF(abs/centered) meV" in table.field_names:
+        table.del_column("RMSE_WF(abs/centered) meV")
     return table

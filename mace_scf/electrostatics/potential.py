@@ -778,14 +778,14 @@ def initialize_response(model, loader, device, apply_potential_smearing=False):
 
 
 @torch.no_grad()
-def initialize_vacuum_reference(model, loader, device, relative=True, apply_potential_smearing=False):
+def initialize_vacuum_reference(model, loader, device, apply_potential_smearing=False):
     """Fit the missing atomic vacuum reference from training observations only.
 
     Observed vacuum minus the retained deformation plane determines a small
     atomic reference model. For a neutral-reference response, the same scalar
     observer is used with and without a proto spectrum: its finite-grid tail
-    must not redefine a measured real-space vacuum value. The
-    relative fit removes one constant from this *reference* regression too.
+    must not redefine a measured real-space vacuum value. Absolute training
+    observations fix the reference without subtracting a fitted offset.
     The residual measures its far-vacuum/finite-spectrum approximation.
     """
     response = model.field_dependent_charges_map
@@ -825,16 +825,13 @@ def initialize_vacuum_reference(model, loader, device, relative=True, apply_pote
                      'proto radial-limit' if bool(response.proto_fitted) else 'zero')
         return
     x, y, w = torch.cat(designs), torch.cat(targets), torch.cat(weights)
-    if relative:
-        x = x-(x*w[:,None]).sum(0)/w.sum()
-        y = y-(y*w).sum()/w.sum()
     scale = x.square().mul(w[:,None]).sum(0).sqrt().clamp_min(1.e-12)
     solution = torch.linalg.lstsq((x/scale*w.sqrt()[:,None]).cpu(), (y*w.sqrt()).cpu(),
                                   rcond=1.e-10, driver='gelsd').solution.to(x)/scale
     response.vacuum_reference_integrals.copy_(solution)
     residual = ((x@solution-y).square()*w).sum()/w.sum()
-    logging.debug('Training-only atomic vacuum reference: relative=%s, labels=%d, residual_RMSE=%.6g V; '
-                 'shared EF/vacuum gauge, fitted independently of optional spatial proto data',relative,len(y),float(residual.sqrt()))
+    logging.debug('Training-only atomic vacuum reference: labels=%d, residual_RMSE=%.6g V; '
+                 'shared EF/vacuum gauge, fitted independently of optional spatial proto data',len(y),float(residual.sqrt()))
 
 def _fft_shapes(values: torch.Tensor, num_graphs: int) -> list[tuple[int, int, int]]:
     """Decode one stored three-dimensional FFT shape per graph."""

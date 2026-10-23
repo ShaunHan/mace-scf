@@ -25,7 +25,7 @@ from mace_scf.utils.training_metrics import (
 )
 from mace.tools.scatter import scatter_sum
 from mace_scf.electrostatics.loss import (
-    vacuum_observation_weight, vacuum_reference_weights, RelativeScalarLoss,
+    vacuum_observation_weight, vacuum_reference_weights, WeightedScalarLoss,
     WeightedFermiLevel, WeightedVacuumPotential,
 )
 from mace_scf.electrostatics.coupled import SCFNumericalError
@@ -276,7 +276,11 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
     coupled = getattr(getattr(model, 'field_dependent_charges_map', None), 'coupled', False)
     definition = getattr(loss_fn, 'definition', None)
     if coupled and getattr(optimizer, '_guard_definition', None) != definition:
-        optimizer._training_guard = None
+        from mace_scf.electrostatics.loss import WeightedLoss
+        saved_guard = getattr(optimizer, '_guard_definition', None)
+        saved_guard = WeightedLoss.from_checkpoint(saved_guard) if saved_guard else None
+        if saved_guard is None or saved_guard.definition != definition:
+            optimizer._training_guard = None
         optimizer._guard_definition = deepcopy(definition)
     for epoch in range(start_epoch, end_epoch+1):
         epoch_start = time.perf_counter()
@@ -335,8 +339,6 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             if hasattr(optimizer, "eval"):
                 optimizer.eval()
             try:
-                calibrate_scalar_references(model, model_eval_wrapper, loss_fn, ema,
-                                            train_loader, device)
                 valid_loss, metrics = evaluate(model, model_eval_wrapper, loss_fn, ema, valid_loader, device)
                 score = checkpoint_score(checkpoint_metric, valid_loss, metrics)
                 if coupled and (not np.isfinite(valid_loss) or
@@ -450,7 +452,7 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     migrated = getattr(handler, '_desmearing_migrated', False)
     changed = changed or migrated
     old_best = getattr(handler, 'best_loss', float('inf'))
-    verify = (not migrated and epoch is not None and old_definition and np.isfinite(old_best)
+    verify = (not migrated and epoch is not None and saved_objective is not None and np.isfinite(old_best)
               and not getattr(handler, '_resume_verified', False))
     if epoch is None or (not changed and not verify):
         if upgrade:
@@ -462,8 +464,6 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
     generator = getattr(valid_loader, 'generator', None)
     loader_rng = generator.get_state() if generator is not None else None
-    reference = getattr(response, 'scalar_reference', None)
-    old_reference = None if reference is None else reference.detach().clone()
     try:
         if hasattr(optimizer, 'eval'):
             optimizer.eval()
@@ -478,7 +478,6 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
         if changed:
             if upgrade:
                 response.raw_vacuum_boundary = True
-            calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device)
             value, metrics = evaluate(model, wrapper, loss_fn, ema, valid_loader, device)
             score = checkpoint_score(checkpoint_metric, value, metrics)
             if not np.isfinite(value) or not np.isfinite(metrics.get('scf_residual_max', 0.)):
@@ -486,8 +485,6 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     except Exception:
         if upgrade:
             response.raw_vacuum_boundary = False
-        if old_reference is not None:
-            reference.copy_(old_reference)
         raise
     finally:
         random.setstate(rng[0]); np.random.set_state(rng[1]); torch.random.set_rng_state(rng[2])
@@ -506,39 +503,6 @@ def _resume_loss_baseline(model, wrapper, loss_fn, train_loader, valid_loader,
     logging.info('Re-evaluated resumed epoch %d with the current objective and observer: loss=%.6g. '
                  'The objective, observer or selection metric changed; optimizer and EMA state are retained. '
                  'Selection: %s=%.8g.', epoch, value, checkpoint_metric, score)
-
-
-def _relative_batch_centers(model, wrapper, loss_fn, pieces, device):
-    """Replay scalar predictions without forces or saved parameter activations.
-
-    Centering each device batch would silently remove all scalar supervision
-    at a device batch of one. Compute the logical-batch offsets first, restore
-    RNG/trainability, and differentiate the same predictions in the main pass.
-    """
-    from copy import copy
-    predictor = copy(wrapper)
-    if hasattr(wrapper, 'output_args'):
-        predictor.output_args = {key: False for key in wrapper.output_args}
-    flags = [p.requires_grad for p in model.parameters()]
-    rng = torch.random.get_rng_state()
-    cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
-    moments = {}
-    try:
-        model.requires_grad_(False)
-        with torch.no_grad():
-            for piece in pieces:
-                piece = piece.to(device)
-                output = predictor(model, piece.to_dict(), training=True)
-                for key, value in loss_fn.relative_moments(piece, output).items():
-                    moments[key] = moments.get(key, 0.)+value
-                del output, piece
-    finally:
-        for parameter, flag in zip(model.parameters(), flags):
-            parameter.requires_grad_(flag)
-        torch.random.set_rng_state(rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state(cuda_rng, device)
-    return {key: value[1]/value[0].clamp_min(1.e-30) for key, value in moments.items()}
 
 
 def _guarded_take_step(snapshot, model, model_eval_wrapper, loss_fn, batch,
@@ -598,20 +562,6 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     """One atomic optimizer update, differentiating model parameters only."""
     start = time.time()
     model.train()
-    options = getattr(model_eval_wrapper, 'training_options', None)
-    if (getattr(options, 'reference_conditioning', None) == 'electronic'
-            and getattr(loss_fn.loss_fns.get('fermi_level'), 'relative', False)):
-        from dataclasses import replace
-        if not getattr(model_eval_wrapper, '_logged_relative_teacher', False):
-            logging.info('Relative EF gauge: retaining measured-field -> EF supervision; '
-                         'absolute-DFT-EF -> density/potential conditioning is inactive')
-            model_eval_wrapper._logged_relative_teacher = True
-        original_wrapper = model_eval_wrapper
-        model_eval_wrapper = getattr(original_wrapper, '_relative_reference_wrapper', None)
-        if model_eval_wrapper is None:
-            model_eval_wrapper = copy(original_wrapper)
-            model_eval_wrapper.training_options = replace(options, reference_conditioning='fermi_level')
-            original_wrapper._relative_reference_wrapper = model_eval_wrapper
     parameters = [p for group in optimizer.param_groups for p in group["params"] if p.requires_grad]
     # One optimizer batch can use several device batches. Split only after an
     # actual allocation OOM, and remember the successful graph count. The
@@ -642,13 +592,10 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
     def backward_batch():
         total=None
         metric_sums=None
-        denominators = dict(normalizers) if normalizers is not None else None
-        if adaptive and limit < logical and loss_fn.relative_scalar_losses:
-            denominators.update(_relative_batch_centers(model, model_eval_wrapper, loss_fn, pieces(), device))
         for piece in pieces():
             piece=piece.to(device)
             output=model_eval_wrapper(model,piece.to_dict(),training=True)
-            loss=loss_fn(pred=output,ref=piece,**({'normalizers':denominators} if adaptive else {}))
+            loss=loss_fn(pred=output,ref=piece,**({'normalizers':normalizers} if adaptive else {}))
             if not bool(torch.isfinite(loss.detach())):
                 raise FloatingPointError('Nonfinite loss; no optimizer/EMA update performed')
             history = (_growth_reference if _growth_reference is not None
@@ -693,10 +640,6 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         capacity=limit
         logging.warning('Allocation OOM: retrying the unchanged optimizer batch with at most %d graphs per device batch; no optimizer/EMA update occurred',limit)
     if adaptive:optimizer._device_batch_size=capacity
-    if batch.num_graphs < 2 and getattr(loss_fn, 'relative_scalar_losses', {}) and not getattr(model_eval_wrapper, '_logged_relative_singleton', False):
-        logging.warning('A relative scalar loss needs at least two observed labels in an optimizer batch; '
-                        'singleton batches contribute no scalar pair loss. Device microbatch size may still be one.')
-        model_eval_wrapper._logged_relative_singleton = True
     frequency = debug_grad_log_frequency
     if (debug_log_grad_summary and logging.getLogger().isEnabledFor(logging.DEBUG)
             and (opt_step == 0 or (frequency is not None and frequency > 0 and opt_step % frequency == 0))):
@@ -801,63 +744,6 @@ def _gradient_diagnostics(optimizer):
     for row in report:
         row['squared_norm_fraction'] = row['norm']**2/max(total,1.e-30)
     return report
-
-
-def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, device):
-    """Fix relative scalar references on a deterministic training panel.
-
-    Relative supervision cannot identify this constant. Calibrate the same EMA
-    parameters and deployment trajectory used by validation/export, never from
-    validation labels. Energy-derived models skip this observer-only fit:
-    their references enter the charging energy, so absolute EF/vacuum labels
-    must be fitted together with energies and forces, not shifted afterwards.
-    """
-    response = getattr(model, 'field_dependent_charges_map', None)
-    if getattr(response, 'energy_derivatives', False):
-        return None
-    functions = getattr(loss_fn, 'relative_scalar_losses', {})
-    if not functions or not hasattr(response, 'scalar_reference'):
-        return None
-    from copy import copy
-    from .foundation import calibration_loader
-    predictor = copy(wrapper)
-    predictor.output_args = {key: False for key in wrapper.output_args}
-    flags = [p.requires_grad for p in model.parameters()]
-    was_training = model.training
-    rng = torch.random.get_rng_state()
-    cuda_rng = torch.cuda.get_rng_state(device) if torch.device(device).type == 'cuda' else None
-    start = time.perf_counter()
-    moments, observed = {}, {}
-    try:
-        model.eval(); model.requires_grad_(False)
-        with torch.no_grad(), ema.average_parameters() if ema is not None else nullcontext():
-            for batch, output in _evaluation_batches(model, predictor, calibration_loader(train_loader), device, None):
-                for key, function in functions.items():
-                    values = function.moments(batch, output).detach().double()
-                    moments[key] = moments.get(key, 0.)+values
-                    observed[key] = observed.get(key, 0)+int((function.weights(batch)>0).sum())
-            report = {}
-            for index, key in enumerate(('fermi_level', 'vacuum_potential')):
-                if key not in moments or not bool(moments[key][0]>0):
-                    continue
-                weight, first, second, _ = moments[key]
-                shift = -first/weight
-                response.scalar_reference[index].add_(shift.to(response.scalar_reference))
-                report[key] = {'observed_training_graphs':observed[key], 'shift_eV':float(shift),
-                    'reference_eV':float(response.scalar_reference[index]),
-                    'panel_RMSE_before_eV':float((second/weight).clamp_min(0).sqrt()),
-                    'panel_RMSE_after_eV':float((second/weight-(first/weight).square()).clamp_min(0).sqrt())}
-            report['seconds'] = time.perf_counter()-start
-            logging.debug('Training-only scalar reference calibration %s; constants saved with the model; '
-                         'legacy observers only; energy and charge work are unchanged', report)
-            return report
-    finally:
-        for parameter, flag in zip(model.parameters(), flags):
-            parameter.requires_grad_(flag)
-        model.train(was_training)
-        torch.random.set_rng_state(rng)
-        if cuda_rng is not None:
-            torch.cuda.set_rng_state(cuda_rng, device)
 
 
 def evaluate(model, model_eval_wrapper, loss_fn, ema, data_loader, device, split='validation'):
@@ -1000,7 +886,7 @@ def _evaluate(
         for key, function in loss_fn.loss_fns.items():
             if loss_fn.loss_weights[key] == 0:
                 continue
-            if isinstance(function, RelativeScalarLoss):
+            if isinstance(function, WeightedScalarLoss):
                 scalar_objectives[key] = scalar_objectives.get(key, 0.)+function.moments(batch, output).double()
                 continue
             if hasattr(function, 'statistics'):
@@ -1299,7 +1185,7 @@ def _evaluate(
         if weight > 0:
             aux[key] = float((square/weight).sqrt())
     for key, moments in scalar_metrics.items():
-        weight, first, second, _ = moments
+        weight, first, second = moments
         if weight > 0:
             name = 'fermi_level' if key == 'fermi_level' else 'esp_vac'
             aux['rmse_'+name] = float((second/weight).sqrt())
@@ -1366,16 +1252,16 @@ def valid_err_log(
                 value += '/'+fmt('rmse_rho_smooth')+'/'+fmt('rmse_rho_farfield_smooth')
             pieces.append(label+'='+value+' me/A^3')
         if 'rmse_fermi_level' in eval_metrics:
-            pieces.append('RMSE_EF(abs/rel)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
+            pieces.append('RMSE_EF(abs/centered)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
         if 'rmse_esp' in eval_metrics:
             if 'rmse_esp_smooth' in eval_metrics:
                 pieces.append('RMSE_ESP(raw/smeared)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
             else:
                 pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:
-            pieces.append('RMSE_ESPvac(abs/rel)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
+            pieces.append('RMSE_ESPvac(abs/centered)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_wf_abs' in eval_metrics:
-            pieces.append('RMSE_WF(abs/rel)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+            pieces.append('RMSE_WF(abs/centered)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"

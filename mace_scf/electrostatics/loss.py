@@ -380,24 +380,9 @@ class WeightedFourierPotential(torch.nn.Module):
         return numerator/denominator.clamp_min(1.e-30)
 
 
-class RelativeScalarLoss(torch.nn.Module):
-    """Scalar differences with one free additive gauge per optimizer batch.
-
-    For equal weights the relative objective is the mean squared error of
-    all pair differences, divided by two. Its expectation is the population
-    error variance, independently of batch size. One label supplies no pair.
-    This changes the gradients, not just the reported absolute error.
-    """
+class WeightedScalarLoss(torch.nn.Module):
+    """Absolute scalar MSE, normalized by the observed label weight."""
     key = ''
-
-    def __init__(self, relative=True):
-        super().__init__()
-        if not isinstance(relative, bool):
-            raise TypeError('relative must be a boolean')
-        self.relative = relative
-
-    def extra_repr(self):
-        return f'relative={self.relative}'
 
     def weights(self, ref):
         return (vacuum_observation_weight(ref) if self.key == 'vacuum_potential'
@@ -414,47 +399,26 @@ class RelativeScalarLoss(torch.nn.Module):
         return torch.where(weight > 0, error, 0.), weight
 
     def moments(self, ref, pred):
+        """Sufficient statistics for the absolute loss and bias diagnostics."""
         error, weight = self.errors(ref, pred)
         return torch.stack((weight.sum(), (weight*error).sum(),
-                            (weight*error.square()).sum(), weight.square().sum()))
+                            (weight*error.square()).sum()))
 
     def from_moments(self, moments):
-        weight, first, second, square_weight = moments.unbind()
-        safe = weight.clamp_min(1.e-30)
-        if self.relative:
-            denominator = weight-square_weight/safe
-            return torch.where(denominator > 0,
-                (second-first.square()/safe).clamp_min(0.)/denominator.clamp_min(1.e-30), second*0.)
-        return second/safe
+        weight, _, second = moments.unbind()
+        return second/weight.clamp_min(1.e-30)
 
-    def forward(self, ref, pred, normalizers=None, reference=False):
+    def forward(self, ref, pred, normalizers=None):
         error, weight = self.errors(ref, pred)
-        total = weight.sum()
-        if self.relative:
-            center_key = (self.key, 'reference_mean' if reference else 'mean')
-            if normalizers is not None and center_key in normalizers:
-                center = normalizers[center_key].to(error)
-            else:
-                # A detached optimal offset has the identical derivative:
-                # the weighted sum of centered residuals is zero.
-                center = (error*weight).sum().detach()/total.clamp_min(1.e-30)
-                if normalizers is not None and not reference:
-                    full = normalizers[(self.key, '')].to(total)
-                    if not torch.isclose(total, full):
-                        raise ValueError('Relative losses require the whole optimizer-batch mean before microbatch backward')
-            denominator = (normalizers[(self.key, 'pairs')].to(error) if normalizers is not None
-                           else total-weight.square().sum()/total.clamp_min(1.e-30))
-            value = (weight*(error-center).square()).sum()
-            return torch.where(denominator > 0, value/denominator.clamp_min(1.e-30), value*0.)
-        denominator = total if normalizers is None else normalizers[(self.key, '')].to(error)
+        denominator = weight.sum() if normalizers is None else normalizers[(self.key, '')].to(error)
         return (weight*error.square()).sum()/denominator.clamp_min(1.e-30)
 
 
-class WeightedFermiLevel(RelativeScalarLoss):
+class WeightedFermiLevel(WeightedScalarLoss):
     key = 'fermi_level'
 
 
-class WeightedVacuumPotential(RelativeScalarLoss):
+class WeightedVacuumPotential(WeightedScalarLoss):
     key = 'vacuum_potential'
 
 
@@ -500,6 +464,10 @@ class WeightedLoss(torch.nn.Module):
                 raise ValueError(f"requested `{name}` in loss, which is not recognised")
             if isinstance(options, (int, float)):
                 options = {'weight': options}
+            obsolete = {'relative', 'mean_weight'} & options.keys()
+            if obsolete:
+                raise ValueError(f'Remove {sorted(obsolete)} from loss {name}; '
+                                 'scalar labels now always use absolute MSE.')
             self.loss_weights[name] = options.pop("weight")
             if name in ('energy_per_atom', 'forces', 'stress'):
                 reference = options.pop('reference', 'dft')
@@ -513,6 +481,9 @@ class WeightedLoss(torch.nn.Module):
                 self.loss_fns[name] = function(**options)
             else:
                 self.loss_fns[name] = function
+            if isinstance(self.loss_fns[name], WeightedScalarLoss):
+                # Internal checkpoint semantics, not a configurable loss option.
+                self.definition[name]['objective'] = 'absolute_mse'
             if name in ('fourier_density', 'fourier_potential'):
                 # Store the resolved target convention so a resumed objective
                 # remains unambiguous when defaults evolve.
@@ -522,7 +493,25 @@ class WeightedLoss(torch.nn.Module):
 
     @classmethod
     def from_checkpoint(cls, definition):
-        """Read saved options; explicit reference always defines the objective."""
+        """Read an equivalent saved objective, or request a new loss baseline.
+
+        Old explicit relative:false settings are exactly the absolute loss.
+        A removed objective cannot reproduce its historical best loss; resume
+        must re-evaluate that checkpoint on the current objective instead.
+        """
+        definition = deepcopy(definition)
+        for name, options in definition.items():
+            if name in ('fermi_level', 'vacuum_potential') and (
+                    not isinstance(options, dict) or not (
+                        options.get('objective') == 'absolute_mse'
+                        or options.get('relative') is False)):
+                return None
+            if isinstance(options, dict):
+                if options.get('relative', False) or 'mean_weight' in options:
+                    return None
+                options.pop('relative', None)
+                if name in ('fermi_level', 'vacuum_potential'):
+                    options.pop('objective', None)
         return cls(definition)
         
     def normalizers(self, ref: Batch):
@@ -534,44 +523,20 @@ class WeightedLoss(torch.nn.Module):
         """
         result={}
         atom_means={'forces','atomic_multipoles','esps','field_features'}
-        label_means={'fourier_density','fermi_level'}
+        label_means={'fourier_density'}
         unsupported={'fixedpoint_scf_stability','fermi_level_gradient','final_terms_fixedpoint_scf_stability'}
         for name,function in self.loss_fns.items():
             if not self.loss_weights[name]:continue
             if name in unsupported:
                 raise ValueError(f'Graph accumulation is not defined for trajectory loss {name}')
-            if isinstance(function, RelativeScalarLoss):
-                weight = function.weights(ref)
-                total = weight.sum()
-                result[(name, '')] = total
-                if function.relative:
-                    result[(name, 'pairs')] = total-weight.square().sum()/total.clamp_min(1.e-30)
+            if isinstance(function, WeightedScalarLoss):
+                result[(name, '')] = function.weights(ref).sum()
             elif isinstance(function,WeightedFourierPotential):
                 result[(name,'spatial')]=(ref.weight*ref.fourier_potential_weight).sum()
             elif name in label_means:
                 result[(name,'')]=(ref.weight*getattr(ref,name+'_weight')).sum()
-            elif name=='vacuum_potential':
-                result[(name,'')]=vacuum_observation_weight(ref).sum()
             else:
                 result[(name,'')]=ref.weight.new_tensor(len(ref.positions) if name in atom_means else ref.num_graphs)
-        return result
-
-    @property
-    def relative_scalar_losses(self):
-        return {name: fn for name, fn in self.loss_fns.items()
-                if self.loss_weights[name] and isinstance(fn, RelativeScalarLoss) and fn.relative}
-
-    def relative_moments(self, ref, pred):
-        """Small sufficient statistics for an exact memory-bounded replay."""
-        from types import SimpleNamespace
-        result = {}
-        for name, function in self.relative_scalar_losses.items():
-            result[(name, 'mean')] = function.moments(ref, pred)[:2].detach()
-            branch = pred.get('reference_response')
-            if branch is not None and name in branch['reference_masks']:
-                masked = SimpleNamespace(**ref.to_dict())
-                masked.weight = ref.weight*branch['reference_masks'][name].to(ref.weight)
-                result[(name, 'reference_mean')] = function.moments(masked, branch)[:2].detach()
         return result
 
     @property
@@ -591,7 +556,7 @@ class WeightedLoss(torch.nn.Module):
         for name, func in self.loss_fns.items():
             if self.loss_weights[name] == 0:
                 continue
-            if isinstance(func, RelativeScalarLoss):
+            if isinstance(func, WeightedScalarLoss):
                 value = func(ref, pred, normalizers=normalizers)
             elif normalizers is not None and isinstance(func,WeightedFourierPotential):
                 value=sum(numerator/normalizers[(name,part)].to(numerator).clamp_min(1.e-30)
@@ -619,11 +584,6 @@ class WeightedLoss(torch.nn.Module):
             for name, mask in reference['reference_masks'].items():
                 if not self.loss_weights.get(name,0):
                     continue
-                if name != 'fermi_level' and getattr(self.loss_fns.get('fermi_level'), 'relative', False):
-                    # An absolute DFT chemical potential cannot constrain a
-                    # grand-canonical auxiliary in a freely chosen EF gauge.
-                    # The measured-field -> relative EF auxiliary remains valid.
-                    continue
                 masked = SimpleNamespace(**ref.to_dict())
                 masked.weight = ref.weight*mask.to(ref.weight)
                 if name == 'vacuum_potential':
@@ -634,9 +594,9 @@ class WeightedLoss(torch.nn.Module):
                 if normalizers is not None:
                     base = normalizers[(name,'spatial' if name=='fourier_potential' else '')].to(base)
                 function = self.loss_fns[name]
-                if isinstance(function, RelativeScalarLoss):
+                if isinstance(function, WeightedScalarLoss):
                     denominators = self.normalizers(ref) if normalizers is None else normalizers
-                    value = function(masked, reference, normalizers=denominators, reference=True)
+                    value = function(masked, reference, normalizers=denominators)
                 else:
                     value = function(masked,reference)*count/base.clamp_min(1.e-30)
                 loss += self.loss_weights[name]*value
@@ -647,6 +607,6 @@ class WeightedLoss(torch.nn.Module):
         for name in self.loss_fns:
             string += f"{name}_weight={self.loss_weights[name]}, "
             function = self.loss_fns[name]
-            if isinstance(function, (WeightedFourierDensity, WeightedFourierPotential, RelativeScalarLoss)):
+            if isinstance(function, (WeightedFourierDensity, WeightedFourierPotential)):
                 string += f'{name} options: {function.extra_repr()}, '
         return string + ")"

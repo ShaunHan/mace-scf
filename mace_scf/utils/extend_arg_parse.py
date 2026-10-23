@@ -41,7 +41,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     # Preserve single-head behavior unless replay is explicitly requested.
     parser.set_defaults(multiheads_finetuning=False)
     parser.add_argument('--refit_fermi_readout', type=strict_str2bool, default=False,
-                        help='Fit the final common EF readout on training EF labels only; compare the exported candidate on validation')
+                        help='Retired option; must remain false. Train energy, forces and EF jointly.')
     parser.add_argument("--amsgrad", type=strict_str2bool, nargs="?", const=True,
                         default=True, help="Use the AMSGrad optimizer variant")
     for action in parser._actions:

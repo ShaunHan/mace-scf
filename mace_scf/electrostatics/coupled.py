@@ -1840,9 +1840,7 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     # The frozen neutral-atom reference and independent vacuum labels are raw.
     # A field-loss reference must not silently change either physical observer.
     initialize_response(model, loader, device, apply_potential_smearing=False)
-    vacuum_options = (loss_config or {}).get('vacuum_potential', {})
     initialize_vacuum_reference(model, loader, device,
-        relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True,
         apply_potential_smearing=False)
     r = model.field_dependent_charges_map
     ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0

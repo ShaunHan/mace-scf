@@ -265,9 +265,7 @@ def build_model(
             apply_smearing = target_smearing_enabled(potential_options)
             initialize(model, train_loader, args.device, apply_potential_smearing=apply_smearing)
             from mace_scf.electrostatics.potential import initialize_vacuum_reference
-            vacuum_options = args.train_schedule[0]['loss'].get('vacuum_potential', {})
             initialize_vacuum_reference(model, train_loader, args.device,
-                relative=vacuum_options.get('relative', True) if isinstance(vacuum_options, dict) else True,
                 apply_potential_smearing=apply_smearing)
         condition_energy(model, train_loader, args.device)
     if getattr(args, 'enable_cueq', False) and not native_cueq:

@@ -18,6 +18,7 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
+      vacuum_reservoir: vacuum_reservoir
   pt_head:
     info_keys:
       energy: dft_free_energy
@@ -104,12 +105,8 @@ train_schedule:
         weight: 100
         desmearing: true
         reference: raw+smeared
-      vacuum_potential:
-        weight: 100
-        relative: false
-      fermi_level:
-        weight: 100
-        relative: false
+      vacuum_potential: 100
+      fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -139,12 +136,8 @@ train_schedule:
         weight: 100
         desmearing: true
         reference: raw+smeared
-      vacuum_potential:
-        weight: 100
-        relative: false
-      fermi_level:
-        weight: 100
-        relative: false
+      vacuum_potential: 100
+      fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -173,12 +166,8 @@ train_schedule:
         weight: 100
         desmearing: true
         reference: raw+smeared
-      vacuum_potential:
-        weight: 100
-        relative: false
-      fermi_level:
-        weight: 100
-        relative: false
+      vacuum_potential: 100
+      fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -207,12 +196,8 @@ train_schedule:
         weight: 100
         desmearing: true
         reference: raw+smeared
-      vacuum_potential:
-        weight: 100
-        relative: false
-      fermi_level:
-        weight: 100
-        relative: false
+      vacuum_potential: 100
+      fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -241,12 +226,8 @@ train_schedule:
         weight: 100
         desmearing: true
         reference: raw+smeared
-      vacuum_potential:
-        weight: 100
-        relative: false
-      fermi_level:
-        weight: 100
-        relative: false
+      vacuum_potential: 100
+      fermi_level: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
