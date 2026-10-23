@@ -83,7 +83,8 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
     pair_control = 'TARGET_PAIR_VOLTAGE' in cfg['settings']
     target = cfg['settings']['TARGET_PAIR_VOLTAGE' if pair_control else 'TARGET_U_SHE']
     voltage_key = 'pair_voltage_V' if pair_control else 'voltage_V_SHE'
-    report = dict(voltage_reference='pair' if pair_control else 'legacy SHE',
+    report = dict(voltage_reference='pair' if pair_control else (
+                      'SHE vacuum reservoir' if cfg['initial']['info'].get('vacuum_reservoir') else 'legacy SHE'),
                   source_index=cfg['initial']['info']['source_index'],
                   oxygen_pair=cfg['initial']['info']['oxygen_pair'],
                   meaning='Conditional O-O distance profile for this fixed composition/pair and the implemented controller.',

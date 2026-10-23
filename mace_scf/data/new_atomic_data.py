@@ -29,9 +29,9 @@ import numpy as np
 
 _ATOMIC_DATA_PARAMETERS = inspect.signature(AtomicData.__init__).parameters
 COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charge_width",
-                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
+                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac", "vacuum_reservoir")
 COUNTER_CHARGE_FIELDS = ("counter_charge", "counter_charge_center", "counter_charge_width",
-                         "counter_charge_axis", "counter_charge_fraction")
+                         "counter_charge_axis", "counter_charge_fraction", "vacuum_reservoir")
 
 
 def counter_charge_data(properties, pbc=None):
@@ -41,6 +41,10 @@ def counter_charge_data(properties, pbc=None):
     Exactly one x/y/zfrac selects a sheet at that fractional cell coordinate.
     Zero width is an internal marker for an absent source, never a user width.
     """
+    reservoir = properties.get("vacuum_reservoir", False)
+    reservoir = False if reservoir is None else reservoir
+    if reservoir not in (False, True, 0, 1):
+        raise ValueError("vacuum_reservoir must be a boolean")
     charge = float(properties.get("counter_charge") or 0.)
     center = properties.get("counter_charge_center")
     planes = [(i, properties[f"counter_charge_{a}frac"]) for i, a in enumerate("xyz")
@@ -71,7 +75,8 @@ def counter_charge_data(properties, pbc=None):
     return {key: torch.as_tensor(value, dtype=torch.get_default_dtype()) for key, value in {
         "counter_charge": charge, "counter_charge_center": center[None],
         "counter_charge_width": width, "counter_charge_fraction": fraction}.items()} | {
-        "counter_charge_axis": torch.tensor(axis, dtype=torch.long)}
+        "counter_charge_axis": torch.tensor(axis, dtype=torch.long),
+        "vacuum_reservoir": torch.tensor(bool(reservoir))}
 
 
 def dipole_correction_data(properties, pbc):

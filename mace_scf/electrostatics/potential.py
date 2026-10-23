@@ -268,6 +268,23 @@ class SpectralGeometry:
             self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
                 +.5*self.slab_factor*counter_moment.square()
                 -self.volume*(self.counter_density.conj()*(self.proto+self.applied)).real.sum(-1))
+            reservoir = data.get('vacuum_reservoir', torch.zeros_like(counter, dtype=torch.bool)).reshape(-1).bool()
+            if bool(reservoir.any()):
+                # A separated vacuum sheet has known full-bandwidth self energy
+                # and first moment. Do not smear it again with the learned
+                # carrier width, or truncate its self energy to the ML cutoff.
+                sigma = data['counter_charge_width'].reshape(-1)
+                z = ((fraction-self.branch).remainder(1.)-.5)*self.length
+                exact_moment = counter*z
+                area = self.volume/self.length
+                self_energy = FIELD_CONSTANT*counter.square()/(2*area)*(
+                    self.length/12-sigma/math.sqrt(math.pi)+sigma.square()/self.length)
+                proto_vacuum = (-(self.attrs.sum(1)@self.response.proto_coefficients[:, 0])/self.volume
+                                if bool(self.response.proto_fitted) else torch.zeros_like(counter))
+                exact_energy = self_energy+.5*self.slab_factor*exact_moment.square()-counter*proto_vacuum
+                self.counter_moment = torch.where(reservoir, exact_moment, self.counter_moment)
+                self.counter_energy = torch.where(reservoir, exact_energy, self.counter_energy)
+                self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*self.counter_moment)
 
         self.molecular = None
         if bool(molecular_enabled(data, self.volume).any()):

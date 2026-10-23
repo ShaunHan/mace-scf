@@ -38,7 +38,7 @@ class NVTPhiMDLogger(IOContext):
             f"Ekin{scale}[eV]",
             "T[K]",
             "q_electrode[e]",
-            "U_pair[V]",
+            "U_SHE[V]" if getattr(atoms.calc, "voltage_reference", None) == "SHE" else "U_pair[V]",
         )
         natoms = atoms.get_global_number_of_atoms()
         if peratom or natoms <= 100:

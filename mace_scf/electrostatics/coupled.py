@@ -1221,11 +1221,13 @@ class CoupledResponse(AtomicPotentialResponse):
         # One DFT energy supplies forces and EF by differentiation. The raw
         # vacuum ESP then supplies WF; counter transfer has its own derivative.
         self.energy_reference = 'dft'
+        self.vacuum_reservoir_trained = False
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
                 'energy_derivatives': getattr(self, 'energy_derivatives', False),
                 'energy_reference': getattr(self, 'energy_reference', 'dft'),
+                'vacuum_reservoir_trained': getattr(self, 'vacuum_reservoir_trained', False),
                 'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
@@ -1284,6 +1286,7 @@ class CoupledResponse(AtomicPotentialResponse):
     def set_extra_state(self, state):
         self.energy_derivatives = bool(state.get('energy_derivatives', False))
         self.energy_reference = state.get('energy_reference', 'dft')
+        self.vacuum_reservoir_trained = bool(state.get('vacuum_reservoir_trained', False))
         if self.energy_reference not in ('dft', 'vacuum'):
             raise ValueError('Unknown saved energy reference')
         mode = state.get('deployment_mode', 'unroll_scf')
@@ -1617,6 +1620,10 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if not constant_charge:
             raise NotImplementedError('CoupledResponse uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
         data = dict(data)
+        from .reservoir import vacuum_boundary
+        reservoir_mask, reservoir_alpha = vacuum_boundary(data)
+        if bool(reservoir_mask.any()) and not energy_derivatives:
+            raise ValueError("Vacuum-reservoir data require the derivative-energy model")
         if energy_derivatives:
             # Sibling graph nodes give partial derivatives at fixed other
             # charge, even when the caller supplied counter_charge=-Q.
@@ -1769,8 +1776,21 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if decoder is not None:
             output = decoder(g, state, output)
         output = apply_scalar_reference(output, r)
+        if bool(reservoir_mask.any()):
+            # Raw DFT energy remains the ONLY energy label. For this boundary,
+            # E_res = E_DFT + alpha*Q**2/2 is the sharp-plane reservoir energy.
+            # Its neutral-path derivative is WF; EF retains the DFT ESP gauge.
+            q = charge_input.reshape(-1)
+            wf = output['charging_potential']+reservoir_alpha*q
+            output['fermi_level'] = torch.where(reservoir_mask,
+                output['vacuum_potential']-wf, output['fermi_level'])
+            output['reservoir_energy_correction'] = .5*reservoir_alpha*q.square()
+            output['reservoir_voltage_correction'] = reservoir_alpha*q
+            observed = data.get('fermi_level_weight', torch.zeros_like(q)).reshape(-1)>0
+            if training and bool((reservoir_mask & observed & (q.abs()>1.e-3)).any()):
+                r.vacuum_reservoir_trained = True
         # WF uses the final raw ESP observer, with EF still the DFT-energy
-        # derivative at fixed C. Do not replace EF with a pair-charge slope.
+        # derivative at fixed C, except for explicitly marked vacuum-reservoir data.
         output['work_function'] = output['vacuum_potential']-output['fermi_level']
         if energy_derivatives:
             output['counter_reference_offset'] = output['work_function']-output['charging_potential']

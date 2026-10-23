@@ -26,7 +26,7 @@ class NVTPhiMixin:
         if not np.isfinite(target_potential):
             raise ValueError("target_potential must be finite")
         if reference_potential is not None:
-            raise ValueError("The pair-voltage controller needs no fitted offset; remove reference_potential")
+            raise ValueError("The energy-derived controller needs no fitted offset; remove reference_potential")
         self._phi_kbt = units.kB * float(temperature_K)
         self.target_potential = float(target_potential)
         self.capacitance = float(capacitance)
@@ -73,13 +73,13 @@ class NVTPhiMixin:
         self._set_counter_charge(self._counter_charge())
 
     def _read_potential(self) -> float:
-        """Read dE(R,Q,-Q)/dQ; it is generally different from WF-4.44."""
+        """Read the energy-conjugate voltage in the calculator's declared reference."""
         if self.atoms.calc is None:
             raise RuntimeError("NVTPhi dynamics requires an attached calculator")
         value = self.atoms.calc.results.get('md_charge_potential')
         if value is None:
             raise RuntimeError("NVTPhi requires the DFT-energy charge-transfer derivative. "
-                               "Use MACEFixedPointSCF(..., voltage_reference='pair'); "
+                               "Use MACEFixedPointSCF with voltage_reference='SHE' or 'pair'; "
                                "an electrode WF observation is not the pair-voltage controller.")
         value = float(value)
         if not np.isfinite(value):
@@ -116,5 +116,5 @@ class NVTPhiMixin:
             "vacuum_potential_key": self.vacuum_potential_key,
             "fermi_level_key": self.fermi_level_key,
             "reference_potential": self.reference_potential,
-            "voltage_reference": "pair",
+            "voltage_reference": getattr(self.atoms.calc, "voltage_reference", "pair"),
         }

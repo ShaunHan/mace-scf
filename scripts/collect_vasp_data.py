@@ -22,6 +22,9 @@ SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
 HDF_NAME = "superraw_fourier_data.hdf"
+VACUUM_RESERVOIR = False  # True ONLY for the new, separated vacuum-sheet DFT runs.
+# For those runs set PLUGIN_SETTINGS to the actual sheet geometry and VACUUM_PLANE
+# beyond it. Old plugin calculations inside the water must retain False.
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted_superraw.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train_superraw.xyz"
@@ -234,6 +237,30 @@ def add_vacuum_target(atoms, planar, axis, correction):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
+def check_vacuum_reservoir(atoms, data, axis, correction):
+    """Check the physical vacuum using existing one-dimensional DFT profiles."""
+    if not np.isclose(correction % 1., .5, rtol=0, atol=1.e-12):
+        raise ValueError('Vacuum reservoir currently requires dipole cut fraction 0.5')
+    length = abs(np.linalg.det(atoms.cell)) / np.linalg.norm(
+        np.cross(atoms.cell[(axis+1)%3], atoms.cell[(axis+2)%3]))
+    width = atoms.info['counter_charge_width']
+    sheet = (atoms.info[f'counter_charge_{"xyz"[axis]}frac']-correction) % 1.*length
+    vacuum = (atoms.info[f'vacuum_{"xyz"[axis]}frac']-correction) % 1.*length
+    top = ((atoms.get_scaled_positions()[:, axis]-correction) % 1.*length).max()
+    if (sheet-top < 6*width+2 or vacuum-sheet < 6*width
+            or length-vacuum < 2*width or np.any(atoms.info['external_field'])):
+        raise ValueError('Reservoir requires separated atoms, sheet, outer vacuum and dipole cut, with zero external field')
+    for key, limit in [('planar_electron_density', 1.e-5), ('planar_potential', .02)]:
+        profile = data[key]
+        z = (np.arange(len(profile))/len(profile)-correction) % 1.*length
+        mask = abs(z-vacuum) <= .5
+        if mask.sum() < 3:
+            raise ValueError('Vacuum check needs at least three grid points across one Angstrom')
+        error = np.max(abs(profile[mask])) if key.endswith('density') else np.ptp(profile[mask])
+        if error > limit:
+            raise ValueError(f'No field-free, electron-free reservoir vacuum: {key} check {error:g} > {limit:g}')
+
+
 def collect_job(outdir):
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
@@ -301,10 +328,17 @@ def collect_job(outdir):
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
-    if counter != 0.0:
+    if counter != 0.0 or (plugin and VACUUM_RESERVOIR):
         length = float(atoms.cell[axis] @ normal)
         atoms.info[f"counter_charge_{'xyz'[axis]}frac"] = (PLUGIN_SETTINGS["counter_position"] / length) % 1.0
         atoms.info["counter_charge_width"] = float(PLUGIN_SETTINGS["counter_width"])
+    if VACUUM_RESERVOIR:
+        if not plugin or not VACUUM_PLANE or not POTENTIAL_SIGMAS or not converged:
+            raise ValueError("Vacuum reservoir needs a converged plugin run and explicit outer VACUUM_PLANE")
+        atoms.info["vacuum_reservoir"] = True
+        # The supplied plugin implements forces, but not its stress derivative.
+        atoms.info['config_stress_weight'] = 0.
+        atoms.info['config_virials_weight'] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
     if plugin:
         planar = data["planar_electron_density"]
@@ -323,6 +357,8 @@ def collect_job(outdir):
             add_vacuum_target(atoms, data["planar_potential"], axis, correction)
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         add_fourier_targets(atoms, data["proto_fourier_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
+    if VACUUM_RESERVOIR:
+        check_vacuum_reservoir(atoms, data, axis, correction)
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 
