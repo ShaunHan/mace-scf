@@ -1,7 +1,7 @@
-"""Fit a Gaussian inverse once on training DFT pairs, independently of SCF.
+"""Analytic Gaussian desmearing, independent of SCF and any calibration fit.
 
 The recurrent state stays smooth. `reference` selects the training loss;
-`desmearing` selects the exported field resolution. The fitted map has no
+`desmearing` selects the exported field resolution. The known map has no
 optimizer parameters. SpectralDecoder is retained only to read old models.
 """
 import math
@@ -121,7 +121,7 @@ class SpectralDecoder(torch.nn.Module):
 
 
 class FrozenSpectralDecoder(SpectralDecoder):
-    """DFT-fitted inverse exp(variance*k^2/2), evaluated in analytic kernels.
+    """Known Gaussian inverse exp(variance*k^2/2), evaluated in analytic kernels.
 
     Combining exponents before evaluation avoids multiplying an underflowed
     smoothed spectrum by an overflowing inverse. No new modes are invented.
@@ -136,12 +136,12 @@ class FrozenSpectralDecoder(SpectralDecoder):
 
     def fraction(self, k2, width, index):
         if not bool(self.fitted[index]):
-            raise RuntimeError('Fit the desmearing map on training DFT fields before evaluation')
+            raise RuntimeError('Initialize the decoder with the declared Gaussian widths before evaluation')
         return self.variances[index].to(k2)/width**2
 
     def _load_from_state_dict(self, *args, **kwargs):
-        # Frozen buffers must all be present; never fill a missing map by
-        # interpreting the four legacy live-decoder parameters as a DFT fit.
+        # Frozen buffers must all be present; legacy live-decoder parameters
+        # must not be interpreted as known Gaussian widths.
         torch.nn.Module._load_from_state_dict(self, *args, **kwargs)
 
 
@@ -222,6 +222,15 @@ def configure_desmearing(response, loss_config):
             response.raw_decoder = FrozenSpectralDecoder(*enabled).to(response.source_widths)
         else:
             response.raw_decoder.enabled.copy_(torch.tensor(enabled, device=response.source_widths.device))
+        # The paired "smoothed DFT" was constructed with these exact widths.
+        # Regressing its ratio to the raw DFT cannot learn another parameter.
+        # Keep the existing buffer names for checkpoint compatibility.
+        decoder = response.raw_decoder
+        with torch.no_grad():
+            widths = decoder.variances.new_tensor([response.density_width, response.potential_amplitudes_smearing_width])
+            decoder.variances.copy_(widths.square())
+            decoder.fitted.fill_(True)
+            decoder.observations.zero_()
     else:
         response.raw_decoder = None
 
@@ -240,70 +249,4 @@ def restore_desmearing(response, saved):
         raise ValueError('Saved desmearing widths differ from the requested widths; keep the checkpoint configuration to resume')
     decoder.load_state_dict(fields, strict=True)
     decoder.enabled.copy_(enabled)
-    logging.info('Reusing the checkpoint DFT desmearing map; already fitted fields are not fitted again')
-
-
-@torch.no_grad()
-def calibrate_desmearing(model, loader, device):
-    """One closed-form fit on training DFT pairs; no model predictions or SCF.
-
-    Stored labels are unsmoothed. Construct each paired smoothed label with
-    its declared source width and fit log(|DFT|/|smoothed DFT|)=variance*k^2/2.
-    For exact Gaussian pairs this recovers that Gaussian's variance, rather
-    than learning to compensate for errors in a particular model checkpoint.
-    A fitted buffer is reused on resume and at every later stage/inference.
-    """
-    from .potential import reciprocal_grid, _target_fft, target_mode_mask
-    from mace.tools import torch_geometric
-    r = model.field_dependent_charges_map
-    decoder = getattr(r, 'raw_decoder', None)
-    if decoder is None:
-        return
-    if not isinstance(decoder, FrozenSpectralDecoder):
-        raise TypeError('Configure a frozen DFT decoder before fitting')
-    if bool((decoder.fitted | ~decoder.enabled).all()):
-        return
-    widths = [r.density_width, r.potential_amplitudes_smearing_width]
-    sums = torch.zeros((2, 2), device=device, dtype=torch.float64)
-    counts = torch.zeros(2, device=device, dtype=torch.long)
-    fitting = torch_geometric.dataloader.DataLoader(loader.dataset,
-        batch_size=getattr(loader, 'batch_size', 1) or 1, shuffle=False, drop_last=False,
-        generator=torch.Generator().manual_seed(0))
-    for batch in fitting:
-        data = batch.to(device).to_dict()
-        _, k2, mask, shape, modes = reciprocal_grid(data['cell'].reshape(-1, 3, 3).double(), model.kspace_cutoff)
-        for i, key in enumerate(('fourier_density', 'fourier_potential')):
-            if not bool(decoder.enabled[i] & ~decoder.fitted[i]):
-                continue
-            target = _target_fft(data, key, key+'_shape', shape, torch.float64)
-            if target is None:
-                continue
-            weight = data['weight']*data[key+'_weight']
-            if not bool(torch.isfinite(weight).all()) or bool((weight < 0).any()):
-                raise ValueError('DFT desmearing weights must be finite and nonnegative')
-            use = mask & (k2 > 0) & target_mode_mask(data[key+'_shape'], modes) & (weight > 0)[:, None]
-            amplitude = torch.linalg.vector_norm(target, dim=-1)/math.prod(shape)
-            smooth = amplitude*torch.exp(-.5*widths[i]**2*k2)
-            if bool((use & ~torch.isfinite(amplitude)).any()):
-                raise ValueError('Nonfinite training DFT field: '+key)
-            use &= (smooth > torch.finfo(torch.float64).tiny) & (amplitude > 0)
-            x = .5*k2[use]
-            y = amplitude[use].log()-smooth[use].log()
-            w = (weight[:, None]*amplitude.square())[use]
-            sums[i, 0] += (w*x*y).sum()
-            sums[i, 1] += (w*x*x).sum()
-            counts[i] += use.sum()
-    for i in range(2):
-        if not bool(decoder.enabled[i] & ~decoder.fitted[i]):
-            continue
-        if not bool(sums[i, 1] > 0):
-            raise ValueError('Enabled desmearing requires nonzero training DFT Fourier observations')
-        variance = sums[i, 0]/sums[i, 1]
-        if not bool(torch.isfinite(variance)) or not torch.isclose(variance, variance.new_tensor(widths[i]**2), rtol=1.e-8, atol=1.e-12):
-            raise ValueError('DFT pairs do not obey the declared Gaussian smoothing convention')
-        decoder.variances[i].copy_(variance.clamp(0., widths[i]**2))
-        decoder.observations[i].copy_(counts[i])
-        decoder.fitted[i] = True
-    logging.info('Frozen DFT desmearing: variances=%s Angstrom^2, observed modes=%s; '
-                 'training labels only, no SCF evaluations, no optimizer parameters',
-                 decoder.variances.tolist(), decoder.observations.tolist())
+    logging.info('Reusing checkpoint Gaussian desmearing widths')

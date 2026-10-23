@@ -808,13 +808,13 @@ def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, devi
 
     Relative supervision cannot identify this constant. Calibrate the same EMA
     parameters and deployment trajectory used by validation/export, never from
-    validation labels. The response buffer persists in checkpoints; density,
-    energy, forces, spatial electrostatic fields and scalar differences are unchanged.
-    These are observation references, not electrostatic source coefficients or
-    energy offsets. Native/variational energy-conjugate chemical potentials are
-    outside this calibration of the coupled model's separate scalar observers.
+    validation labels. Energy-derived models skip this observer-only fit:
+    their references enter the charging energy, so absolute EF/vacuum labels
+    must be fitted together with energies and forces, not shifted afterwards.
     """
     response = getattr(model, 'field_dependent_charges_map', None)
+    if getattr(response, 'energy_derivatives', False):
+        return None
     functions = getattr(loss_fn, 'relative_scalar_losses', {})
     if not functions or not hasattr(response, 'scalar_reference'):
         return None
@@ -849,7 +849,7 @@ def calibrate_scalar_references(model, wrapper, loss_fn, ema, train_loader, devi
                     'panel_RMSE_after_eV':float((second/weight-(first/weight).square()).clamp_min(0).sqrt())}
             report['seconds'] = time.perf_counter()-start
             logging.debug('Training-only scalar reference calibration %s; constants saved with the model; '
-                         'relative errors and physical fixed-Q trajectory unchanged', report)
+                         'legacy observers only; energy and charge work are unchanged', report)
             return report
     finally:
         for parameter, flag in zip(model.parameters(), flags):

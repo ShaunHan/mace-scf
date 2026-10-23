@@ -94,8 +94,17 @@ def _resume_training(args, tag, state, ema, device):
             tag=tag+"_"+stage["name"], keep=args.keep_checkpoints)
         epoch = handler.load_latest(state=state, swa=False, device=device)
         if epoch is not None:
+            _check_energy_definition(state.model)
             return epoch+1
     return 0
+
+
+def _check_energy_definition(model):
+    response = getattr(model, 'field_dependent_charges_map', None)
+    if getattr(response, 'coupled', False) and not getattr(response, 'energy_derivatives', False):
+        raise ValueError('This checkpoint predates the energy-derived Fermi level. '
+                         'It cannot resume as a corrected model. Start a new training run '
+                         'with restart_latest: false; retain the original foundation model.')
 
 
 def set_stage_learning_rates(optimizer, stage, resumed=False):
@@ -261,6 +270,9 @@ def main() -> None:
         atomic_charges=atomic_charges,
         train_loader=train_loader,
     ).to(device)
+    _check_energy_definition(model)
+    if args.refit_fermi_readout and getattr(getattr(model, 'field_dependent_charges_map', None), 'energy_derivatives', False):
+        raise ValueError('Set refit_fermi_readout: false; energy-derived EF requires joint training.')
 
     if hasattr(model, "kspace_cutoff"):
         logging.info(
@@ -408,6 +420,7 @@ def main() -> None:
                 device=device,
             )
             if latest_checkpoint_epoch is not None:
+                _check_energy_definition(model)
                 start_epoch = latest_checkpoint_epoch+1
 
         set_stage_learning_rates(optimizer, train_stage,

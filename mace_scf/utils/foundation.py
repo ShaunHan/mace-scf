@@ -175,11 +175,17 @@ def calibration_loader(loader, maximum=64):
         batch_size=1, shuffle=False, generator=torch.Generator().manual_seed(0))
 
 
+@torch.no_grad()
 def condition_energy(model, loader, device):
-    """Calibrate the deployed total-energy reference without changing forces."""
+    """Initialize composition-only energy zeros for the transferred foundation.
+
+    New energy-derived models do not perform a second EF-offset fit here.
+    The once-fitted elemental energy zeros do not change forces or charge work.
+    """
     from mace_scf.electrostatics.potential import evaluate_electronic
     features, residuals, weights, mu_errors, mu_weights, charges = [], [], [], [], [], []
     states = [p.requires_grad for p in model.parameters()]
+    fit_mu = not getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
     try:
         model.requires_grad_(False)
         for batch in calibration_loader(loader):
@@ -191,11 +197,13 @@ def condition_energy(model, loader, device):
             features.append(counts/n[:, None])
             residuals.append((batch.energy-output["energy"])/n)
             weights.append(batch.weight*batch.energy_weight)
-            mu_errors.append(batch.fermi_level-output["fermi_level"])
-            mu_weights.append(batch.weight*batch.fermi_level_weight)
-            charges.append(output["total_charge"]/n)
+            if fit_mu:
+                mu_errors.append(batch.fermi_level-output["fermi_level"])
+                mu_weights.append(batch.weight*batch.fermi_level_weight)
+                charges.append(output["total_charge"]/n)
         a, b, w = torch.cat(features).double(), torch.cat(residuals).double(), torch.cat(weights).double()
-        me, mw = torch.cat(mu_errors).double(), torch.cat(mu_weights).double()
+        me = torch.cat(mu_errors).double() if fit_mu else b.new_empty(0)
+        mw = torch.cat(mu_weights).double() if fit_mu else b.new_empty(0)
         valid_mu = (mw>0)&torch.isfinite(me)
         if bool(valid_mu.any()):
             shift = (me[valid_mu]*mw[valid_mu]).sum()/mw[valid_mu].sum()
@@ -218,12 +226,10 @@ def condition_energy(model, loader, device):
             p.requires_grad_(flag)
 
 
-def condition_readouts(model, loader, device, fit_forces=True):
+def condition_readouts(model, loader, device):
     """Condition transferred readouts in fixed, rotation-invariant feature units.
 
-    Fit a single nonnegative local energy scale on training forces when a
-    foundation is transferred. Fold that scale into its output weights before
-    optimizer creation. RMS input units are rotation invariant and fixed; an
+    RMS input units are rotation invariant and fixed; an
     exact inverse change of energy-readout weights preserves its initial E/F.
     Density readouts are zero at this point, so their initial function is also
     preserved. No backbone tensor-product weights or validation labels change.
@@ -233,7 +239,6 @@ def condition_readouts(model, loader, device, fit_forces=True):
     irreps = [o3.Irreps(str(p.linear.irreps_out)) for p in model.products]
     sums = [model.readout_feature_units.new_zeros(len(rep)) for rep in irreps]
     count = model.readout_feature_units.new_zeros(())
-    pp, py, yy, force_count = [count.clone() for _ in range(4)]
     atom_weights = None
     hooks = []
     flags = [p.requires_grad for p in model.parameters()]
@@ -254,33 +259,10 @@ def condition_readouts(model, loader, device, fit_forces=True):
             data=batch.to(device).to_dict()
             sizes=(data['ptr'][1:]-data['ptr'][:-1]).to(data['positions'])
             atom_weights=(data['weight'].reshape(-1)/sizes)[data['batch']]
-            force_weight=data['weight']*data['forces_weight']
-            compute_force=fit_forces and hasattr(model,'foundation_element_map') and bool((force_weight>0).any())
-            with torch.set_grad_enabled(compute_force):
-                local=model.local_part(data,compute_force=compute_force)
-                if compute_force:
-                    force=-torch.autograd.grad(local.energies.sum(),data['positions'])[0]
-                    weights=force_weight[data['batch']][:,None].expand_as(force)
-                    use=weights>0
-                    p,y,w=force.detach()[use],data['forces'][use],weights[use]
-                    if not bool(torch.isfinite(p).all() & torch.isfinite(y).all()):
-                        raise FloatingPointError('Nonfinite observed local forces before conditioning')
-                    pp+=(w*p.square()).sum();py+=(w*p*y).sum();yy+=(w*y.square()).sum();force_count+=w.sum()
+            with torch.no_grad():
+                model.local_part(data,compute_force=False)
             count+=data['weight'].sum()
         with torch.no_grad():
-            if force_count>0 and pp>0:
-                scale=(py/pp).clamp_min(0.)
-                seen=set()
-                for readout in model.readouts:
-                    output=getattr(readout,'linear_2',getattr(readout,'linear',None))
-                    if output is None:
-                        raise TypeError('Cannot identify the final energy readout for conditioning')
-                    for parameter in output.parameters():
-                        if id(parameter) not in seen:
-                            parameter.mul_(scale);seen.add(id(parameter))
-                logging.debug('Training-only foundation force scale: %.6g; local F RMSE %.6g -> %.6g eV/A; folded into readout weights',
-                    float(scale),float(((pp-2*py+yy)/force_count).clamp_min(0).sqrt()),
-                    float(((scale.square()*pp-2*scale*py+yy)/force_count).clamp_min(0).sqrt()))
             # A shared energy head must use one unit set across all layers.
             if len(model.readouts)==1:
                 shared=sum(sums)/len(sums);sums=[shared for _ in sums]

@@ -3,7 +3,6 @@ from typing import Optional
 import numpy as np
 from ase import units
 from ase.parallel import DummyMPI
-from ._potential import potential_difference
 
 
 class NVTPhiMixin:
@@ -81,8 +80,11 @@ class NVTPhiMixin:
         """Apply an optional, fixed initial-frame calibration.
 
         With no reference, the target uses the model's own scalar origin.
-        Otherwise Phi(t) = reference_potential + [v_vac(t)-mu(t)]
-        - [v_vac(0)-mu(0)], so constant scalar offsets cancel.
+        Otherwise U(t) = reference_potential + U_E(t) - U_E(0),
+        where U_E=dE(R,Q,-Q)/dQ. This adds a constant charge-linear
+        term to the grand potential and leaves fixed-Q forces unchanged.
+        A vacuum/SHE WF anchor alone does not establish the counter-electrode
+        reference: this controls pair voltage, not vacuum WF at every frame.
         """
         if self._reference_model_potential is None:
             self._reference_model_potential = model_potential
@@ -96,9 +98,14 @@ class NVTPhiMixin:
     def _read_potential(self) -> float:
         if self.atoms.calc is None:
             raise RuntimeError("NVTPhi dynamics requires an attached calculator")
-        value = potential_difference(
-            self.atoms.calc.results, self.vacuum_potential_key, self.fermi_level_key
-        )
+        value = self.atoms.calc.results.get('charging_potential')
+        if value is None:
+            raise RuntimeError('NVTPhi requires charging_potential=dE(R,Q,-Q)/dQ. '
+                               'This model has an independent WF observer; retrain with the '
+                               'energy-derived model before using voltage dynamics.')
+        value = float(value)
+        if not np.isfinite(value):
+            raise FloatingPointError('Nonfinite energy-derived charging potential')
         return self._control_potential(value)
 
     def _normal(self) -> float:

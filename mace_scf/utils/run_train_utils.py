@@ -257,8 +257,7 @@ def build_model(
                         saved = torch.load(path, map_location='cpu', weights_only=False)
                         restore_desmearing(response, saved['model'])
                         break
-            condition_readouts(model, train_loader, args.device,
-                fit_forces=args.train_schedule[0]['loss'].get('forces',{}).get('weight',0)>0)
+            condition_readouts(model, train_loader, args.device)
             initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
         else:
             potential_options = args.train_schedule[0]['loss'].get('fourier_potential', {})

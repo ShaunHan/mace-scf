@@ -717,7 +717,7 @@ def initialize_response(model, loader, device, apply_potential_smearing=False):
     norm_graphs = 0
     for batch in loader:
         data = batch.to(device).to_dict()
-        if norm_graphs < 64:
+        if not getattr(response, 'coupled', False) and norm_graphs < 64:
             local = model.local_part(data, compute_force=False)
             norms += local.all_layer_feats.square().sum(0)
             count += len(local.positions)
@@ -742,11 +742,12 @@ def initialize_response(model, loader, device, apply_potential_smearing=False):
         square += values.square().sum()
         observations += values.numel()
     # One RMS per irrep channel, preserving rotations. No per-component scale.
-    feature_irreps = model.products[0].linear.irreps_out
-    for mul_ir, sl in zip(feature_irreps, feature_irreps.slices()):
-        mul, ir = mul_ir
-        values = norms[sl].reshape(mul, ir.dim).mean(-1).div(max(count, 1)).sqrt().clamp_min(1.e-3)
-        response.feature_norms[sl] = values[:, None].expand(-1, ir.dim).reshape(-1)
+    if not getattr(response, 'coupled', False):
+        feature_irreps = model.products[0].linear.irreps_out
+        for mul_ir, sl in zip(feature_irreps, feature_irreps.slices()):
+            mul, ir = mul_ir
+            values = norms[sl].reshape(mul, ir.dim).mean(-1).div(max(count, 1)).sqrt().clamp_min(1.e-3)
+            response.feature_norms[sl] = values[:, None].expand(-1, ir.dim).reshape(-1)
     if observations:
         response.proto_smearing_width = (float(getattr(response, 'potential_amplitudes_smearing_width', geom.width))
                                          if apply_potential_smearing else 0.)

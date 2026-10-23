@@ -552,7 +552,7 @@ class MACEFixedPointSCF(Calculator):
         forces = output["forces"].detach().cpu().numpy()
         density_coefficients = output["density_coefficients"].detach().cpu().numpy()
         dipole = output["dipole"].detach().cpu().numpy()
-        fermi_level = output["fermi_level"].detach().cpu().item()
+        fermi_level = output["fermi_level"].detach().cpu().item() * self.energy_units_to_eV
         external_field = output["external_field"].detach().cpu().numpy()
         electrostatic_energy = output["electrostatic_energy"].detach().cpu().item()
         electron_energy = output["electron_energy"].detach().cpu().item()
@@ -580,9 +580,10 @@ class MACEFixedPointSCF(Calculator):
             "scf_converged": diagnostics["final_abs_difference"] <= self.scf_options.scf_tolerance,
             "electrostatic_features": electrostatic_features,
         }
-        for key in ("vacuum_potential", "potential_reference"):
+        for key in ("vacuum_potential", "potential_reference", "charge_potential",
+                    "counter_charge_potential", "charging_potential"):
             if output.get(key) is not None:
-                results[key] = float(output[key].detach().reshape(-1)[0])
+                results[key] = float(output[key].detach().reshape(-1)[0]) * self.energy_units_to_eV
         if self.save_full_scf_history:
             results["full_scf_history"] = diagnostics["charge_history"]
         return results

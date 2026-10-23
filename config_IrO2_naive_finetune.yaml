@@ -55,7 +55,7 @@ amsgrad: false
 eval_interval: 5
 patience: 1000
 max_num_epochs: 301
-restart_latest: true
+restart_latest: false
 save_cpu: true
 keep_checkpoints: true
 save_all_checkpoints: true
@@ -67,7 +67,7 @@ foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 log_dir: logs
 results_dir: results
 model_dir: models
-refit_fermi_readout: true
+refit_fermi_readout: false
 train_schedule:
   0:
     name: heads
@@ -88,10 +88,10 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential:
         weight: 100
-        relative: true
+        relative: false
       fermi_level:
         weight: 100
-        relative: true
+        relative: false
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -123,10 +123,10 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential:
         weight: 100
-        relative: true
+        relative: false
       fermi_level:
         weight: 100
-        relative: true
+        relative: false
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -157,10 +157,10 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential:
         weight: 100
-        relative: true
+        relative: false
       fermi_level:
         weight: 100
-        relative: true
+        relative: false
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -191,10 +191,10 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential:
         weight: 100
-        relative: true
+        relative: false
       fermi_level:
         weight: 100
-        relative: true
+        relative: false
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -225,10 +225,10 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential:
         weight: 100
-        relative: true
+        relative: false
       fermi_level:
         weight: 100
-        relative: true
+        relative: false
     fixed_point_training_options:
       mode: unroll_scf
       scf:

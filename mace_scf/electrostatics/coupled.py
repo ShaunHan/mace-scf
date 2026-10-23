@@ -172,7 +172,7 @@ class AtomicPotentialResponse(nn.Module):
     the fixed-Q projection and electrostatic coupling give its full response.
     Dipole softness times density_width**2 is the dipole polarizability in
     charge-number units. Only charges, dipoles and potential amplitudes recur.
-    The common Fermi level is one pooled readout, not an extra atomic state.
+    The common chemical drive is one pooled readout, not an extra atomic state.
     """
     electrochemical_reference = True
 
@@ -430,9 +430,9 @@ class AtomicPotentialResponse(nn.Module):
                           species_level+scalars[...,0]+p0[...,0])
         softness=electronic_reference[...,1]
         reference_charge = torch.zeros_like(p0[..., 0])
-        # Align the common component once, before the charge multiplier is
-        # evaluated. That SAME multiplier is the Fermi observation: no second
-        # formula is needed. Skip the null coordinate during pure SCF updates.
+        # Align the common chemical drive once. Legacy exports observe the
+        # conditional multiplier; energy-derived models use this drive in the
+        # charging energy instead. It is a null coordinate of fixed-Q updates.
         if observe_chemical_level and self.common_level is not None:
             soft = softness*mask
             f = soft/soft.sum(-1, keepdim=True)
@@ -1142,7 +1142,7 @@ def implicit_root(function, initial, *args, options=None):
 
 
 class CoupledResponse(AtomicPotentialResponse):
-    """Shared nonlinear response with separate charge contrasts and chemical level."""
+    """Nonlinear latent response with a scalar energy and its charge derivative."""
     coupled = True
     spectral = True
 
@@ -1204,8 +1204,7 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
-        # Observation references for EF and vacuum, fitted on training data.
-        # They do not alter the zero-mean spatial fields or the energy model.
+        # Scalar references also contribute charge-linear work to the energy.
         self.register_buffer('scalar_reference', torch.zeros(2))
         self.register_buffer('spectral_cutoff', torch.tensor(1.))
         self.register_buffer('deployment_steps', torch.tensor(50))
@@ -1216,9 +1215,13 @@ class CoupledResponse(AtomicPotentialResponse):
         # This is a formulation version, not an adjustable training parameter.
         self.response_reference = 'neutral'
         self.raw_vacuum_boundary = True
+        # Model definition, not an adjustable accuracy/MD setting. Legacy
+        # checkpoints retain their old semantics until explicitly retrained.
+        self.energy_derivatives = True
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
+                'energy_derivatives': getattr(self, 'energy_derivatives', False),
                 'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
@@ -1275,6 +1278,7 @@ class CoupledResponse(AtomicPotentialResponse):
                                      missing_keys, unexpected_keys, error_msgs)
 
     def set_extra_state(self, state):
+        self.energy_derivatives = bool(state.get('energy_derivatives', False))
         mode = state.get('deployment_mode', 'unroll_scf')
         if mode not in ('unroll_scf', 'implicit'):
             raise ValueError(f'Unknown saved solver mode {mode}')
@@ -1574,10 +1578,16 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
     For electronic free-energy labels, ``energy`` represents that free energy.
     Forces are its negative total position derivative, including the electronic
     response, at fixed charge, cell and prescribed external controls.
+    New models also differentiate the entire trajectory for mu=-dE/dQ and
+    U_pair=dE/dQ-dE/dC. No stationary-state/envelope approximation is used.
     """
     if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
         raise ValueError('Unknown reference-conditioning observation')
-    with torch.set_grad_enabled(training or compute_force or compute_stress or torch.is_grad_enabled()):
+    energy_derivatives = getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
+    outer_grad = torch.is_grad_enabled()
+    if energy_derivatives and reference_conditioning not in (False, 'none'):
+        raise ValueError('Energy-derived Fermi levels require reference_conditioning: none')
+    with torch.set_grad_enabled(energy_derivatives or training or compute_force or compute_stress or outer_grad):
         r = model.field_dependent_charges_map
         mode = r.deployment_mode if mode is None else mode
         mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -1586,6 +1596,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if not constant_charge:
             raise NotImplementedError('CoupledResponse uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
         data = dict(data)
+        if energy_derivatives:
+            # Sibling graph nodes give partial derivatives at fixed other
+            # charge, even when the caller supplied counter_charge=-Q.
+            charge_input = data['total_charge'].clone().requires_grad_(True)
+            counter_input = data.get('counter_charge', torch.zeros_like(charge_input)).clone().requires_grad_(True)
+            data['total_charge'], data['counter_charge'] = charge_input, counter_input
         positions = data['positions']
         if compute_force:
             positions.requires_grad_(True)
@@ -1648,16 +1664,39 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             self_terms = model.coulomb_energy.self_interaction_terms(density_coefficients)
             electronic = electronic-.5*g.pack((density_coefficients*self_terms).sum(-1)).sum(-1)
         local_electronic = response[6].sum(-1)
+        if energy_derivatives:
+            target = charge_input.reshape(-1)
+            counter = counter_input.reshape(-1)
+            # The former common-level observer now parameterizes chemical
+            # charging work. Its complete Q/R dependence is differentiated;
+            # the conditional charge-closure multiplier is not a Fermi level.
+            common = (response[2]*response[5]).sum(-1)
+            local_electronic = local_electronic+.5*target.square()/response[3]-target*common
+            # The chemical level uses the neutral-atom reference, while the
+            # explicit counter source couples to the full spatial ESP. Include
+            # the same proto-plane subtraction as that spatial observer.
+            # A common gauge shift cancels on C=-Q. Independent EF/vacuum
+            # calibration constants likewise enter as charge-linear work.
+            reference = r.scalar_reference
+            counter_reference = g.vacuum_reference-(g.plane(g.observer_proto) if g.neutral_reference else 0.)
+            electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
+                          -reference[0]*target-reference[1]*counter)
         energy = local.energies.sum(-1)+electronic+local_electronic
         forces = stress = None
-        if compute_force or compute_stress:
-            inputs = ([positions] if compute_force else [])+([strain] if compute_stress else [])
-            deriv = torch.autograd.grad(energy.sum(), inputs, create_graph=training, retain_graph=training, allow_unused=True)
+        charge_potential = counter_potential = None
+        if compute_force or compute_stress or energy_derivatives:
+            inputs = ([charge_input, counter_input] if energy_derivatives else [])+([positions] if compute_force else [])+([strain] if compute_stress else [])
+            deriv = torch.autograd.grad(energy.sum(), inputs, create_graph=training,
+                retain_graph=training or (outer_grad and not compute_force), allow_unused=True)
+            if energy_derivatives:
+                charge_potential = deriv[0].reshape(-1)
+                counter_potential = (deriv[1] if deriv[1] is not None else torch.zeros_like(counter_input)).reshape(-1)
             if compute_force:
-                forces = -deriv[0] if deriv[0] is not None else torch.zeros_like(positions)
+                value = deriv[2 if energy_derivatives else 0]
+                forces = -value if value is not None else torch.zeros_like(positions)
             if compute_stress:
                 stress = deriv[-1]/g.volume[:,None,None] if deriv[-1] is not None else torch.zeros_like(strain)
-        mu = mu+model.fermi_level_offset+g.vacuum_reference
+        mu = -charge_potential if energy_derivatives else mu+model.fermi_level_offset+g.vacuum_reference
         vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
         potential_reference = g.vacuum_reference
         if g.neutral_reference:
@@ -1685,6 +1724,10 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             'potential_coefficients':g.unpack(state[...,4:]),
             'electrostatic_features':g.unpack(potential),
             'chemical_level':g.unpack(response[5]), 'node_field':g.unpack(field)}
+        if energy_derivatives:
+            output.update(charge_potential=charge_potential,
+                          counter_charge_potential=counter_potential,
+                          charging_potential=charge_potential-counter_potential)
         attach_observations(data, g, output)
         if 'fourier_density_dft' in output:
             output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
@@ -1706,8 +1749,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         # A finite iterate does not imply finite derivatives of its trajectory.
         # Reject invalid observables before loss/Adam, metrics or MD consume them.
         checked = {key: output[key] for key in ('energy', 'forces', 'stress',
-                                               'fermi_level', 'vacuum_potential')
-                   if output[key] is not None}
+                                               'fermi_level', 'vacuum_potential', 'charging_potential')
+                   if output.get(key) is not None}
         with torch.no_grad():
             finite = torch.stack([torch.isfinite(value).all() for value in checked.values()])
             if not bool(finite.all()):
@@ -1723,12 +1766,13 @@ def apply_scalar_reference(output, response):
     Spatial Fourier quantities retain their zero-mean convention. A calibrated
     vacuum observation equals the model plane plus its scalar reference; the
     latter is not a deformation-field coefficient. No force/energy or SCF state
-    changes. Voltage differences are formed by consumers from these two scalars.
+    changes for legacy models. For energy-derived models the EF reference has
+    already entered the energy; adding it again here would double count it.
     """
     reference = getattr(response, 'scalar_reference', None)
     if reference is not None:
         for index, key in enumerate(('fermi_level', 'vacuum_potential')):
-            if key in output:
+            if key in output and not (index == 0 and getattr(response, 'energy_derivatives', False)):
                 output[key] = output[key]+reference[index]
         if 'potential_reference' in output:
             output['potential_reference'] = output['potential_reference']+reference[1]
@@ -1743,9 +1787,8 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
     from .potential import initialize_vacuum_reference
-    from .desmearing import configure_desmearing, calibrate_desmearing
+    from .desmearing import configure_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    calibrate_desmearing(model, loader, device)
     # The frozen neutral-atom reference and independent vacuum labels are raw.
     # A field-loss reference must not silently change either physical observer.
     initialize_response(model, loader, device, apply_potential_smearing=False)
@@ -1769,182 +1812,12 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     r.geometry_scalar_unit.copy_((1.+ss/max(count,1.e-30)).sqrt())
     r.geometry_vector_unit.copy_((1.+vv/max(count,1.e-30)).sqrt())
     r.geometry_units_initialized.fill_(True)
-    if r.source_channels and options is not None and loss_config is not None:
-        initialize_reference(model, calibration_loader(loader), device, options, loss_config)
-    # Numerical field coordinates only: the measured spectra/states are unchanged.
-    ps = torch.zeros_like(r.scalar_field_scale)
-    fs = torch.zeros_like(r.vector_field_scale)
-    count = 0
-    for batch in calibration_loader(loader):
-        data = batch.to(device).to_dict()
-        local = model.local_part(data, compute_force=False)
-        g, seed, args, _, evaluate = prepare_coupled(model, data, local)
-        _, spectral = evaluate(seed, *args)
-        values, gradients = spectral[-2:]
-        weights = data['weight'].reshape(-1)
-        mask = (g.present*weights[:,None]/g.present.sum(-1,keepdim=True))[...,None]
-        drive = r.potential_coordinates(values, g.present, args[7][...,-2:], data['total_charge'].reshape(-1))*r.scalar_field_scale
-        ps += (drive.square()*mask).sum((0,1))
-        fs += (gradients.square().mean(-1)*mask).sum((0,1))
-        count += float(weights.sum())
-    r.scalar_field_scale.copy_((1.+ps/max(count,1.e-30)).sqrt())
-    r.vector_field_scale.copy_((1.+fs/max(count,1.e-30)).sqrt())
+    # Physical field units: 1 V and 1 V/Angstrom. The bounded, invertible
+    # asinh coordinates already handle large descriptors; no fitted field scale.
+    r.scalar_field_scale.fill_(1.)
+    r.vector_field_scale.fill_(1.)
     r.field_scales_initialized.fill_(True)
     logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
                  r.response_reference, r.source_channels, r.receiver_widths.tolist())
     logging.debug('Constitutive charge response: %s; stored in checkpoint metadata',
                   getattr(r, 'charge_response', 'geometry'))
-
-@torch.no_grad()
-def initialize_reference(model, loader, device, options, loss_config):
-    """Initialize species/field references using the guarded training objective.
-
-    Only existing species levels and scalar reference amplitudes are fitted.
-    A cold affine trajectory has a closed form, verified against its raw
-    constitutive equation. A proposal is accepted only on the training loss,
-    including force labels. No validation correction or extra head is fitted.
-    """
-    from .potential import _target_fft, target_mode_mask
-    from .loss import WeightedLoss, RelativeScalarLoss, vacuum_reference_weights
-    r = model.field_dependent_charges_map
-    nlevels = r.species_level.numel()
-    original = torch.cat((r.species_level, r.species_source.flatten())).clone()
-    size = original.numel()
-    zero = torch.zeros_like(original)
-    def put(value):
-        r.species_level.copy_(value[:nlevels])
-        r.species_source.copy_(value[nlevels:].reshape_as(r.species_source))
-    def weight(name):
-        value = loss_config.get(name, {})
-        return float(value.get('weight', 0.)) if isinstance(value,dict) else float(value)
-    scales = original.new_tensor([weight('fourier_potential'), weight('fermi_level'), weight('vacuum_potential')])
-    grams = original.new_zeros((3,size,size)); right = original.new_zeros((3,size)); counts = original.new_zeros(3)
-    design_sums = original.new_zeros((3,size)); target_sums = original.new_zeros(3)
-    weight_squares = original.new_zeros(3)
-    objective = WeightedLoss(loss_config)
-    modes = model.training
-    flags = [p.requires_grad for p in model.parameters()]
-    try:
-        model.eval()
-        put(zero)
-        for batch in loader:
-            batch = batch.to(device); data = batch.to_dict()
-            local = model.local_part(data, compute_force=False)
-            geom = CoupledGeometry(model, data, local.positions)
-            function = objective.loss_fns.get('fourier_potential')
-            target = _target_fft(data,'fourier_potential','fourier_potential_shape',geom.shape,local.positions.dtype)
-            active = geom.mask & (geom.k2>0)
-            if target is not None:
-                active &= target_mode_mask(data['fourier_potential_shape'], geom.modes)
-                target = torch.where(active[...,None],target/geom.ngrid,0.)
-                if getattr(function, 'apply_smearing', False):
-                    width = getattr(r, 'potential_amplitudes_smearing_width', geom.width)
-                    smooth_target = target*torch.exp(-.5*width**2*geom.k2)[..., None]
-                    target = (torch.cat((target, smooth_target), 1) if function.reference == 'raw+smeared'
-                              else smooth_target)
-                pw = batch.weight*batch.fourier_potential_weight
-            else:
-                target = local.positions.new_zeros((*geom.k2.shape,2)); pw = batch.weight*0.
-                if getattr(function, 'reference', None) == 'raw+smeared':
-                    target = torch.cat((target, target), 1)
-            vacuum, vw = vacuum_reference_weights(batch, batch.total_charge)
-            labels = (target.flatten(1), batch.fermi_level[:,None], vacuum[:,None])
-            availability = (pw, batch.weight*batch.fermi_level_weight, vw)
-            def predict(coeff):
-                put(coeff)
-                g, initial, args, update, observe = prepare_coupled(model,data,local,geometry=geom)
-                root = update(initial,*args)
-                state = root+(1.-options.scf.mixing_parameter)**options.scf.num_scf_steps*(initial-root)
-                if bool((update.convergence_residual(root,*args).abs().amax()>1.e-8)):
-                    raise RuntimeError('Cold reference model is not affine; initialization must precede training')
-                result, fields = observe(state,*args,screened=False)
-                total, carrier, regular = (g.expand_spectrum(value) for value in fields[:3])
-                if g.molecular is not None:
-                    correction = torch.view_as_real(g.molecular.spectrum(
-                        moment_sum(state, g.molecular_source)+g.molecular.counter))
-                    total, carrier = total+correction, carrier+correction
-                vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
-                potential_reference = g.vacuum_reference
-                if g.neutral_reference:
-                    total = total+torch.view_as_real(g.observer_proto)
-                    potential_reference = potential_reference-g.plane(g.observer_proto)
-                predicted = dict(fourier_potential=(carrier+regular)*g.ngrid,
-                    fourier_total_potential=total*g.ngrid,
-                    fourier_carrier_potential=g.expand_spectrum(fields[4])*g.ngrid,
-                    fourier_local_potential=regular*g.ngrid,
-                    vacuum_potential=vacuum, potential_reference=potential_reference)
-                if getattr(r, 'fixed_dft_observations', False):
-                    from .desmearing import observe_smoothed_fields
-                    predicted = observe_smoothed_fields(g, state, predicted)
-                if getattr(r, 'raw_decoder', None) is not None:
-                    predicted = r.raw_decoder(g, state, predicted)
-                key = 'smooth_fourier_potential' if getattr(function, 'apply_smearing', False) else 'fourier_potential'
-                spectrum = torch.where(active[...,None],predicted.get(key, predicted['fourier_potential'])/g.ngrid,0.)
-                if getattr(function, 'reference', None) == 'raw+smeared':
-                    raw = torch.where(active[...,None],predicted['fourier_potential']/g.ngrid,0.)
-                    spectrum = torch.cat((raw, spectrum), 1)
-                return (spectrum.flatten(1),(result[1]+model.fermi_level_offset+geom.vacuum_reference)[:,None],
-                        predicted['vacuum_potential'][:,None])
-            baseline = predict(zero)
-            columns = [[],[],[]]
-            for i in range(size):
-                coordinate=zero.clone(); coordinate[i]=1.
-                for j,value in enumerate(predict(coordinate)):
-                    columns[j].append(value-baseline[j])
-            put(zero)
-            for j,(label,w) in enumerate(zip(labels,availability)):
-                if not bool(scales[j]>0): continue
-                design = torch.stack(columns[j],-1)
-                residual = torch.where(w[:,None]>0,label-baseline[j],0.)
-                grams[j] += torch.einsum('bkn,bkm,b->nm',design,design,w)
-                right[j] += torch.einsum('bkn,bk,b->n',design,residual,w)
-                counts[j] += w.sum()
-                if j:
-                    design_sums[j] += (design[:,0,:]*w[:,None]).sum(0)
-                    target_sums[j] += (residual[:,0]*w).sum()
-                    weight_squares[j] += w.square().sum()
-        for j, name in ((1, 'fermi_level'), (2, 'vacuum_potential')):
-            if getattr(objective.loss_fns.get(name), 'relative', False) and counts[j] > 0:
-                grams[j] -= torch.outer(design_sums[j], design_sums[j])/counts[j]
-                right[j] -= design_sums[j]*target_sums[j]/counts[j]
-                counts[j] -= weight_squares[j]/counts[j]
-        scales = torch.where(counts>0,scales/counts.clamp_min(1.e-30),0.)
-        matrix = (grams*scales[:,None,None]).sum(0)
-        rhs = (right*scales[:,None]).sum(0)
-        units = matrix.diagonal().clamp_min(0.).sqrt().clamp_min(1.e-12)
-        normalized = matrix/units[:,None]/units[None,:]
-        values, vectors = torch.linalg.eigh(.5*(normalized+normalized.T))
-        keep = values>values.max().clamp_min(1.e-30)*1.e-10
-        proposal = ((vectors[:,keep]@((vectors[:,keep].T@(rhs/units))/values[keep]))/units
-                    if bool(keep.any()) else original)
-        model.requires_grad_(False)
-        best, best_score, scores = original.clone(), float('inf'), []
-        for fraction in (0.,1.,.5,.25):
-            candidate = original+fraction*(proposal-original); put(candidate)
-            sums, scalar = {}, {}
-            for batch in loader:
-                batch=batch.to(device)
-                output=evaluate_coupled(model,batch.to_dict(),steps=options.scf.num_scf_steps,
-                    mode=options.mode,compute_force=weight('forces')>0,mixing=options.scf.mixing_parameter)
-                denominators = objective.normalizers(batch)
-                for name, function in objective.loss_fns.items():
-                    if not objective.loss_weights[name]: continue
-                    if isinstance(function, RelativeScalarLoss):
-                        scalar[name] = scalar.get(name, 0.)+function.moments(batch, output)
-                    else:
-                        denominator = denominators[(name, 'spatial' if name == 'fourier_potential' else '')]
-                        value = function(batch, output)
-                        sums[name] = sums.get(name, 0.)+torch.stack((value*denominator, denominator))
-            score = sum(objective.loss_weights[name]*float(pair[0]/pair[1].clamp_min(1.e-30)) for name,pair in sums.items())
-            score += sum(objective.loss_weights[name]*float(objective.loss_fns[name].from_moments(values)) for name,values in scalar.items())
-            if not math.isfinite(score): raise FloatingPointError('Nonfinite training objective in cold reference fit')
-            scores.append({'fraction':fraction,'loss':score})
-            if score<best_score:best,best_score=candidate.clone(),score
-        put(best)
-        logging.debug('Training-only cold reference fit: rank=%d/%d; scalar gauges follow the configured relative/absolute objectives; candidates=%s',int(keep.sum()),size,scores)
-    except Exception:
-        put(original)
-        raise
-    finally:
-        for parameter, flag in zip(model.parameters(),flags): parameter.requires_grad_(flag)
-        model.train(modes)

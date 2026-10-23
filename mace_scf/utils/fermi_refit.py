@@ -1,4 +1,4 @@
-"""Training-only ridge fit of the existing common chemical-level readout."""
+"""Legacy-model ridge fit; energy-derived chemical levels require joint training."""
 import numpy as np
 import torch
 
@@ -70,6 +70,9 @@ def fit_fermi_arrays(features, fermi_error, weight, previous_weight,
 def refit_fermi_readout(model, loader, device, seed=20261020):
     """Mutate only common_level.weight and scalar_reference[0], after fitting."""
     response = model.field_dependent_charges_map
+    if getattr(response, 'energy_derivatives', False):
+        raise ValueError('EF-only refitting changes the charging energy and charged forces. '
+                         'Set refit_fermi_readout: false and jointly train energy, forces and EF.')
     head = getattr(response, 'common_level', None)
     if not getattr(response, 'coupled', False) or not isinstance(head, torch.nn.Linear):
         raise ValueError('A coupled model with the existing linear common-level readout is required')
