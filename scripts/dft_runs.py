@@ -3,6 +3,9 @@
 The Python local-potential plugin captures LOCPOT_proto from the initial
 atomic-density Hamiltonian, before adding the prescribed external potential.
 Requires a plugin-enabled VASP executable. No separate proto calculation.
+
+Reservoir charge scans require vacuum_reservoir=True and explicit counter
+sheet/vacuum fractions in every input frame, including its neutral member.
 """
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,8 +44,10 @@ _calls = 0
 
 
 def write_grid(filename, constants, values):
-    # ASE writes a standard POSCAR without selective dynamics for these runs.
-    header = Path("POSCAR").read_text().splitlines()[:8 + constants.number_ions]
+    lines = Path("POSCAR").read_text().splitlines()
+    coordinate_line = 6 if all(x.isdigit() for x in lines[5].split()) else 7
+    coordinate_line += lines[coordinate_line].strip().lower().startswith('s')
+    header = lines[:coordinate_line + 1 + constants.number_ions]
     flat = values.ravel(order="F")
     end = flat.size // 5 * 5
     with open(filename, "w") as stream:
@@ -62,6 +67,11 @@ def geometry(c):
     normal /= np.linalg.norm(normal)
     length = cell[axis] @ normal
     volume = abs(np.linalg.det(cell))
+    valence = np.asarray(c.ZVAL)[np.asarray(c.ion_types, dtype=int)]
+    counter = float(c.NELECT) - float(valence.sum())
+    if not np.isclose(counter, C['counter_charge'], atol=1e-6, rtol=0):
+        raise ValueError('NELECT and the requested counter charge disagree')
+    C['counter_charge'] = counter
     size = np.asarray(c.charge_density).shape[axis]
     z = np.arange(size) / size
     ramp = ((z + 0.5) % 1.0 - 0.5) * length
@@ -82,7 +92,6 @@ def geometry(c):
     phase = np.exp(1j * zion[:, None] * k)
     phi_ion = (phase @ phi).real
     grad_ion = (phase @ (1j * k * phi)).real
-    valence = np.asarray(c.ZVAL)[np.asarray(c.ion_types, dtype=int)]
     broadcast = [1, 1, 1]
     broadcast[axis] = size
     _geometry = (axis, normal, volume, ramp, phi_grid, pcc, self_energy,
@@ -165,8 +174,11 @@ def configuration(atoms):
     if planes and (not slab or planes[0][0] != axis):
         raise ValueError("The counter-charge sheet must be parallel to the slab")
     charge = float(info.get("total_charge", -qcc))
-    if not np.isclose(charge + qcc, 0, atol=1e-6):  # NELECT is commonly written to six decimals.
+    if not np.isfinite([charge, qcc]).all() or not np.isclose(charge + qcc, 0, atol=1e-6, rtol=0):
         raise ValueError("total_charge must equal -counter_charge")
+    reservoir = info.get('vacuum_reservoir', False)
+    if not isinstance(reservoir, (bool, np.bool_)):
+        raise ValueError('vacuum_reservoir must be a boolean')
     center = np.asarray(info.get("counter_charge_center", [0., 0., 0.]), dtype=float)
     field = np.asarray(info.get("external_field", [0., 0., 0.]), dtype=float)
     if not slab and np.linalg.norm(field) > 1e-10:
@@ -174,7 +186,8 @@ def configuration(atoms):
     meta = dict(schema="mace_volt_cdce_v2", slab_axis=axis, total_charge=charge,
                 counter_charge=qcc, counter_charge_center=center.tolist(),
                 counter_charge_width=float(info.get("counter_charge_width", 1.0)),
-                external_field=field.tolist(), plugin=bool(qcc),
+                external_field=field.tolist(), plugin=bool(qcc or reservoir),
+                vacuum_reservoir=bool(reservoir),
                 config_type="slab" if slab else "bulk")
     if planes:
         key = planes[0][1]
@@ -189,7 +202,7 @@ def configuration(atoms):
         normal = np.linalg.inv(atoms.cell.array)[:, axis]
         normal /= np.linalg.norm(normal)
         field = np.asarray(info.get("external_field", -float(info.get("efield", 0.)) * normal))
-        if np.linalg.norm(field-(field @ normal)*normal) > 1e-10:
+        if field.shape != (3,) or not np.isfinite(field).all() or np.linalg.norm(field-(field @ normal)*normal) > 1e-10:
             raise ValueError('The homogeneous field must be normal to the slab')
         cut = float(info.get(f"dipole_correction_{'xyz'[axis]}frac", 0.5))
         origin = (cut + 0.5) % 1.0
@@ -209,7 +222,31 @@ def configuration(atoms):
         key = f"vacuum_{'xyz'[axis]}frac"
         if key in info:
             meta[key] = (float(info[key]) - origin) % 1.0
+    if meta['plugin'] and (not np.isfinite(meta['counter_charge_width']) or meta['counter_charge_width'] <= 0):
+        raise ValueError('The Gaussian sheet width must be positive and finite')
+    if reservoir:
+        check_reservoir_geometry(atoms, meta)
     return meta
+
+
+def check_reservoir_geometry(atoms, meta):
+    """Match the model's separated positive-side, fixed-cell reservoir."""
+    axis = meta['slab_axis']
+    if axis is None or np.any(np.asarray(meta['external_field']) != 0):
+        raise ValueError('Vacuum reservoir requires a slab and zero external field')
+    if np.linalg.det(atoms.cell.array) <= 0:
+        raise ValueError('Vacuum reservoir requires a right-handed cell')
+    keys = (f'counter_charge_{"xyz"[axis]}frac', f'vacuum_{"xyz"[axis]}frac')
+    if any(key not in meta for key in keys):
+        raise ValueError('Vacuum reservoir needs explicit sheet and outer vacuum fractions, even at Q=0')
+    length = 1 / np.linalg.norm(np.linalg.inv(atoms.cell.array)[:, axis])
+    sheet, vacuum = ((float(meta[key]) - .5) % 1 * length for key in keys)
+    top = (((atoms.get_scaled_positions(wrap=False)[:, axis] - .5) % 1) * length).max()
+    sigma = meta['counter_charge_width']
+    if (not np.isfinite([sheet, vacuum, top, sigma]).all()
+            or sheet-top < 6*sigma+2 or vacuum-sheet < 6*sigma or length-vacuum < 2*sigma):
+        raise ValueError('Add vacuum: require atoms < sheet < outer vacuum < dipole cut, '
+                         'with gaps of 6*sigma+2, 6*sigma and 2*sigma Angstrom')
 
 
 def make_vasp_calculator(atoms, directory, meta):
@@ -228,6 +265,7 @@ def make_vasp_calculator(atoms, directory, meta):
                             "wrt_potential": "hartree ionic"})
     axis = meta["slab_axis"]
     if axis is not None:
+        settings['kpts'][axis] = 1
         normal = np.linalg.inv(atoms.cell.array)[:, axis]
         normal /= np.linalg.norm(normal)
         settings.update(ldipol=True, idipol=axis + 1, dipol=[0., 0., 0.],
@@ -241,6 +279,10 @@ def make_vasp_calculator(atoms, directory, meta):
                         amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12, lwave=True)
         settings["custom"].update({"plugins/force_and_stress": ".TRUE.",
                                    "lvacpotav": ".FALSE."})
+    if meta['vacuum_reservoir']:
+        # Resolve small charge-energy differences; keep these settings for
+        # every member of the scan. No sharp-plane energy correction here.
+        settings.update(ediff=1e-8, prec='accurate', lreal=False)
     calc = Vasp(**settings)
     calc.initialize(atoms)
     neutral = float(calc.default_nelect_from_ppp())
@@ -289,6 +331,7 @@ def diagnose(atoms, outdir, meta):
             ions = read(outdir/'POSCAR')  # Full precision; CHGCAR headers can round coordinates.
             c = SimpleNamespace(lattice_vectors=ions.cell.array, positions=ions.get_scaled_positions(),
                 charge_density=density.data['total'], ion_types=np.arange(len(atoms)),
+                NELECT=float(meta['nelect']),
                 ZVAL=np.array([outcar.zval_dict[s] for s in ions.symbols]))
             _, normal, volume, ramp, cc, pcc, _, zion, _, _, valence, _ = namespace['geometry'](c)
             final_p = float(valence @ zion-np.mean(n*volume*ramp))
@@ -333,14 +376,42 @@ def diagnose(atoms, outdir, meta):
                   vacuum_density_min_e_A3=float(n[vacuum].min()) if vacuum.any() else None,
                   vacuum_density_max_e_A3=float(n[vacuum].max()) if vacuum.any() else None,
                   vacuum_min_phi_minus_fermi_V=float((phi-fermi)[vacuum].min()) if vacuum.any() else None)
+    failures = []
+    if meta.get('vacuum_reservoir', False):
+        check_reservoir_geometry(atoms, meta)
+        fraction = meta[f'vacuum_{"xyz"[axis]}frac']
+        interval = abs((z-fraction*length+length/2) % length-length/2) <= .5
+        if np.count_nonzero(interval) < 3:
+            failures.append('insufficient FFT points in the outer vacuum interval')
+        else:
+            density_max = float(np.max(abs(n[interval])))
+            esp_span = float(np.ptp(phi[interval]))
+            report.update(reservoir_vacuum_potential_eV=float(phi[interval].mean()),
+                          reservoir_WF_eV=float(phi[interval].mean()-fermi),
+                          reservoir_vacuum_density_max_e_A3=density_max,
+                          reservoir_vacuum_ESP_span_eV=esp_span)
+            if not np.isfinite(density_max) or density_max > 1e-5:
+                failures.append('outer reservoir vacuum contains electronic density')
+            if not np.isfinite(esp_span) or esp_span > .02:
+                failures.append('outer reservoir potential is not flat')
+        if not converged:
+            failures.append('electronic SCF did not reach EDIFF')
+        if not np.isfinite(report['native_vs_final_total_RMS_V']) or report['native_vs_final_total_RMS_V'] > .001:
+            failures.append('saved LOCPOT does not match the final plugin-inclusive potential')
+        report['reservoir_checks_passed'] = not failures
+        report['reservoir_failures'] = failures
     np.savetxt(outdir/'electrostatics_profile.csv',np.column_stack((z,phi,phi-fermi,n,distance)),
                delimiter=',',header='z_A,phi_V,phi_minus_fermi_V,electron_density_e_A3,distance_to_atomic_plane_A',comments='')
     (outdir/'electrostatics_diagnostics.json').write_text(json.dumps(report,indent=2)+'\n')
     for profile, filename in ((phi,'esp.pkl'),(n*atoms.get_volume(),'aed.pkl')):
         with (outdir/filename).open('wb') as stream: pickle.dump((z,profile),stream)
+    if failures:
+        raise ValueError('; '.join(failures))
 
 
 def run_vasp(atoms, outdir, source_index):
+    if (outdir/'OUTCAR').exists():
+        raise FileExistsError(f'{outdir} already contains a VASP run; use a new output directory')
     atoms = atoms.copy()
     atoms.calc = None
     atoms.set_constraint()
@@ -352,8 +423,16 @@ def run_vasp(atoms, outdir, source_index):
     atoms.calc = make_vasp_calculator(atoms, outdir, meta)
     (outdir / "dft_metadata.json").write_text(json.dumps(meta, indent=2) + "\n")
     (outdir / "vasp_plugin.py").write_text(PLUGIN, encoding="utf-8")
-    atoms.get_potential_energy()
-    diagnose(atoms, outdir, meta)
+    try:
+        atoms.get_potential_energy(force_consistent=True)
+        diagnose(atoms, outdir, meta)
+        if not meta['electronic_converged']:
+            raise RuntimeError('Electronic SCF did not converge; this is not a completed training reference')
+    finally:
+        if not meta['plugin']:
+            # A proto-only callback must not make the collector classify an
+            # ordinary slab/bulk calculation as a counter-charge plugin run.
+            (outdir/'vasp_plugin.py').replace(outdir/'proto_potential_hook.py')
     print(f"{outdir.name}: electronic convergence = {meta['electronic_converged']}", flush=True)
     meta['complete'] = True
     atoms.info = {key: value for key, value in meta.items() if value is not None}
