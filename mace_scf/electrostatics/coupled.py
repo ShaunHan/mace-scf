@@ -1218,10 +1218,14 @@ class CoupledResponse(AtomicPotentialResponse):
         # Model definition, not an adjustable accuracy/MD setting. Legacy
         # checkpoints retain their old semantics until explicitly retrained.
         self.energy_derivatives = True
+        # The scalar is a vacuum-referenced charging energy. Its derivative,
+        # rather than a separately fitted observer, defines the work function.
+        self.energy_reference = 'vacuum'
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
                 'energy_derivatives': getattr(self, 'energy_derivatives', False),
+                'energy_reference': getattr(self, 'energy_reference', 'dft'),
                 'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
@@ -1279,6 +1283,9 @@ class CoupledResponse(AtomicPotentialResponse):
 
     def set_extra_state(self, state):
         self.energy_derivatives = bool(state.get('energy_derivatives', False))
+        self.energy_reference = state.get('energy_reference', 'dft')
+        if self.energy_reference not in ('dft', 'vacuum'):
+            raise ValueError('Unknown saved energy reference')
         mode = state.get('deployment_mode', 'unroll_scf')
         if mode not in ('unroll_scf', 'implicit'):
             raise ValueError(f'Unknown saved solver mode {mode}')
@@ -1572,18 +1579,23 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                      constant_charge=True, compute_stress=False, mode=None, mixing=None,
-                     tolerance=1.e-7, reference_conditioning=False, local_state=None):
-    """Return electronic observables and the energy fitted to the energy label.
+                     tolerance=1.e-7, reference_conditioning=False):
+    """One electronic trajectory and one scalar energy, including all response.
 
     For electronic free-energy labels, ``energy`` represents that free energy.
     Forces are its negative total position derivative, including the electronic
     response, at fixed charge, cell and prescribed external controls.
-    New models also differentiate the entire trajectory for mu=-dE/dQ and
-    U_pair=dE/dQ-dE/dC. No stationary-state/envelope approximation is used.
+    New models learn a vacuum-referenced energy A. For a neutral counter path,
+    WF=partial_Q A-partial_C A and EF=ESP_vac-WF, with forces=-partial_R A.
+    Old exports retain their DFT-energy definition for inspection only.
+    No stationary-state/envelope approximation or charge integration is used.
     """
     if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
         raise ValueError('Unknown reference-conditioning observation')
     energy_derivatives = getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
+    vacuum_energy = getattr(model.field_dependent_charges_map, 'energy_reference', 'dft') == 'vacuum'
+    if vacuum_energy and not energy_derivatives:
+        raise ValueError('Vacuum-referenced energy requires energy derivatives')
     outer_grad = torch.is_grad_enabled()
     if energy_derivatives and reference_conditioning not in (False, 'none'):
         raise ValueError('Energy-derived Fermi levels require reference_conditioning: none')
@@ -1616,9 +1628,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             data['cell'] = cell+cell@symmetric
             edge_batch = data['batch'][data['edge_index'][0]]
             data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj',data['shifts'],symmetric[edge_batch])
-        if local_state is not None and compute_stress:
-            raise ValueError('A shared local state cannot be reused under strain')
-        local = model.local_part(data, compute_force=compute_force) if local_state is None else local_state
+        local = model.local_part(data, compute_force=compute_force)
         g, initial, args, update, evaluate = prepare_coupled(model, data, local, functional=mode == 'implicit')
         if mode == 'implicit':
             state, info = implicit_root(update, initial, *args,
@@ -1674,15 +1684,17 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             # the conditional charge-closure multiplier is not a Fermi level.
             common = (response[2]*response[5]).sum(-1)
             local_electronic = local_electronic+.5*target.square()/response[3]-target*common
-            # The chemical level uses the neutral-atom reference, while the
-            # explicit counter source couples to the full spatial ESP. Include
-            # the same proto-plane subtraction as that spatial observer.
-            # A common gauge shift cancels on C=-Q. Independent EF/vacuum
-            # calibration constants likewise enter as charge-linear work.
             reference = r.scalar_reference
-            counter_reference = g.vacuum_reference-(g.plane(g.observer_proto) if g.neutral_reference else 0.)
-            electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
-                          -reference[0]*target-reference[1]*counter)
+            if vacuum_energy:
+                # Only the EF/vacuum DIFFERENCE can set an absolute charging
+                # origin. A common ESP gauge shift cannot change A or its force.
+                # No scalar reference fitting is performed for new models.
+                electronic = electronic+(reference[1]-reference[0])*target
+            else:
+                # Preserve the gauge/counter work of legacy DFT-energy exports.
+                counter_reference = g.vacuum_reference-(g.plane(g.observer_proto) if g.neutral_reference else 0.)
+                electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
+                              -reference[0]*target-reference[1]*counter)
         energy = local.energies.sum(-1)+electronic+local_electronic
         forces = stress = None
         charge_potential = counter_potential = None
@@ -1730,6 +1742,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             output.update(charge_potential=charge_potential,
                           counter_charge_potential=counter_potential,
                           charging_potential=charge_potential-counter_potential)
+        if vacuum_energy:
+            # Raw charged periodic DFT energies can include counter/gauge work.
+            # Let the loss enforce an explicitly declared label convention.
+            output['requires_reservoir_labels'] = (g.slab &
+                ((charge_input.reshape(-1).abs()>1.e-10) | (counter_input.reshape(-1).abs()>1.e-10)))
         attach_observations(data, g, output)
         if 'fourier_density_dft' in output:
             output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
@@ -1748,6 +1765,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if decoder is not None:
             output = decoder(g, state, output)
         output = apply_scalar_reference(output, r)
+        if vacuum_energy:
+            # Apply AFTER raw-field decoding and scalar gauge restoration.
+            # This is the training definition too, not an inference correction.
+            output['fermi_level'] = output['vacuum_potential']-output['charging_potential']
+            output['work_function'] = output['charging_potential']
         # A finite iterate does not imply finite derivatives of its trajectory.
         # Reject invalid observables before loss/Adam, metrics or MD consume them.
         checked = {key: output[key] for key in ('energy', 'forces', 'stress',

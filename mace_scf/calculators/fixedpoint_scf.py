@@ -189,11 +189,13 @@ class MACEFixedPointSCF(Calculator):
         self.model.kspace_cutoff *= adjust_kspace_cutoff
         response = getattr(self.model, "field_dependent_charges_map", None)
         if voltage_reference not in (None, 'SHE'):
-            raise ValueError("voltage_reference must be None (DFT energy) or 'SHE' (reservoir energy)")
+            raise ValueError("voltage_reference must be None (model reference) or 'SHE'")
         if voltage_reference == 'SHE' and (not getattr(response, 'energy_derivatives', False)
+                or getattr(response, 'energy_reference', 'dft') != 'vacuum'
                 or pbc_handling != 'slab' or not self.scf_options.constant_charge
                 or energy_units_to_eV != 1. or length_units_to_A != 1.):
-            raise ValueError('SHE dynamics requires an energy-derived slab model, fixed-charge SCF and eV/Angstrom units')
+            raise ValueError('SHE dynamics requires a model trained with vacuum-referenced energy, '
+                             'slab boundaries, fixed-charge SCF and eV/Angstrom units')
         self.voltage_reference = voltage_reference
         if getattr(response, "spectral", False):
             from dataclasses import replace
@@ -596,12 +598,9 @@ class MACEFixedPointSCF(Calculator):
         }
         for key in ("vacuum_potential", "potential_reference", "charge_potential",
                     "counter_charge_potential", "charging_potential", "electrode_potential",
-                    "model_energy", "model_charging_potential", "reservoir_energy_correction",
-                    "charge_integration_error", "charge_integration_force_error"):
+                    "work_function"):
             if output.get(key) is not None:
                 results[key] = float(output[key].detach().reshape(-1)[0]) * self.energy_units_to_eV
-        if 'charge_evaluations' in output:
-            results['charge_evaluations'] = int(output['charge_evaluations'].item())
         if self.save_full_scf_history:
             results["full_scf_history"] = diagnostics["charge_history"]
         return results

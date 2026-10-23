@@ -492,6 +492,7 @@ class WeightedLoss(torch.nn.Module):
         super().__init__()
         self.loss_weights = {}
         self.loss_fns = {}
+        self.label_references = {}
         weights_and_options = deepcopy(_weights_and_options)
         self.definition = {name: deepcopy(value) if isinstance(value, dict) else {'weight': value}
                            for name, value in weights_and_options.items()}
@@ -501,6 +502,11 @@ class WeightedLoss(torch.nn.Module):
             if isinstance(options, (int, float)):
                 options = {'weight': options}
             self.loss_weights[name] = options.pop("weight")
+            if name in ('energy_per_atom', 'forces', 'stress'):
+                reference = options.pop('reference', 'dft')
+                if reference not in ('dft', 'vacuum'):
+                    raise ValueError('Energy/force/stress label reference must be dft or vacuum')
+                self.label_references[name] = reference
             function = _LOSS_FUNCTIONS[name]
             if isinstance(function, type) and issubclass(function, torch.nn.Module):
                 self.loss_fns[name] = function(**options)
@@ -576,6 +582,18 @@ class WeightedLoss(torch.nn.Module):
 
     def forward(self, ref: Batch, pred: TensorDict, normalizers=None) -> torch.Tensor:
         loss = 0.
+        charged = pred.get('requires_reservoir_labels')
+        if charged is not None:
+            for name, reference in getattr(self, 'label_references', {}).items():
+                if reference != 'dft' or not self.loss_weights[name]:
+                    continue
+                key = 'energy' if name == 'energy_per_atom' else name
+                weight = getattr(ref, key+'_weight', torch.ones_like(ref.weight)).reshape(-1)
+                if bool((charged & (ref.weight.reshape(-1)*weight > 0)).any()):
+                    raise ValueError(f'{name}: raw charged-slab DFT labels are not vacuum-reservoir labels. '
+                                     'Use zero per-configuration weight for this quantity, or reference: vacuum '
+                                     'ONLY after converting the labels and their force/stress derivatives. '
+                                     'Neutral labels and charged EF/ESP labels remain usable.')
         local_normalizers=self.normalizers(ref) if normalizers is not None else None
         # set weights to discount non-converged scf
         if "loss_weight_modifier" in pred:

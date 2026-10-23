@@ -215,8 +215,8 @@ def make_calculator(model_file):
                              pbc_handling='slab', scf_options=options, scf_restart=False,
                              ignore_nonconverged=True, use_compile=False, enable_cueq=ENABLE_CUEQ,
                              counter_charge_width=GAUSSIAN_WIDTH, voltage_reference='SHE')
-    if not getattr(calc.model.field_dependent_charges_map, 'energy_derivatives', False):
-        raise ValueError('Use a newly trained energy-derived MACE-VOLT model for this driver')
+    if getattr(calc.model.field_dependent_charges_map, 'energy_reference', 'dft') != 'vacuum':
+        raise ValueError('Use a newly trained vacuum-energy MACE-VOLT model for this driver')
     heads = list(getattr(calc.model, 'heads', [calc.head]))
     head = HEAD or (heads[0] if len(heads) == 1 else next((h for h in heads if h.lower() == 'default'), None))
     if head not in heads:
@@ -379,7 +379,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        direction=stages[stage_id]['direction'], window=stages[stage_id]['window'],
                        phase=stages[stage_id]['phase'], phase_step=dyn.nsteps-segment_start,
                        distance_A=distance, center_A=bias.center, k_eV_A2=bias.k,
-                       bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=scalar(r['model_energy']), energy_electrochemical_eV=energy,
+                       bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=energy,
                        energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
                        temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
                        total_charge_e=scalar(atoms.info['total_charge']),
