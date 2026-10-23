@@ -1572,7 +1572,7 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                      constant_charge=True, compute_stress=False, mode=None, mixing=None,
-                     tolerance=1.e-7, reference_conditioning=False):
+                     tolerance=1.e-7, reference_conditioning=False, local_state=None):
     """Return electronic observables and the energy fitted to the energy label.
 
     For electronic free-energy labels, ``energy`` represents that free energy.
@@ -1616,7 +1616,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             data['cell'] = cell+cell@symmetric
             edge_batch = data['batch'][data['edge_index'][0]]
             data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj',data['shifts'],symmetric[edge_batch])
-        local = model.local_part(data, compute_force=compute_force)
+        if local_state is not None and compute_stress:
+            raise ValueError('A shared local state cannot be reused under strain')
+        local = model.local_part(data, compute_force=compute_force) if local_state is None else local_state
         g, initial, args, update, evaluate = prepare_coupled(model, data, local, functional=mode == 'implicit')
         if mode == 'implicit':
             state, info = implicit_root(update, initial, *args,

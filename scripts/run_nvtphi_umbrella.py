@@ -22,13 +22,11 @@ ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_203/models/fit_0_best_wf.model'
 RUN_INDEXES = list(range(0, 10))
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
-MAX_WORKERS, REPLICAS = 10, 1                 # Two processes share one visible GPU.
+MAX_WORKERS, REPLICAS = 10, 1                 # Workers share one visible GPU.
 DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
 SCF_STEPS = 50                              # None uses the exported model's deployment budget.
 OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
-TARGET_PAIR_VOLTAGE = None                  # Required: calibrated electrode-to-counter voltage (V).
-# A target of 1.6 V vs SHE is NOT automatically a pair voltage of 1.6 V.
-# Calibrate the counter-reservoir reference before assigning this value.
+TARGET_U_SHE = 1.60                         # V vs SHE; no initial-frame offset.
 COUNTER_SHEET_POINT, GAUSSIAN_WIDTH = [0., 0., 10.], 1.0
 CAPACITANCE, TAUPHI_FS = 0.01, 100.0         # e/V for the whole cell; fs. Not an areal capacitance.
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
@@ -75,7 +73,7 @@ def write_json(path, value):
 
 
 def settings():
-    names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_PAIR_VOLTAGE '
+    names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_U_SHE '
              'COUNTER_SHEET_POINT GAUSSIAN_WIDTH CAPACITANCE TAUPHI_FS Z_FIXED '
              'Z_REPULSIVE WALL_K PAIR_CUTOFF OO_MIN WINDOW_SPACING UMBRELLA_K '
              'REACTANT_MARGIN REQUIRE_ADSORBATE REVERSE_SWEEP TEMPERATURE_K '
@@ -147,12 +145,9 @@ def prepare_frame(source, index):
         if ('counter_charge_center' in info or not np.isclose(scalar(info.get('counter_charge_zfrac', np.nan)), fraction)
                 or not np.isclose(scalar(info.get('counter_charge_width', np.nan)), GAUSSIAN_WIDTH)):
             raise ValueError('The charged DFT reference and configured Gaussian sheet must have identical geometry')
-    if TARGET_PAIR_VOLTAGE is None:
-        raise ValueError('Set TARGET_PAIR_VOLTAGE after calibrating the counter-reservoir reference. '
-                         'An initial vacuum WF minus 4.44 V cannot supply that calibration.')
-    scalar(TARGET_PAIR_VOLTAGE)
+    scalar(TARGET_U_SHE)
     # A fractional coordinate selects a sheet; counter_charge_center would select a 3D Gaussian.
-    atoms.info = dict(source_index=index, oxygen_pair=pair, reference_potential=None,
+    atoms.info = dict(source_index=index, oxygen_pair=pair,
                       total_charge=charge, counter_charge=-charge,
                       external_field=np.asarray(info.get('external_field', np.zeros(3)), dtype=float),
                       counter_charge_zfrac=fraction, counter_charge_width=GAUSSIAN_WIDTH,
@@ -219,7 +214,7 @@ def make_calculator(model_file):
     calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64',
                              pbc_handling='slab', scf_options=options, scf_restart=False,
                              ignore_nonconverged=True, use_compile=False, enable_cueq=ENABLE_CUEQ,
-                             counter_charge_width=GAUSSIAN_WIDTH)
+                             counter_charge_width=GAUSSIAN_WIDTH, voltage_reference='SHE')
     if not getattr(calc.model.field_dependent_charges_map, 'energy_derivatives', False):
         raise ValueError('Use a newly trained energy-derived MACE-VOLT model for this driver')
     heads = list(getattr(calc.model, 'heads', [calc.head]))
@@ -246,7 +241,7 @@ def charge_probe(atoms):
             atoms.calc.reset()
             energy = atoms.get_potential_energy(apply_constraint=False)
             r = atoms.calc.results
-            if 'charging_potential' not in r:
+            if 'electrode_potential' not in r:
                 raise RuntimeError('Use a newly trained energy-derived model for NVTPhi')
             data.append([energy, scalar(r['charging_potential']),
                          scalar(r['vacuum_potential'])-scalar(r['fermi_level'])])
@@ -260,7 +255,7 @@ def charge_probe(atoms):
                 charging_potential_V=data[1][1], derivative_error_V=float(derivative-data[1][1]),
                 dU_dQ_V_per_e=float(slope), E_curvature_eV_per_e2=float(
                     (data[2][0]+data[0][0]-2*data[1][0])/CHARGE_PROBE_E**2),
-                note='Fixed geometry, counter_charge=-Q; the controlled voltage is conjugate to charge transfer, not vacuum WF.')
+                note='Vacuum-referenced charging energy; the controller uses its derivative minus 4.44 V.')
 
 
 def last_csv(path):
@@ -344,13 +339,12 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
     with ExitStack() as stack:
         dyn = stack.enter_context(NVTPhiLangevin(
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
-            friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_PAIR_VOLTAGE,
+            friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE,
             C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
             logfile=str(directory / 'md.log'), loginterval=LOGINTERVAL,
-            reference_potential=atoms.info['reference_potential']))
+            reference_potential=None))
         dyn.nsteps = start
         if state is not None:
-            dyn._reference_model_potential = state['model_anchor']
             dyn._read_potential()
         trajectory = stack.enter_context(Trajectory(traj_path, 'a'))
         stream = stack.enter_context(csv_path.open('a', newline='', buffering=1))
@@ -385,9 +379,9 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        direction=stages[stage_id]['direction'], window=stages[stage_id]['window'],
                        phase=stages[stage_id]['phase'], phase_step=dyn.nsteps-segment_start,
                        distance_A=distance, center_A=bias.center, k_eV_A2=bias.k,
-                       bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=energy,
+                       bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=scalar(r['model_energy']), energy_electrochemical_eV=energy,
                        energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
-                       temperature_K=temperature, voltage_V_pair=dyn._read_potential(),
+                       temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
                        total_charge_e=scalar(atoms.info['total_charge']),
                        vacuum_potential_V=scalar(r['vacuum_potential']), fermi_level_eV=scalar(r['fermi_level']),
                        wf_eV=scalar(r['vacuum_potential'])-scalar(r['fermi_level']),
@@ -398,7 +392,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             frame = atoms.copy()
             frame.set_constraint([])  # Stored energy/forces include restraints exactly once.
             frame.info.update(step=dyn.nsteps, md_record=row, restart_state=dict(
-                run_id=run_id, rng_state=rng.bit_generator.state, model_anchor=dyn._reference_model_potential,
+                run_id=run_id, rng_state=rng.bit_generator.state,
                 stage_id=stage_id, stage_done=dyn.nsteps-segment_start))
             trajectory.write(frame, energy=energy+wall+umbrella, forces=forces)
             write_row(row)

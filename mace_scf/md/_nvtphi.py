@@ -25,8 +25,8 @@ class NVTPhiMixin:
             raise ValueError("temperature_K must be finite and nonnegative")
         if not np.isfinite(target_potential):
             raise ValueError("target_potential must be finite")
-        if reference_potential is not None and not np.isfinite(reference_potential):
-            raise ValueError("reference_potential must be finite when supplied")
+        if reference_potential is not None:
+            raise ValueError("SHE dynamics uses the absolute reservoir reference; remove reference_potential")
         self._phi_kbt = units.kB * float(temperature_K)
         self.target_potential = float(target_potential)
         self.capacitance = float(capacitance)
@@ -35,10 +35,7 @@ class NVTPhiMixin:
         self.total_charge_key = total_charge_key
         self.vacuum_potential_key = vacuum_potential_key
         self.fermi_level_key = fermi_level_key
-        self.reference_potential = (
-            None if reference_potential is None else float(reference_potential)
-        )
-        self._reference_model_potential = None
+        self.reference_potential = None
         self.current_potential = None
 
     def _init_potentiostat_state(self, communicator, rng) -> None:
@@ -49,8 +46,7 @@ class NVTPhiMixin:
         self._sync_total_charge()
         if self.atoms.calc is None:
             raise RuntimeError("NVTPhi dynamics requires an attached calculator")
-        # Capture the reference on the initial geometry, before the first MD
-        # displacement, regardless of whether the calculator was evaluated.
+        # Validate the energy/voltage contract before any MD displacement.
         self.atoms.get_potential_energy()
         self._read_potential()
 
@@ -76,37 +72,20 @@ class NVTPhiMixin:
     def _sync_total_charge(self) -> None:
         self._set_counter_charge(self._counter_charge())
 
-    def _control_potential(self, model_potential: float) -> float:
-        """Apply an optional, fixed initial-frame calibration.
-
-        With no reference, the target uses the model's own scalar origin.
-        Otherwise U(t) = reference_potential + U_E(t) - U_E(0),
-        where U_E=dE(R,Q,-Q)/dQ. This adds a constant charge-linear
-        term to the grand potential and leaves fixed-Q forces unchanged.
-        A vacuum/SHE WF anchor alone does not establish the counter-electrode
-        reference: this controls pair voltage, not vacuum WF at every frame.
-        """
-        if self._reference_model_potential is None:
-            self._reference_model_potential = model_potential
-        self.current_potential = model_potential
-        if self.reference_potential is not None:
-            self.current_potential = self.reference_potential + (
-                model_potential - self._reference_model_potential
-            )
-        return float(self.current_potential)
-
     def _read_potential(self) -> float:
+        """Read the reservoir-energy derivative relative to SHE, in volts."""
         if self.atoms.calc is None:
             raise RuntimeError("NVTPhi dynamics requires an attached calculator")
-        value = self.atoms.calc.results.get('charging_potential')
+        value = self.atoms.calc.results.get('electrode_potential')
         if value is None:
-            raise RuntimeError('NVTPhi requires charging_potential=dE(R,Q,-Q)/dQ. '
-                               'This model has an independent WF observer; retrain with the '
-                               'energy-derived model before using voltage dynamics.')
+            raise RuntimeError("NVTPhi requires the SHE reservoir energy and its forces. "
+                               "Use MACEFixedPointSCF(..., voltage_reference='SHE'); "
+                               "raw pair voltage or an independent WF observer is insufficient.")
         value = float(value)
         if not np.isfinite(value):
             raise FloatingPointError('Nonfinite energy-derived charging potential')
-        return self._control_potential(value)
+        self.current_potential = value
+        return value
 
     def _normal(self) -> float:
         value = np.asarray([self._phi_rng.standard_normal()], dtype=float)
@@ -137,4 +116,5 @@ class NVTPhiMixin:
             "vacuum_potential_key": self.vacuum_potential_key,
             "fermi_level_key": self.fermi_level_key,
             "reference_potential": self.reference_potential,
+            "voltage_reference": "SHE",
         }

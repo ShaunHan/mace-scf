@@ -5,7 +5,6 @@ import numpy as np
 from ase import Atoms, units
 from ase.parallel import world
 from ase.utils import IOContext
-from ._potential import potential_difference
 
 
 class NVTPhiMDLogger(IOContext):
@@ -39,7 +38,7 @@ class NVTPhiMDLogger(IOContext):
             f"Ekin{scale}[eV]",
             "T[K]",
             "q_electrode[e]",
-            "Phi[V]",
+            "U_SHE[V]",
         )
         natoms = atoms.get_global_number_of_atoms()
         if peratom or natoms <= 100:
@@ -69,9 +68,7 @@ class NVTPhiMDLogger(IOContext):
         if self.dyn is not None and hasattr(self.dyn, "_read_potential"):
             potential = self.dyn._read_potential()
         else:
-            potential = potential_difference(
-                self.atoms.calc.results, self.vacuum_potential_key, self.fermi_level_key
-            )
+            potential = self.atoms.calc.results["electrode_potential"]
 
         values = ()
         if self.dyn is not None:
