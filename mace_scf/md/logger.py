@@ -38,7 +38,7 @@ class NVTPhiMDLogger(IOContext):
             f"Ekin{scale}[eV]",
             "T[K]",
             "q_electrode[e]",
-            "U_SHE[V]",
+            "U_pair[V]",
         )
         natoms = atoms.get_global_number_of_atoms()
         if peratom or natoms <= 100:
@@ -68,7 +68,7 @@ class NVTPhiMDLogger(IOContext):
         if self.dyn is not None and hasattr(self.dyn, "_read_potential"):
             potential = self.dyn._read_potential()
         else:
-            potential = self.atoms.calc.results["electrode_potential"]
+            potential = self.atoms.calc.results["md_charge_potential"]
 
         values = ()
         if self.dyn is not None:

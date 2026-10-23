@@ -26,7 +26,7 @@ class NVTPhiMixin:
         if not np.isfinite(target_potential):
             raise ValueError("target_potential must be finite")
         if reference_potential is not None:
-            raise ValueError("SHE dynamics uses the absolute reservoir reference; remove reference_potential")
+            raise ValueError("The pair-voltage controller needs no fitted offset; remove reference_potential")
         self._phi_kbt = units.kB * float(temperature_K)
         self.target_potential = float(target_potential)
         self.capacitance = float(capacitance)
@@ -73,14 +73,14 @@ class NVTPhiMixin:
         self._set_counter_charge(self._counter_charge())
 
     def _read_potential(self) -> float:
-        """Read the reservoir-energy derivative relative to SHE, in volts."""
+        """Read dE(R,Q,-Q)/dQ; it is generally different from WF-4.44."""
         if self.atoms.calc is None:
             raise RuntimeError("NVTPhi dynamics requires an attached calculator")
-        value = self.atoms.calc.results.get('electrode_potential')
+        value = self.atoms.calc.results.get('md_charge_potential')
         if value is None:
-            raise RuntimeError("NVTPhi requires the SHE reservoir energy and its forces. "
-                               "Use MACEFixedPointSCF(..., voltage_reference='SHE'); "
-                               "raw pair voltage or an independent WF observer is insufficient.")
+            raise RuntimeError("NVTPhi requires the DFT-energy charge-transfer derivative. "
+                               "Use MACEFixedPointSCF(..., voltage_reference='pair'); "
+                               "an electrode WF observation is not the pair-voltage controller.")
         value = float(value)
         if not np.isfinite(value):
             raise FloatingPointError('Nonfinite energy-derived charging potential')
@@ -116,5 +116,5 @@ class NVTPhiMixin:
             "vacuum_potential_key": self.vacuum_potential_key,
             "fermi_level_key": self.fermi_level_key,
             "reference_potential": self.reference_potential,
-            "voltage_reference": "SHE",
+            "voltage_reference": "pair",
         }

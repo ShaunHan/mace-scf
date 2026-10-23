@@ -102,9 +102,9 @@ def _resume_training(args, tag, state, ema, device):
 def _check_energy_definition(model):
     response = getattr(model, 'field_dependent_charges_map', None)
     if getattr(response, 'coupled', False) and (not getattr(response, 'energy_derivatives', False)
-            or getattr(response, 'energy_reference', 'dft') != 'vacuum'):
-        raise ValueError('This checkpoint predates the vacuum-referenced energy definition. '
-                         'It cannot resume with the new EF/energy relationship. Start a new training run '
+            or getattr(response, 'energy_reference', 'dft') != 'dft'):
+        raise ValueError('This checkpoint does not use the DFT energy with derivative-based EF. '
+                         'It cannot resume with this EF/energy relationship. Start a new training run '
                          'with restart_latest: false; retain the original foundation model.')
 
 

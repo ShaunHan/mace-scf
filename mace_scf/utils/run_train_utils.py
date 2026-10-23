@@ -489,10 +489,8 @@ def get_field_feature_norms(dataloader, args, device, fermi_level_offset=0.0):
 
 
 def get_fermi_level_offset(dataloader, args, device):
-    # The new FixedPoint energy is vacuum referenced: initialize its existing
-    # charge-linear term with mean(EF-ESP_vac), not a gauge-dependent mean EF.
-    # This is training-set centering, not a fitted inference correction.
-    vacuum_reference = args.model == 'FixedPoint'
+    # Center the existing charge-linear energy term in the DFT EF convention.
+    # It is part of the trained energy, never a post-training voltage correction.
     if args.fermi_level_offset is not None:
         logging.info(
             "using manually specified Fermi level offset %s",
@@ -512,12 +510,6 @@ def get_fermi_level_offset(dataloader, args, device):
         if not bool(torch.atleast_1d(fermi_level_weight.detach().cpu() > 0.0).all()):
             continue
         value = float(fermi_level.detach().cpu())
-        if vacuum_reference:
-            vacuum = getattr(data, 'vacuum_potential', None)
-            weight = getattr(data, 'vacuum_potential_weight', None)
-            if vacuum is None or weight is None or not bool((weight > 0).all()):
-                continue
-            value -= float(vacuum.detach().cpu())
         if not np.isfinite(value):
             raise ValueError('Nonfinite electronic reference in the training labels')
         fermi_sum += value
@@ -528,8 +520,7 @@ def get_fermi_level_offset(dataloader, args, device):
         return 0.0
 
     fermi_level_offset = fermi_sum / num_values
-    logging.info("computed electronic charging offset %s (%s reference)",
-                 fermi_level_offset, 'vacuum' if vacuum_reference else 'DFT')
+    logging.info("computed DFT Fermi-level initialization %s", fermi_level_offset)
     return fermi_level_offset
 
 

@@ -1218,9 +1218,9 @@ class CoupledResponse(AtomicPotentialResponse):
         # Model definition, not an adjustable accuracy/MD setting. Legacy
         # checkpoints retain their old semantics until explicitly retrained.
         self.energy_derivatives = True
-        # The scalar is a vacuum-referenced charging energy. Its derivative,
-        # rather than a separately fitted observer, defines the work function.
-        self.energy_reference = 'vacuum'
+        # One DFT energy supplies forces and EF by differentiation. The raw
+        # vacuum ESP then supplies WF; counter transfer has its own derivative.
+        self.energy_reference = 'dft'
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
@@ -1577,6 +1577,14 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
     return result
 
 
+def counter_source_energy(g, coarse, normal_dipole):
+    """Periodic interaction plus the full slab dipole cross term and source work."""
+    periodic = g.volume*(coarse.conj()*g.coulomb*g.counter_density).real.sum(-1)
+    # Use the same physical moment as the electrode boundary self-energy.
+    # Sampling a truncated sawtooth through a smeared density changes this term.
+    return periodic+g.slab_factor*normal_dipole*g.counter_moment+g.counter_energy
+
+
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
                      constant_charge=True, compute_stress=False, mode=None, mixing=None,
                      tolerance=1.e-7, reference_conditioning=False):
@@ -1585,17 +1593,18 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
     For electronic free-energy labels, ``energy`` represents that free energy.
     Forces are its negative total position derivative, including the electronic
     response, at fixed charge, cell and prescribed external controls.
-    New models learn a vacuum-referenced energy A. For a neutral counter path,
-    WF=partial_Q A-partial_C A and EF=ESP_vac-WF, with forces=-partial_R A.
-    Old exports retain their DFT-energy definition for inspection only.
+    The single energy target is the supplied DFT electronic free energy.
+    EF=-partial_Q E at fixed counter charge C; WF=ESP_vac-EF. On the MD path
+    C=-Q, the conjugate transfer voltage is partial_Q E-partial_C E. These
+    voltages differ by ESP_vac+partial_C E, which is not generally constant.
     No stationary-state/envelope approximation or charge integration is used.
     """
     if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
         raise ValueError('Unknown reference-conditioning observation')
     energy_derivatives = getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
-    vacuum_energy = getattr(model.field_dependent_charges_map, 'energy_reference', 'dft') == 'vacuum'
-    if vacuum_energy and not energy_derivatives:
-        raise ValueError('Vacuum-referenced energy requires energy derivatives')
+    if getattr(model.field_dependent_charges_map, 'energy_reference', 'dft') != 'dft':
+        raise ValueError('This export learned a different energy target. Retrain with the DFT-energy '
+                         'definition; changing its saved energy_reference is not a conversion.')
     outer_grad = torch.is_grad_enabled()
     if energy_derivatives and reference_conditioning not in (False, 'none'):
         raise ValueError('Energy-derived Fermi levels require reference_conditioning: none')
@@ -1669,7 +1678,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             boundary_energy = boundary_energy+g.molecular.energy(
                 molecular_moments+g.molecular.counter)
             dipole = torch.where(g.molecular.active[:, None], molecular_moments[:, 1:4], dipole)
-        counter_energy = -g.volume*(torch.view_as_complex(coarse.contiguous()).conj()*g.counter).real.sum(-1)+g.counter_energy
+        counter_energy = counter_source_energy(g, torch.view_as_complex(coarse.contiguous()), normal_dipole)
         electronic = periodic_energy+boundary_energy-(dipole*g.external).sum(-1)+counter_energy
         electronic = electronic-model.fermi_level_offset*charge
         if not getattr(model.coulomb_energy, 'include_self_interaction', True):
@@ -1685,16 +1694,16 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             common = (response[2]*response[5]).sum(-1)
             local_electronic = local_electronic+.5*target.square()/response[3]-target*common
             reference = r.scalar_reference
-            if vacuum_energy:
-                # Only the EF/vacuum DIFFERENCE can set an absolute charging
-                # origin. A common ESP gauge shift cannot change A or its force.
-                # No scalar reference fitting is performed for new models.
-                electronic = electronic+(reference[1]-reference[0])*target
-            else:
-                # Preserve the gauge/counter work of legacy DFT-energy exports.
-                counter_reference = g.vacuum_reference-(g.plane(g.observer_proto) if g.neutral_reference else 0.)
-                electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
-                              -reference[0]*target-reference[1]*counter)
+            # Keep the DFT gauge and prescribed-source work in the ONE energy.
+            # The same scalar generates forces and both independent charge
+            # derivatives. No observer-only EF correction is added afterwards.
+            # The charge-source energy must not depend on where a user observes
+            # the vacuum. Use the atomic form-factor k=0 limit, not that plane.
+            proto_reference = (-(g.attrs.sum(1)@r.proto_coefficients[:, 0])/g.volume*g.slab
+                               if g.neutral_reference and bool(r.proto_fitted) else 0.)
+            counter_reference = g.vacuum_reference-proto_reference
+            electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
+                          -reference[0]*target-reference[1]*counter)
         energy = local.energies.sum(-1)+electronic+local_electronic
         forces = stress = None
         charge_potential = counter_potential = None
@@ -1742,11 +1751,6 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             output.update(charge_potential=charge_potential,
                           counter_charge_potential=counter_potential,
                           charging_potential=charge_potential-counter_potential)
-        if vacuum_energy:
-            # Raw charged periodic DFT energies can include counter/gauge work.
-            # Let the loss enforce an explicitly declared label convention.
-            output['requires_reservoir_labels'] = (g.slab &
-                ((charge_input.reshape(-1).abs()>1.e-10) | (counter_input.reshape(-1).abs()>1.e-10)))
         attach_observations(data, g, output)
         if 'fourier_density_dft' in output:
             output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
@@ -1765,11 +1769,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if decoder is not None:
             output = decoder(g, state, output)
         output = apply_scalar_reference(output, r)
-        if vacuum_energy:
-            # Apply AFTER raw-field decoding and scalar gauge restoration.
-            # This is the training definition too, not an inference correction.
-            output['fermi_level'] = output['vacuum_potential']-output['charging_potential']
-            output['work_function'] = output['charging_potential']
+        # WF uses the final raw ESP observer, with EF still the DFT-energy
+        # derivative at fixed C. Do not replace EF with a pair-charge slope.
+        output['work_function'] = output['vacuum_potential']-output['fermi_level']
+        if energy_derivatives:
+            output['counter_reference_offset'] = output['work_function']-output['charging_potential']
         # A finite iterate does not imply finite derivatives of its trajectory.
         # Reject invalid observables before loss/Adam, metrics or MD consume them.
         checked = {key: output[key] for key in ('energy', 'forces', 'stress',

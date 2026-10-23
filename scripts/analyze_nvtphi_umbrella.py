@@ -80,8 +80,11 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
     if not rows:
         raise ValueError('No production samples yet')
     kbt = KB_EV_K*cfg['settings']['TEMPERATURE_K']
-    target = cfg['settings']['TARGET_U_SHE']
-    report = dict(source_index=cfg['initial']['info']['source_index'],
+    pair_control = 'TARGET_PAIR_VOLTAGE' in cfg['settings']
+    target = cfg['settings']['TARGET_PAIR_VOLTAGE' if pair_control else 'TARGET_U_SHE']
+    voltage_key = 'pair_voltage_V' if pair_control else 'voltage_V_SHE'
+    report = dict(voltage_reference='pair' if pair_control else 'legacy SHE',
+                  source_index=cfg['initial']['info']['source_index'],
                   oxygen_pair=cfg['initial']['info']['oxygen_pair'],
                   meaning='Conditional O-O distance profile for this fixed composition/pair and the implemented controller.',
                   limitations=['No proton reservoir or pH control.',
@@ -114,7 +117,7 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
                               distance_shift_from_center_A=float(distance.mean()-center[0]),
                               production_ps=float(values('phase_step').max()*cfg['settings']['TIMESTEP_FS']/1000),
                               effective_samples=float(len(rr)/g), correlation_stride=float(g),
-                              mean_U_SHE=float(values('voltage_V_SHE').mean()),
+                              mean_control_voltage_V=float(values(voltage_key).mean()),
                               mean_temperature_K=float(values('temperature_K').mean()),
                               distance_half_drift_A=float(distance[half:].mean()-distance[:half].mean()),
                               charge_half_drift_e=float(values('total_charge_e')[half:].mean()-values('total_charge_e')[:half].mean()),
@@ -134,7 +137,7 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
             flags.append('Incomplete planned production; profile is provisional.')
         if min(s['effective_samples'] for s in stats)<50:
             flags.append('Some windows have fewer than 50 estimated independent samples.')
-        if max(abs(s['mean_U_SHE']-target) for s in stats)>.15:
+        if max(abs(s['mean_control_voltage_V']-target) for s in stats)>.15:
             flags.append('Some window mean voltages differ from target by >0.15 V; inspect stationarity and uncertainty.')
         if max(abs(s['mean_temperature_K']-cfg['settings']['TEMPERATURE_K']) for s in stats)>20:
             flags.append('Some window mean temperatures differ from target by >20 K.')

@@ -188,13 +188,17 @@ class MACEFixedPointSCF(Calculator):
         ).to(self.device)
         self.model.kspace_cutoff *= adjust_kspace_cutoff
         response = getattr(self.model, "field_dependent_charges_map", None)
-        if voltage_reference not in (None, 'SHE'):
-            raise ValueError("voltage_reference must be None (model reference) or 'SHE'")
-        if voltage_reference == 'SHE' and (not getattr(response, 'energy_derivatives', False)
-                or getattr(response, 'energy_reference', 'dft') != 'vacuum'
+        if voltage_reference == 'SHE':
+            raise ValueError("SHE is an electrode reference, not the conjugate voltage for arbitrary "
+                             "counter-charge transfer. Use voltage_reference='pair' with a physical "
+                             "pair-voltage target; a state-dependent offset cannot be used as a calibration.")
+        if voltage_reference not in (None, 'pair'):
+            raise ValueError("voltage_reference must be None (DFT observations) or 'pair' (conservative MD)")
+        if voltage_reference == 'pair' and (not getattr(response, 'energy_derivatives', False)
+                or getattr(response, 'energy_reference', 'dft') != 'dft'
                 or pbc_handling != 'slab' or not self.scf_options.constant_charge
                 or energy_units_to_eV != 1. or length_units_to_A != 1.):
-            raise ValueError('SHE dynamics requires a model trained with vacuum-referenced energy, '
+            raise ValueError('Charge-transfer MD requires a model trained with DFT energy and derivative-based EF, '
                              'slab boundaries, fixed-charge SCF and eV/Angstrom units')
         self.voltage_reference = voltage_reference
         if getattr(response, "spectral", False):
@@ -355,8 +359,8 @@ class MACEFixedPointSCF(Calculator):
         )
         profile = any(config.properties.get(key) is not None for key in
                       ("counter_charge_center", *[f"counter_charge_{a}frac" for a in "xyz"]))
-        if self.voltage_reference == 'SHE' and (not profile or self.compensating_jellium):
-            raise ValueError('SHE dynamics requires an explicit counter-charge profile, including at Q=0')
+        if self.voltage_reference == 'pair' and (not profile or self.compensating_jellium):
+            raise ValueError('Charge-transfer MD requires an explicit counter-charge profile, including at Q=0')
         if (profile or config.properties.get("dipole_correction_center") is not None) and not getattr(
                 self.model.field_dependent_charges_map, "spectral", False):
             raise NotImplementedError("Prescribed Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
@@ -440,9 +444,9 @@ class MACEFixedPointSCF(Calculator):
 
     def _run_model(self, batch, restart_state):
         batch_dict = batch.to_dict()
-        if self.voltage_reference == 'SHE':
-            from mace_scf.electrostatics.reservoir import evaluate_she
-            return evaluate_she(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
+        if self.voltage_reference == 'pair':
+            from mace_scf.electrostatics.reservoir import evaluate_pair
+            return evaluate_pair(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
                 mixing=self.scf_options.mixing_parameter, tolerance=self.scf_options.scf_tolerance)
         if getattr(self.model.field_dependent_charges_map, "spectral", False):
             if self.compensating_jellium:
@@ -598,7 +602,7 @@ class MACEFixedPointSCF(Calculator):
         }
         for key in ("vacuum_potential", "potential_reference", "charge_potential",
                     "counter_charge_potential", "charging_potential", "electrode_potential",
-                    "work_function"):
+                    "work_function", "counter_reference_offset", "md_charge_potential"):
             if output.get(key) is not None:
                 results[key] = float(output[key].detach().reshape(-1)[0]) * self.energy_units_to_eV
         if self.save_full_scf_history:

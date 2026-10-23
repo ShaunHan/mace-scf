@@ -13,16 +13,12 @@ from ase.md.velocitydistribution import (
 
 from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
 from mace_scf.md import NVTPhiLangevin
-from mace_scf.md._potential import potential_difference
 
 
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0.model"
-TARGET_POTENTIAL = 4.50
-# Optional physical potential of the initial structure in the target's reference.
-# None uses the model's scalar origin. No training-loss mode switch is needed.
-REFERENCE_POTENTIAL = 4.50
+TARGET_PAIR_VOLTAGE = None  # Physical electrode/counter transfer voltage; not V vs SHE.
 VACUUM_POTENTIAL_KEY = "vacuum_potential"
 FERMI_LEVEL_KEY = "fermi_level"
 
@@ -56,6 +52,8 @@ def scalar(value) -> float:
 
 
 def main() -> None:
+    if TARGET_PAIR_VOLTAGE is None or not np.isfinite(TARGET_PAIR_VOLTAGE):
+        raise ValueError("Set the physical TARGET_PAIR_VOLTAGE; there is no arbitrary SHE offset")
     if not Path(ATOMS_FILE).is_file():
         raise FileNotFoundError(ATOMS_FILE)
     if not Path(MODEL_FILE).is_file():
@@ -93,6 +91,7 @@ def main() -> None:
         pbc_handling="slab",
         counter_charge_width=GAUSSIAN_WIDTH,
         scf_restart=False,
+        voltage_reference='pair',
         scf_options={
             "num_scf_steps": SCF_STEPS,
             "scf_tolerance": SCF_TOLERANCE,
@@ -109,30 +108,23 @@ def main() -> None:
     ZeroRotation(atoms)
 
     initial_energy = atoms.get_potential_energy()
-    model_reference = potential_difference(
-        atoms.calc.results, VACUUM_POTENTIAL_KEY, FERMI_LEVEL_KEY
-    )
-    control_reference = (
-        model_reference if REFERENCE_POTENTIAL is None else float(REFERENCE_POTENTIAL)
-    )
-    print(f"Initial energy: {initial_energy:.10f} eV")
-    print(f"Initial model voltage: {model_reference:.10f} V")
-    print(f"Initial control potential: {control_reference:.10f} V")
-    print(f"Target potential: {TARGET_POTENTIAL:.10f} V")
+    print(f"Initial DFT-convention energy: {initial_energy:.10f} eV")
+    print(f"Initial pair voltage: {atoms.calc.results['md_charge_potential']:.10f} V")
+    print(f"Target pair voltage: {TARGET_PAIR_VOLTAGE:.10f} V")
 
     dyn = NVTPhiLangevin(
         atoms=atoms,
         timestep=TIMESTEP_FS * units.fs,
         temperature_K=TEMPERATURE_K,
         friction=FRICTION_PER_FS / units.fs,
-        target_potential=TARGET_POTENTIAL,
+        target_potential=TARGET_PAIR_VOLTAGE,
         C0=CAPACITANCE,
         tauphi=TAUPHI_FS * units.fs,
         counter_charge_key="counter_charge",
         total_charge_key="total_charge",
         vacuum_potential_key=VACUUM_POTENTIAL_KEY,
         fermi_level_key=FERMI_LEVEL_KEY,
-        reference_potential=REFERENCE_POTENTIAL,
+        reference_potential=None,
         trajectory=TRAJECTORY,
         logfile=LOGFILE,
         loginterval=LOGINTERVAL,
@@ -144,7 +136,7 @@ def main() -> None:
         print(
             f"step={dyn.nsteps:8d} "
             f"T={atoms.get_temperature():8.2f} K "
-            f"Phi={float(dyn.current_potential):10.5f} V "
+            f"U_pair={float(dyn.current_potential):10.5f} V "
             f"q={-scalar(atoms.info['counter_charge']):10.5f} e "
             f"SCF steps={results.get('num_scf_steps', 0)} "
             f"residual={results.get('scf_residual', np.nan):.3e}"
