@@ -1,119 +1,45 @@
-"""A vacuum-side planar charge reservoir, with one electronic trajectory.
+"""Constant-potential observables for a cell with an explicit counter charge.
 
-The prescribed Gaussian sheet lies beyond all atoms; an outer vacuum plateau
-lies beyond that sheet. A sharp, uniform reference plane has zero spread self
-energy. For a separated Gaussian of width sigma, restoring that plane adds
-K*sigma*Q**2/(2*area*sqrt(pi)), K=1/epsilon_0 in eV Angstrom/e**2.
-This is an electrostatic boundary term, not a fitted voltage offset. It assumes
-negligible density overlap: check DFT density and ESP plateaus, not just atoms.
-This uniform-plane boundary is not a full image-charge metallic ESM solver.
+The electrode carries charge Q (in e) and the prescribed Gaussian source -Q,
+so the cell stays neutral. One energy E(R, Q, Q_cc) gives
+
+    F_i = -dE/dR_i,      mu = -dE/dQ|_Qcc,      e V = dE/dQ on Q_cc = -Q,
+
+and V = (<U>_cc - mu)/e is the electrode Fermi level measured from the
+potential at the counter charge: the voltage across the two electrodes in the
+thermopotentiostat Hamiltonian H = K + E - e V* Q (Deissenbeck et al.,
+PRL 126, 136803). It is exactly the charge derivative of the VASP-Python
+plug-in energy. The absolute (SHE) electrode potential is the solution-side
+work function, U_SHE = WF/e - 4.44 V, and
+
+    WF - e V = <U>_vac - <U>_cc = Delta,
+
+the potential step from the counter charge to the vacuum beyond the solution.
+Delta contains no Fermi level. In the fixed-V* ensemble <WF> = e V* + <Delta>,
+so V* = 4.44 V + U* - <Delta>/e imposes <U_SHE> = U*.
 """
-import math
-
 import torch
 
-SHE_ABSOLUTE_V = 4.44  # Conventional room-temperature absolute SHE reference.
+SHE_ABSOLUTE_V = 4.44  # Trasatti's absolute SHE potential at 298.15 K, IUPAC.
 
 
-def vacuum_boundary(data):
-    """Validate explicitly marked frames; return their mask and self coefficient.
-
-    Unmarked neutral/charged DFT configurations keep their original convention.
-    Positions and all three planes must use the same dipole-cut branch. Only
-    the positive open direction is supported, towards the solution-side vacuum.
-    """
-    from .potential import FIELD_CONSTANT
-    q = data['total_charge'].reshape(-1)
-    marked = data.get('vacuum_reservoir', torch.zeros_like(q, dtype=torch.bool)).reshape(-1).bool()
-    if not bool(marked.any()):
-        return marked, torch.zeros_like(q)
-    pbc = data['pbc'].reshape(-1, 3).bool()
-    axes = (~pbc).long().argmax(-1)
-    counter = data.get('counter_charge', torch.zeros_like(q)).reshape(-1)
-    sheet_axis = data.get('counter_charge_axis', torch.full_like(axes, -1)).reshape(-1)
-    sigma = data.get('counter_charge_width', torch.zeros_like(q)).reshape(-1)
-    required = ('counter_charge_fraction', 'vacuum_fraction', 'dipole_correction_fraction')
-    if any(name not in data for name in required):
-        raise ValueError('Vacuum reservoir requires explicit counter, vacuum and dipole-correction planes')
-    valid = ((pbc.sum(-1)==2) & (sheet_axis==axes) & (sigma>0)
-             & ((counter+q).abs()<1.e-8) & torch.isfinite(sigma))
-    field = data.get('external_field', q.new_zeros((len(q), 3))).reshape(-1, 3)
-    valid &= torch.isfinite(field).all(-1) & (field.abs().amax(-1)<1.e-12)
-    if 'counter_slab_bounds' in data or not bool(valid[marked].all()):
-        raise ValueError('Vacuum reservoir requires a Gaussian slab-parallel sheet, C=-Q and zero external field')
-    cell = data['cell'].reshape(-1, 3, 3)
-    rows = torch.arange(len(q), device=q.device)
-    normal = torch.linalg.cross(cell[rows, (axes+1)%3], cell[rows, (axes+2)%3])
-    area = torch.linalg.vector_norm(normal, dim=-1)
-    length = (cell[rows, axes]*normal/area[:, None]).sum(-1)
-    if not bool((torch.isfinite(length[marked]) & (length[marked]>0)).all()):
-        raise ValueError('Vacuum reservoir requires a finite, right-handed slab cell')
-    branch = data['dipole_correction_fraction'].reshape(-1)
-    if bool((marked & ((branch.remainder(1.)-.5).abs()>1.e-12)).any()):
-        raise ValueError('Vacuum reservoir currently requires dipole_correction_fraction=0.5, '
-                         'with the explicit slab rejoined about the cell origin, as in the VASP template')
-    sheet = (data['counter_charge_fraction'].reshape(-1)-branch).remainder(1.)*length
-    vacuum = (data['vacuum_fraction'].reshape(-1)-branch).remainder(1.)*length
-    batch = data['batch']
-    fractional = torch.einsum('ni,nij->nj', data['positions'], torch.linalg.inv(cell)[batch])
-    z = ((fractional.gather(-1, axes[batch, None]).squeeze(-1)-branch[batch]).remainder(1.)
-         *length[batch])
-    for graph in torch.nonzero(marked).flatten().tolist():
-        top = z[batch==graph].max()
-        # Six sheet sigmas control Gaussian overlap; two Angstrom additionally
-        # exclude an atomically empty but electron-rich surface tail.
-        ok = ((sheet[graph]-top >= 6*sigma[graph]+2.)
-              & (vacuum[graph]-sheet[graph] >= 6*sigma[graph])
-              & (length[graph]-vacuum[graph] >= 2*sigma[graph]))
-        if not bool(ok):
-            raise ValueError('Vacuum reservoir geometry: require atoms < sheet < outer vacuum < dipole cut; '
-                             'allow at least 6*sigma+2 Angstrom from atoms to sheet, 6*sigma to vacuum, '
-                             'and 2*sigma from vacuum to cut. Add vacuum in DFT if needed.')
-    alpha = FIELD_CONSTANT*sigma/(area*math.sqrt(math.pi))
-    return marked, torch.where(marked, alpha, torch.zeros_like(alpha))
-
-
-def _evaluate(model, data, *, steps, mixing, tolerance):
+def evaluate_cell(model, data, *, steps, mixing, tolerance):
+    """E, F, cell voltage, WF and the SHE offset from ONE electronic trajectory."""
     from .coupled import evaluate_coupled
     response = model.field_dependent_charges_map
     if (not getattr(response, 'energy_derivatives', False)
             or getattr(response, 'energy_reference', 'dft') != 'dft'):
-        raise ValueError('Charge-transfer MD requires a model TRAINED with DFT energy and derivative-based EF')
-    if getattr(response, 'deployment_mode', 'unroll_scf') != 'unroll_scf':
-        raise ValueError('Charge-transfer MD requires the finite unrolled energy model')
-    charge = data['total_charge']
-    counter = data.get('counter_charge', torch.zeros_like(charge))
-    if not torch.allclose(counter.reshape(-1), -charge.reshape(-1), atol=1.e-8, rtol=0):
-        raise ValueError('Charge-transfer MD requires counter_charge=-total_charge')
-    return evaluate_coupled(model, data, steps=steps, mixing=mixing,
-                            tolerance=tolerance, compute_force=True)
-
-
-def evaluate_pair(model, data, *, steps, mixing, tolerance):
-    """Original DFT energy and its electrode/counter transfer derivative."""
-    output = _evaluate(model, data, steps=steps, mixing=mixing, tolerance=tolerance)
-    output['md_charge_potential'] = output['charging_potential']
-    output['electrode_potential'] = output['work_function']-SHE_ABSOLUTE_V
-    return output
-
-
-def evaluate_she(model, data, *, steps, mixing, tolerance):
-    """Conservative MD at U vs SHE: H=E_res-(4.44+U)*Q, fixed cell.
-
-    E_res has the same atomic forces as E_DFT: the analytic correction depends
-    only on charge and fixed cell/width. EF is learned with this boundary's
-    energy derivative on explicitly tagged DFT data, not overwritten on a
-    legacy independent-EF export. Training still has exactly one energy label.
-    """
-    response = model.field_dependent_charges_map
-    if not getattr(response, 'vacuum_reservoir_trained', False):
-        raise ValueError('SHE control needs training/finetuning with charged vacuum_reservoir=True DFT '
-                         'frames and Fermi labels. An old model cannot be converted by changing its metadata.')
-    q = data['total_charge'].reshape(-1)
-    data = dict(data, vacuum_reservoir=torch.ones_like(q, dtype=torch.bool))
-    output = _evaluate(model, data, steps=steps, mixing=mixing, tolerance=tolerance)
-    output['dft_energy'] = output['energy']
-    output['energy'] = output['energy']+output['reservoir_energy_correction']
-    output['md_charge_potential'] = output['work_function']-SHE_ABSOLUTE_V
-    output['electrode_potential'] = output['md_charge_potential']
+        raise ValueError('Constant-potential MD requires a model trained with the DFT energy '
+                         'and derivative-based Fermi levels (energy_derivatives=True)')
+    charge = data['total_charge'].reshape(-1)
+    counter = data.get('counter_charge', torch.zeros_like(charge)).reshape(-1)
+    if not torch.allclose(counter, -charge, atol=1.e-10, rtol=0):
+        raise ValueError('Constant-potential evaluation requires counter_charge = -total_charge')
+    width = data.get('counter_charge_width', torch.zeros_like(charge)).reshape(-1)
+    if bool((width <= 0).any()):
+        raise ValueError('Constant-potential evaluation needs an explicit Gaussian counter-charge '
+                         'profile (width and sheet fraction or centre), also at Q = 0')
+    output = evaluate_coupled(model, data, steps=steps, mixing=mixing,
+                              tolerance=tolerance, compute_force=True)
+    output['electrode_potential_she'] = output['work_function']-SHE_ABSOLUTE_V
     return output

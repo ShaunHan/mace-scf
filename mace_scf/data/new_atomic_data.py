@@ -29,9 +29,9 @@ import numpy as np
 
 _ATOMIC_DATA_PARAMETERS = inspect.signature(AtomicData.__init__).parameters
 COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charge_width",
-                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac", "vacuum_reservoir")
+                       "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
 COUNTER_CHARGE_FIELDS = ("counter_charge", "counter_charge_center", "counter_charge_width",
-                         "counter_charge_axis", "counter_charge_fraction", "vacuum_reservoir")
+                         "counter_charge_axis", "counter_charge_fraction")
 
 
 def counter_charge_data(properties, pbc=None):
@@ -41,10 +41,9 @@ def counter_charge_data(properties, pbc=None):
     Exactly one x/y/zfrac selects a sheet at that fractional cell coordinate.
     Zero width is an internal marker for an absent source, never a user width.
     """
-    reservoir = properties.get("vacuum_reservoir", False)
-    reservoir = False if reservoir is None else reservoir
-    if reservoir not in (False, True, 0, 1):
-        raise ValueError("vacuum_reservoir must be a boolean")
+    if properties.get("vacuum_reservoir"):
+        raise ValueError("vacuum_reservoir is obsolete: keep the counter charge's Gaussian position "
+                         "and width; the source is always explicit")
     charge = float(properties.get("counter_charge") or 0.)
     center = properties.get("counter_charge_center")
     planes = [(i, properties[f"counter_charge_{a}frac"]) for i, a in enumerate("xyz")
@@ -75,8 +74,7 @@ def counter_charge_data(properties, pbc=None):
     return {key: torch.as_tensor(value, dtype=torch.get_default_dtype()) for key, value in {
         "counter_charge": charge, "counter_charge_center": center[None],
         "counter_charge_width": width, "counter_charge_fraction": fraction}.items()} | {
-        "counter_charge_axis": torch.tensor(axis, dtype=torch.long),
-        "vacuum_reservoir": torch.tensor(bool(reservoir))}
+        "counter_charge_axis": torch.tensor(axis, dtype=torch.long)}
 
 
 def dipole_correction_data(properties, pbc):
@@ -158,6 +156,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
         "potcar_match_key",
         "vacuum_potential_weight_key",
+        "cell_voltage_key",
         *[f"{key}_key" for key in COUNTER_CHARGE_KEYS],
     ]
     arrays = [
@@ -203,6 +202,8 @@ class ExtAtomicData(AtomicData):
     fourier_proto_potential_weight: torch.Tensor
     vacuum_potential: torch.Tensor
     vacuum_potential_weight: torch.Tensor
+    cell_voltage: torch.Tensor
+    cell_voltage_weight: torch.Tensor
     vacuum_fraction: torch.Tensor
     dipole_correction_fraction: torch.Tensor
     potcar_match: torch.Tensor
@@ -268,6 +269,8 @@ class ExtAtomicData(AtomicData):
         fourier_proto_potential_weight = kwargs.pop("fourier_proto_potential_weight", None)
         vacuum_potential = kwargs.pop("vacuum_potential", None)
         vacuum_potential_weight = kwargs.pop("vacuum_potential_weight", None)
+        cell_voltage = kwargs.pop("cell_voltage", None)
+        cell_voltage_weight = kwargs.pop("cell_voltage_weight", None)
         vacuum_fraction = kwargs.pop("vacuum_fraction", None)
         dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
         potcar_match = kwargs.pop("potcar_match", None)
@@ -332,6 +335,8 @@ class ExtAtomicData(AtomicData):
             "fourier_proto_potential_weight": fourier_proto_potential_weight,
             "vacuum_potential": vacuum_potential,
             "vacuum_potential_weight": vacuum_potential_weight,
+            "cell_voltage": cell_voltage,
+            "cell_voltage_weight": cell_voltage_weight,
             "vacuum_fraction": vacuum_fraction,
             "dipole_correction_fraction": dipole_correction_fraction,
             "potcar_match": potcar_match,
@@ -567,6 +572,12 @@ class ExtAtomicData(AtomicData):
         vacuum_potential_weight = torch.tensor(
             vacuum_potential_weight_value, dtype=torch.get_default_dtype()
         )
+        # DFT <U>_cc - E_F of a counter-charge run: the energy-conjugate cell voltage.
+        cell_voltage_value = config.properties.get("cell_voltage")
+        cell_voltage = torch.tensor(0.0 if cell_voltage_value is None else cell_voltage_value,
+                                    dtype=torch.get_default_dtype())
+        cell_voltage_weight = torch.tensor(config.property_weights.get(
+            "cell_voltage", float(cell_voltage_value is not None)), dtype=torch.get_default_dtype())
         vacuum_fraction = torch.tensor(
             plane_fraction(config.properties, "vacuum", pbc), dtype=torch.get_default_dtype())
         dipole_correction_fraction = torch.tensor(
@@ -582,6 +593,7 @@ class ExtAtomicData(AtomicData):
             ("fourier_potential", fourier_potential_weight),
             ("fourier_proto_potential", fourier_proto_potential_weight),
             ("vacuum_potential", vacuum_potential_weight),
+            ("cell_voltage", cell_voltage_weight),
         ):
             if not torch.isfinite(property_weight) or property_weight.item() < 0.0:
                 raise ValueError(
@@ -660,6 +672,8 @@ class ExtAtomicData(AtomicData):
             fourier_proto_potential_weight=fourier_proto_potential_weight,
             vacuum_potential=vacuum_potential,
             vacuum_potential_weight=vacuum_potential_weight,
+            cell_voltage=cell_voltage,
+            cell_voltage_weight=cell_voltage_weight,
             vacuum_fraction=vacuum_fraction,
             dipole_correction_fraction=dipole_correction_fraction,
             potcar_match=potcar_match,

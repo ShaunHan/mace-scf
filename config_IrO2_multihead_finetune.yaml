@@ -18,7 +18,8 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
-      vacuum_reservoir: vacuum_reservoir
+      counter_charge_center: counter_charge_center
+      cell_voltage: cell_voltage
   pt_head:
     info_keys:
       energy: dft_free_energy
@@ -87,6 +88,8 @@ log_dir: logs
 results_dir: results
 model_dir: models
 refit_fermi_readout: false
+# POTCAR of the DFT labels: required once frames place a counter charge (plug-in data).
+# neutral_atom_potcar: /path/to/POTCAR
 train_schedule:
   0:
     name: heads
@@ -107,6 +110,8 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
+      work_function: 100
+      cell_voltage: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -138,6 +143,8 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
+      work_function: 100
+      cell_voltage: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -168,6 +175,8 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
+      work_function: 100
+      cell_voltage: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -198,6 +207,8 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
+      work_function: 100
+      cell_voltage: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:
@@ -228,6 +239,8 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
+      work_function: 100
+      cell_voltage: 100
     fixed_point_training_options:
       mode: unroll_scf
       scf:

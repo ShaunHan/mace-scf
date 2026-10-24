@@ -26,7 +26,7 @@ from mace_scf.utils.training_metrics import (
 from mace.tools.scatter import scatter_sum
 from mace_scf.electrostatics.loss import (
     vacuum_observation_weight, vacuum_reference_weights, WeightedScalarLoss,
-    WeightedFermiLevel, WeightedVacuumPotential,
+    WeightedFermiLevel, WeightedVacuumPotential, WeightedCellVoltage,
 )
 from mace_scf.electrostatics.coupled import SCFNumericalError
 
@@ -877,7 +877,7 @@ def _evaluate(
         
         batch = batch.cpu()
         output = tensor_dict_to_device(output, device=torch.device("cpu"))
-        for function in (WeightedFermiLevel(), WeightedVacuumPotential()):
+        for function in (WeightedFermiLevel(), WeightedVacuumPotential(), WeightedCellVoltage()):
             if output.get(function.key) is not None and getattr(batch, function.key, None) is not None:
                 scalar_metrics[function.key] = scalar_metrics.get(function.key, 0.)+function.moments(batch, output).double()
 
@@ -1187,7 +1187,7 @@ def _evaluate(
     for key, moments in scalar_metrics.items():
         weight, first, second = moments
         if weight > 0:
-            name = 'fermi_level' if key == 'fermi_level' else 'esp_vac'
+            name = {'fermi_level': 'fermi_level', 'vacuum_potential': 'esp_vac'}.get(key, key)
             aux['rmse_'+name] = float((second/weight).sqrt())
             aux['rmse_'+name+'_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
             aux[name+'_bias'] = float(first/weight)
@@ -1262,6 +1262,8 @@ def valid_err_log(
             pieces.append('RMSE_ESPvac(abs/centered)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_wf_abs' in eval_metrics:
             pieces.append('RMSE_WF(abs/centered)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+        if 'rmse_cell_voltage' in eval_metrics:
+            pieces.append('RMSE_V='+fmt('rmse_cell_voltage')+' mV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"

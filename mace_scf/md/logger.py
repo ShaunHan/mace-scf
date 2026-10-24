@@ -8,78 +8,34 @@ from ase.utils import IOContext
 
 
 class NVTPhiMDLogger(IOContext):
-    def __init__(
-        self,
-        dyn: Any,
-        atoms: Atoms,
-        logfile: Union[IO, str],
-        counter_charge_key: str = "counter_charge",
-        vacuum_potential_key: str = "vacuum_potential",
-        fermi_level_key: str = "fermi_level",
-        header: bool = True,
-        peratom: bool = False,
-        mode: str = "a",
-        comm=world,
-    ):
-        self.dyn = weakref.proxy(dyn) if hasattr(dyn, "get_time") else None
-        self.atoms = atoms
-        self.counter_charge_key = counter_charge_key
-        self.vacuum_potential_key = vacuum_potential_key
-        self.fermi_level_key = fermi_level_key
-        self.peratom = peratom
-        self.logfile = self.openfile(file=logfile, mode=mode, comm=comm)
+    """Energies, temperature, electrode charge and the three voltages.
 
-        self.header = "%-9s " % "Time[ps]" if self.dyn is not None else ""
-        self.fmt = "%-10.4f " if self.dyn is not None else ""
-        scale = "/N" if peratom else ""
-        self.header += "%12s %12s %12s %8s %16s %16s" % (
-            f"Etot{scale}[eV]",
-            f"Epot{scale}[eV]",
-            f"Ekin{scale}[eV]",
-            "T[K]",
-            "q_electrode[e]",
-            "U_SHE[V]" if getattr(atoms.calc, "voltage_reference", None) == "SHE" else "U_pair[V]",
-        )
-        natoms = atoms.get_global_number_of_atoms()
-        if peratom or natoms <= 100:
-            digits = 4
-        elif natoms <= 1000:
-            digits = 3
-        elif natoms <= 10000:
-            digits = 2
-        else:
-            digits = 1
-        self.fmt += 3 * (f"%12.{digits}f ") + "%8.1f %16.8f %16.8f\n"
+    V is the controlled cell voltage, V* its target, WF the solution-side work
+    function (U_SHE = WF/e - 4.44 V) and Delta = WF - eV. Omega = E - e V* Q.
+    No column triggers an additional electronic evaluation.
+    """
+
+    def __init__(self, dyn: Any, atoms: Atoms, logfile: Union[IO, str], header: bool = True,
+                 mode: str = "a", comm=world):
+        self.dyn = weakref.proxy(dyn)
+        self.atoms = atoms
+        self.logfile = self.openfile(file=logfile, mode=mode, comm=comm)
+        columns = ("Time[ps]", "Epot[eV]", "Omega[eV]", "Ekin[eV]", "T[K]", "Q[e]",
+                   "V[V]", "V*[V]", "WF[eV]", "U_SHE[V]", "Delta[V]")
+        self.fmt = "%-10.4f %16.6f %16.6f %12.4f %8.1f %12.6f %10.5f %10.5f %10.5f %10.5f %10.5f\n"
         if header:
-            self.logfile.write(self.header + "\n")
+            self.logfile.write(" ".join(f"{c:>12s}" for c in columns) + "\n")
 
     def __del__(self):
         self.close()
 
     def __call__(self):
-        epot = self.atoms.get_potential_energy()
-        ekin = self.atoms.get_kinetic_energy()
-        if self.peratom:
-            natoms = self.atoms.get_global_number_of_atoms()
-            epot /= natoms
-            ekin /= natoms
-        counter = self.atoms.info.get(self.counter_charge_key, np.nan)
-        electrode_charge = -float(np.asarray(counter).reshape(-1)[0])
-        if self.dyn is not None and hasattr(self.dyn, "_read_potential"):
-            potential = self.dyn._read_potential()
-        else:
-            potential = self.atoms.calc.results["md_charge_potential"]
-
-        values = ()
-        if self.dyn is not None:
-            values += (self.dyn.get_time() / (1000.0 * units.fs),)
-        values += (
-            epot + ekin,
-            epot,
-            ekin,
-            self.atoms.get_temperature(),
-            electrode_charge,
-            float(np.asarray(potential).reshape(-1)[0]),
-        )
-        self.logfile.write(self.fmt % values)
+        results = self.atoms.calc.results
+        epot = self.atoms.get_potential_energy(apply_constraint=False)
+        voltage = float(results["cell_voltage"])
+        wf = float(results["work_function"])
+        self.logfile.write(self.fmt % (
+            self.dyn.get_time() / (1000.0 * units.fs), epot, self.dyn.grand_potential(),
+            self.atoms.get_kinetic_energy(), self.atoms.get_temperature(), self.dyn.electrode_charge,
+            voltage, self.dyn.target_cell_voltage, wf, wf - 4.44, float(results["she_offset"])))
         self.logfile.flush()

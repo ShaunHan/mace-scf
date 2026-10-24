@@ -1,4 +1,6 @@
 from pathlib import Path
+from types import SimpleNamespace
+import json
 import multiprocessing as mp
 
 import h5py
@@ -22,19 +24,13 @@ SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
 HDF_NAME = "superraw_fourier_data.hdf"
-VACUUM_RESERVOIR = False  # True ONLY for the new, separated vacuum-sheet DFT runs.
-# For those runs set PLUGIN_SETTINGS to the actual sheet geometry and VACUUM_PLANE
-# beyond it. Old plugin calculations inside the water must retain False.
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted_superraw.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train_superraw.xyz"
 OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid_superraw.xyz"
 
-# Presence only: these files are never imported or read.
+# Plug-in runs carry their controls in dft_metadata.json (scripts/dft_runs.py).
 PLUGIN_FILES = ("vasp_plugin.py", "plugin_observables.npz", "plugin_scf.csv")
-# Explicit settings for the supplied runs; position/width in Angstrom.
-PLUGIN_SETTINGS = dict(axis=2, counter_position=10.0, counter_width=1.0,
-                       correction_fraction=0.5, external_field=(0.0, 0.0, 0.0))
 
 
 def get_output_dirs():
@@ -217,12 +213,12 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     atoms.info[f"{prefix}_fftn_shifted"] = target
 
 
-def add_vacuum_target(atoms, planar, axis, correction):
+def add_vacuum_target(atoms, planar, axis, correction, fraction=None):
     key = f"vacuum_{'xyz'[axis]}frac"
     if VACUUM_PLANE and set(VACUUM_PLANE) != {key}:
         raise ValueError(f"For this VASP IDIPOL, specify only {key}")
-    if VACUUM_PLANE:
-        fraction = float(VACUUM_PLANE[key])
+    if VACUUM_PLANE or fraction is not None:
+        fraction = float(VACUUM_PLANE.get(key, fraction))
     else:
         distances = (correction - atoms.get_scaled_positions()[:, axis]) % 1.0
         fraction = (correction - 0.5 * np.min(distances[distances > 1e-8])) % 1.0
@@ -237,28 +233,32 @@ def add_vacuum_target(atoms, planar, axis, correction):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
-def check_vacuum_reservoir(atoms, data, axis, correction):
-    """Check the physical vacuum using existing one-dimensional DFT profiles."""
-    if not np.isclose(correction % 1., .5, rtol=0, atol=1.e-12):
-        raise ValueError('Vacuum reservoir currently requires dipole cut fraction 0.5')
-    length = abs(np.linalg.det(atoms.cell)) / np.linalg.norm(
-        np.cross(atoms.cell[(axis+1)%3], atoms.cell[(axis+2)%3]))
-    width = atoms.info['counter_charge_width']
-    sheet = (atoms.info[f'counter_charge_{"xyz"[axis]}frac']-correction) % 1.*length
-    vacuum = (atoms.info[f'vacuum_{"xyz"[axis]}frac']-correction) % 1.*length
-    top = ((atoms.get_scaled_positions()[:, axis]-correction) % 1.*length).max()
-    if (sheet-top < 6*width+2 or vacuum-sheet < 6*width
-            or length-vacuum < 2*width or np.any(atoms.info['external_field'])):
-        raise ValueError('Reservoir requires separated atoms, sheet, outer vacuum and dipole cut, with zero external field')
-    for key, limit in [('planar_electron_density', 1.e-5), ('planar_potential', .02)]:
-        profile = data[key]
-        z = (np.arange(len(profile))/len(profile)-correction) % 1.*length
-        mask = abs(z-vacuum) <= .5
-        if mask.sum() < 3:
-            raise ValueError('Vacuum check needs at least three grid points across one Angstrom')
-        error = np.max(abs(profile[mask])) if key.endswith('density') else np.ptp(profile[mask])
-        if error > limit:
-            raise ValueError(f'No field-free, electron-free reservoir vacuum: {key} check {error:g} > {limit:g}')
+def cell_voltage(outdir, atoms, meta, fermi):
+    """<U>_cc - E_F of a plug-in run, i.e. dE/dQ on Q_cc = -Q.
+
+    New runs store <U>_cc; older ones are reconstructed with the same plug-in
+    code from the final CHGCAR and the saved Hartree grid.
+    """
+    with np.load(outdir / "plugin_observables.npz") as obs:
+        if "counter_potential" in obs:
+            return float(obs["counter_potential"]) - fermi
+    from dft_runs import PLUGIN
+    namespace = {"C": dict(meta)}
+    exec(PLUGIN, namespace)
+    ions = read(str(outdir / "POSCAR"))
+    outcar = Outcar(str(outdir / "OUTCAR"))
+    outcar.read_pseudo_zval()
+    with h5py.File(outdir / "vaspout.h5", "r") as handle:
+        hartree = handle["results/potential/hartree"][0].transpose(2, 1, 0)
+    c = SimpleNamespace(lattice_vectors=ions.cell.array, positions=ions.get_scaled_positions(),
+                        charge_density=read_grid(outdir / "CHGCAR", ions, Chgcar), ion_types=np.arange(len(ions)),
+                        NELECT=float(meta["nelect"]), ZVAL=np.array([outcar.zval_dict[s] for s in ions.symbols]),
+                        hartree_potential=hartree, forces=np.zeros((len(ions), 3)))
+    _, normal, volume, ramp, rho_cc, _, pcc, self_energy, _, phi_ion, _, valence = namespace["geometry"](c)
+    _, slope, _, _ = namespace["correction"](c)
+    potential = (volume * np.mean(rho_cc * hartree) + valence @ phi_ion
+                 - 2 * namespace["C"]["counter_charge"] * self_energy + slope * pcc)
+    return float(potential) - fermi
 
 
 def collect_job(outdir):
@@ -283,9 +283,10 @@ def collect_job(outdir):
     converged = "EDIFF is reached" in text.rsplit("Iteration", 1)[-1]
 
     plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
-    counter = -charge if plugin and abs(charge) > 1e-8 else 0.0
+    meta = json.loads((outdir / "dft_metadata.json").read_text()) if plugin else {}
+    counter = -charge if plugin else 0.0
     slab = plugin or bool(parameters["ldipol"])
-    axis = PLUGIN_SETTINGS["axis"] if plugin else (int(parameters["idipol"]) - 1 if slab else None)
+    axis = meta["slab_axis"] if plugin else (int(parameters["idipol"]) - 1 if slab else None)
     external_field = np.zeros(3)
     dipole = np.zeros(3)
     if slab:
@@ -294,8 +295,8 @@ def collect_job(outdir):
         normal = np.linalg.inv(atoms.cell.array)[:, axis]
         normal /= np.linalg.norm(normal)
         if plugin:
-            external_field = np.asarray(PLUGIN_SETTINGS["external_field"], dtype=float)
-            correction = float(PLUGIN_SETTINGS["correction_fraction"]) % 1.0
+            external_field = np.asarray(meta["external_field"], dtype=float)
+            correction = float(meta[f"dipole_correction_{'xyz'[axis]}frac"]) % 1.0
             center = (correction + 0.5) % 1.0
         else:
             external_field = -float(parameters["efield"]) * normal
@@ -328,17 +329,15 @@ def collect_job(outdir):
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
-    if counter != 0.0 or (plugin and VACUUM_RESERVOIR):
-        length = float(atoms.cell[axis] @ normal)
-        atoms.info[f"counter_charge_{'xyz'[axis]}frac"] = (PLUGIN_SETTINGS["counter_position"] / length) % 1.0
-        atoms.info["counter_charge_width"] = float(PLUGIN_SETTINGS["counter_width"])
-    if VACUUM_RESERVOIR:
-        if not plugin or not VACUUM_PLANE or not POTENTIAL_SIGMAS or not converged:
-            raise ValueError("Vacuum reservoir needs a converged plugin run and explicit outer VACUUM_PLANE")
-        atoms.info["vacuum_reservoir"] = True
-        # The supplied plugin implements forces, but not its stress derivative.
-        atoms.info['config_stress_weight'] = 0.
-        atoms.info['config_virials_weight'] = 0.
+    if plugin:
+        # The Gaussian source of every plug-in run, also at Q = 0, as written.
+        for key in ("counter_charge_width", "counter_charge_center", *[f"counter_charge_{a}frac" for a in "xyz"]):
+            if key in meta:
+                atoms.info[key] = np.asarray(meta[key]) if key.endswith("center") else float(meta[key])
+        atoms.info["cell_voltage"] = cell_voltage(outdir, atoms, meta, fermi)
+        # The plug-in implements forces, but not its stress derivative.
+        atoms.info["config_stress_weight"] = 0.
+        atoms.info["config_virials_weight"] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
     if plugin:
         planar = data["planar_electron_density"]
@@ -354,11 +353,10 @@ def collect_job(outdir):
         add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
     if POTENTIAL_SIGMAS:
         if slab:
-            add_vacuum_target(atoms, data["planar_potential"], axis, correction)
+            add_vacuum_target(atoms, data["planar_potential"], axis, correction,
+                              meta.get(f"vacuum_{'xyz'[axis]}frac"))
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         add_fourier_targets(atoms, data["proto_fourier_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
-    if VACUUM_RESERVOIR:
-        check_vacuum_reservoir(atoms, data, axis, correction)
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 

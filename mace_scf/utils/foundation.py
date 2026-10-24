@@ -167,6 +167,62 @@ def accelerate_backbone(model, device):
                  len(model.interactions), cuda_fusion)
 
 
+def decelerate_backbone(model):
+    """Return a CuEq (ir_mul) backbone to plain e3nn (mul_ir), in place.
+
+    Inverse of accelerate_backbone with MACE's weight transformation. A model
+    exported from a CuEq run then evaluates where cuequivariance-ops is absent
+    (CPU, Windows, other GPUs). The represented function is unchanged.
+    """
+    if getattr(model, 'backbone_layout', 'mul_ir') != 'ir_mul':
+        return model
+    from mace.modules import EquivariantProductBasisBlock
+    from mace.cli.convert_cueq_e3nn import transfer_weights
+    dtype = next(model.parameters()).dtype
+    device = next(model.parameters()).device
+    source = torch.nn.Module()
+    source.interactions, source.products = model.interactions, model.products
+    target = torch.nn.Module()
+    target.interactions, target.products = torch.nn.ModuleList(), torch.nn.ModuleList()
+    reduced = bool(getattr(model, 'use_reduced_cg', False))
+    original_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(dtype)
+        with torch.random.fork_rng(devices=[]):
+            for interaction, product in zip(source.interactions, source.products):
+                names = ('node_attrs_irreps', 'node_feats_irreps', 'edge_attrs_irreps',
+                         'edge_feats_irreps', 'target_irreps', 'hidden_irreps', 'radial_MLP')
+                options = {name: getattr(interaction, name) for name in names}
+                options.update(avg_num_neighbors=float(interaction.avg_num_neighbors),
+                               edge_irreps=getattr(interaction, 'edge_irreps', None))
+                target.interactions.append(type(interaction)(**options))
+                contraction = product.symmetric_contractions
+                degree = contraction.contraction_degree
+                correlation = max(degree) if hasattr(degree, '__iter__') else int(degree)
+                target.products.append(EquivariantProductBasisBlock(
+                    node_feats_irreps=o3.Irreps(str(contraction.irreps_in)),
+                    target_irreps=o3.Irreps(str(product.linear.irreps_out)),
+                    correlation=correlation, use_sc=product.use_sc,
+                    num_elements=interaction.node_attrs_irreps.dim,
+                    use_agnostic_product=getattr(product, 'use_agnostic_product', False),
+                    use_reduced_cg=reduced))
+            target.to(device=device, dtype=dtype)
+            transfer_weights(source, target, o3.Irreps(str(source.products[0].linear.irreps_out)).lmax,
+                             correlation, len(source.products), reduced, True)
+    finally:
+        torch.set_default_dtype(original_dtype)
+    for old, new in zip(source.interactions, target.interactions):
+        new.requires_grad_(any(p.requires_grad for p in old.parameters()))
+    for old, new in zip(source.products, target.products):
+        new.requires_grad_(any(p.requires_grad for p in old.parameters()))
+    model.interactions, model.products = target.interactions, target.products
+    if hasattr(model, 'backbone_to_e3nn'):
+        del model.backbone_to_e3nn
+    model.backbone_layout = 'mul_ir'
+    model.train(model.training)
+    return model
+
+
 def calibration_loader(loader, maximum=64):
     """Deterministic, evenly spaced training panel; validation is never read."""
     n = len(loader.dataset)

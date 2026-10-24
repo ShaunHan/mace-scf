@@ -8,6 +8,11 @@ DFT coarse density is not assumed to be the Poisson source of a PAW potential.
 
 This is a linear electronic-response approximation at fixed geometry, not a
 claim of an exact density functional or a general nonlinear SCF response.
+
+A prescribed Gaussian counter charge (a slab-parallel sheet selected by a
+fractional coordinate, or a 3D Gaussian selected by a Cartesian centre) is the
+classical source of the VASP-Python CDCE plug-in. Its own energy terms are
+exact and independent of the learned Fourier cutoff (CounterCharge).
 """
 from __future__ import annotations
 
@@ -15,8 +20,10 @@ import logging
 import math
 from math import pi
 from functools import lru_cache
+from pathlib import Path
 from typing import Dict, Optional, Sequence
 
+import numpy as np
 import torch
 from e3nn import o3
 from torch import nn
@@ -132,6 +139,143 @@ def radial_basis(k2, cutoff, knots=64):
     return basis
 
 
+# Neutral-atom form factors on one uniform grid (inverse Angstrom); Gaussian
+# source tails below exp(-TAIL) are dropped from every exact source sum.
+FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM, TAIL = .01, 40., 36.
+
+
+def read_potcar(path):
+    """{symbol: (Z_val, q, n(q))}: the POTCAR atomic pseudo densities in k-space."""
+    lines = Path(path).read_text(errors='replace').splitlines()
+    datasets, symbol, zval, qmax = {}, None, None, None
+    for i, line in enumerate(lines):
+        if 'VRHFIN' in line:
+            symbol = line.split('=')[1].split(':')[0].strip()
+        elif 'ZVAL' in line and 'POMASS' in line:
+            zval = float(line.split('ZVAL')[1].split('=')[1].split()[0])
+        elif line.strip() == 'local part':
+            qmax = float(lines[i+1].split()[0])
+        elif line.strip() == 'atomic pseudo charge-density':
+            values, j = [], i+1
+            while len(values) < 1000:
+                values += [float(x) for x in lines[j].split()]
+                j += 1
+            if not np.isclose(values[0], zval, rtol=0, atol=1.e-6):
+                raise ValueError(f'POTCAR {symbol}: atomic density integrates to {values[0]}, not ZVAL')
+            datasets[symbol] = (zval, np.arange(1000)*qmax/1000, np.asarray(values[:1000]))
+    if not datasets:
+        raise ValueError(f'No PAW datasets in {path}')
+    return datasets
+
+
+def install_neutral_atom_reference(response, potcar, atomic_numbers):
+    """Store f_s(q) = (n_s(q)-Z_s)/q^2 for point-nucleus neutral atoms.
+
+    Fixed physics, no parameters: it only enters counter-charge energies, so
+    neutral predictions are unchanged. Interpolating f rather than n keeps
+    the long-wavelength limit -Z<r^2>/6 exact.
+    """
+    from ase.data import chemical_symbols
+    from scipy.interpolate import CubicSpline
+    datasets = read_potcar(potcar)
+    grid = np.arange(0., FORM_FACTOR_MAXIMUM+.5*FORM_FACTOR_SPACING, FORM_FACTOR_SPACING)
+    rows = []
+    for z in atomic_numbers:
+        zval, q, density = datasets[next(key for key in datasets
+                                         if key.split('_')[0] == chemical_symbols[int(z)])]
+        f = np.empty_like(q)
+        f[1:] = (density[1:]-zval)/q[1:]**2
+        f[0] = np.polyval(np.polyfit(q[1:7]**2, f[1:7], 2), 0.)
+        rows.append(np.where(grid <= q[-1], CubicSpline(q, f)(np.minimum(grid, q[-1])), 0.))
+    table = torch.as_tensor(np.stack(rows)).to(response.source_widths)
+    for name, value in (('neutral_atom_form_factors', table),
+                        ('neutral_atom_fitted', torch.tensor(True, device=table.device))):
+        response._buffers[name] = value
+    return response
+
+
+def source_waves(g, i, sigma, sheet):
+    """Nonzero wavevectors of a Gaussian source, one of each +/-k pair."""
+    kmax = math.sqrt(2*TAIL)/sigma
+    if sheet:
+        m = torch.arange(1, int(kmax*float(g.length[i])/(2*math.pi))+2, device=g.cell.device).to(g.cell)
+        return (2*math.pi*m/g.length[i])[:, None]*g.normal[i]
+    reciprocal = 2*math.pi*torch.linalg.inv(g.cell[i]).T
+    limits = (kmax/torch.linalg.vector_norm(reciprocal, dim=-1)).ceil().long().tolist()
+    modes = torch.cartesian_prod(*[torch.arange(-n, n+1, device=g.cell.device) for n in limits]).to(g.cell)
+    x, y, z = modes.unbind(-1)
+    modes = modes[(x > 0) | ((x == 0) & ((y > 0) | ((y == 0) & (z > 0))))]
+    waves = modes@reciprocal
+    return waves[waves.square().sum(-1) <= kmax**2]
+
+
+class CounterCharge:
+    """Prescribed source rho_cc = Q_cc g(r), a normalized Gaussian of width sigma.
+
+    energy holds every term that does not involve the learned density,
+
+        -Q_cc <U_atoms>_g + E_self + (K/2V) p^2 - (E_app.n) p,
+
+    with p = Q_cc m the source moment on the zero-mean slab sawtooth and
+    U_atoms the zero-mean periodic potential of POINT valence nuclei and
+    their atomic pseudo densities, as in the VASP-Python plug-in. These terms
+    are summed to full bandwidth. density and potential are the model-grid
+    source and its field (periodic part plus slab boundary term).
+    """
+
+    def __init__(self, g, data, positions):
+        n, zero = len(g.volume), g.volume.new_zeros(len(g.volume))
+        self.charge = data.get('counter_charge', zero).reshape(-1).to(zero)
+        width = data.get('counter_charge_width', zero).reshape(-1).to(zero)
+        axis = data.get('counter_charge_axis', torch.full_like(zero, -1).long()).reshape(-1)
+        sheet, present = axis >= 0, width > 0
+        if not bool(torch.isfinite(self.charge).all()) or bool(((self.charge != 0) & ~present).any()):
+            raise ValueError('A nonzero, finite counter charge requires a Gaussian position and width')
+        if bool((sheet & (~g.slab | (axis != g.axes))).any()):
+            raise ValueError('A counter-charge sheet must be parallel to the slab')
+        width = torch.where(present, width, 1.)
+        rows = torch.arange(n, device=zero.device)
+        fraction = data.get('counter_charge_fraction', zero).reshape(-1).to(zero)
+        center = data.get('counter_charge_center', zero[:, None].expand(-1, 3)).reshape(-1, 3).to(zero)
+        self.center = torch.where(sheet[:, None], fraction[:, None]*g.cell[rows, g.axes], center)
+        phase = -torch.einsum('gkc,gc->gk', g.wave, self.center)
+        profile = torch.exp(-.5*g.k2*width[:, None].square())*torch.where(sheet[:, None], g.planar, True)
+        self.density = ((self.charge*present/g.volume)[:, None]*profile
+                        *torch.complex(phase.cos(), phase.sin())*g.mask)
+        # First moment of the periodic Gaussian on the sawtooth about the
+        # branch centre, including any part beyond the correction plane.
+        c = ((self.center*g.normal).sum(-1)/g.length-g.branch_center+.5).remainder(1.)-.5
+        shift = (c[:, None]+torch.arange(-2., 3., device=zero.device))*g.length[:, None]
+        a = (-.5*g.length[:, None]-shift)/width[:, None]
+        b = (.5*g.length[:, None]-shift)/width[:, None]
+        unit = (.5*shift*(torch.erf(b/math.sqrt(2))-torch.erf(a/math.sqrt(2)))
+                +width[:, None]/math.sqrt(2*math.pi)*(torch.exp(-.5*a.square())-torch.exp(-.5*b.square()))).sum(-1)
+        self.moment = self.charge*unit*(g.slab & present)
+        species, energy = data['node_attrs'].argmax(-1), zero.clone()
+        table = getattr(g.response, 'neutral_atom_form_factors', None)
+        # Every placed source, also at Q_cc = 0: the linear term gives dE/dQ_cc.
+        for i in torch.nonzero(present).flatten().tolist():
+            if table is None or not bool(getattr(g.response, 'neutral_atom_fitted', False)):
+                raise ValueError('A placed counter charge needs the POTCAR neutral-atom reference: set '
+                                 'neutral_atom_potcar for training, or POTCAR in the NVT-Phi drivers')
+            sigma = float(width[i])
+            waves = source_waves(g, i, sigma, bool(sheet[i]))
+            k2 = waves.square().sum(-1)
+            # Self energy (K Q^2/2V) sum_k exp(-s^2 k^2)/k^2, summed over +/-k pairs.
+            energy[i] = FIELD_CONSTANT*self.charge[i].square()/g.volume[i]*(torch.exp(-sigma**2*k2)/k2).sum()
+            # -Q <U_atoms>_g = -(2KQ/V) sum_k exp(-s^2 k^2/2) sum_j f_j(k) cos k.(R_j-c)
+            atoms = data['batch'] == i
+            coordinate = (k2.sqrt()/FORM_FACTOR_SPACING).clamp_max(table.shape[-1]-1.001)
+            left = coordinate.long()
+            form = (table[:, left]*(left+1-coordinate)+table[:, left+1]*(coordinate-left))[species[atoms]]
+            cosine = torch.cos((positions[atoms]-self.center[i])@waves.T)
+            energy[i] = energy[i]-2*FIELD_CONSTANT*self.charge[i]/g.volume[i]*(
+                torch.exp(-.5*sigma**2*k2)*(form*cosine).sum(0)).sum()
+        field = (g.external*g.normal).sum(-1)
+        self.energy = energy+.5*g.slab_factor*self.moment.square()-field*self.moment
+        self.potential = -g.coulomb*self.density+g.ramp(-g.slab_factor*self.moment)
+
+
 class SpectralGeometry:
     """Per-forward Fourier operators, with no persistent differentiable cache."""
 
@@ -187,10 +331,15 @@ class SpectralGeometry:
             raise ValueError("A homogeneous field needs an explicit open direction")
         branch = data.get("dipole_correction_fraction", positions.new_full((len(self.counts),), .5)).reshape(-1)
         self.branch = torch.where(torch.isfinite(branch), branch, .5).remainder(1.)
+        # Centre of the continuous slab branch, as a fraction of the normal
+        # cell vector. Normal moments use the zero-mean sawtooth coordinate
+        # about it, the same origin as the plug-in and the correction ramp.
+        self.branch_center = (self.branch+.5).remainder(1.)*self.slab
+        self.origin = self.branch_center[:, None]*self.cell[rows, self.axes]*self.slab[:, None]
         zfrac = data.get("vacuum_fraction", positions.new_full((len(self.counts),), .5)).reshape(-1)
         self.zfrac = torch.where(torch.isfinite(zfrac), zfrac, .5).remainder(1.)
-        self.axial = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
-        self.axial = self.axial & active & self.slab[:, None]
+        self.planar = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
+        self.axial = self.planar & active & self.slab[:, None]
         self.order = self.modes[None].expand(len(self.counts), -1, -1).gather(-1, self.axes[:, None, None].expand(-1, len(self.modes), 1)).squeeze(-1)
         self.attrs = self.pack(data["node_attrs"])
         self.cutoff = model.kspace_cutoff
@@ -216,75 +365,15 @@ class SpectralGeometry:
         parallel = self.external-(self.external*self.normal).sum(-1)[:, None]*self.normal
         if bool((parallel.abs().max(-1).values > 1.e-10).any()):
             raise ValueError("A homogeneous field parallel to a periodic slab direction needs a separate boundary convention")
-        self.counter_density = torch.zeros_like(self.proto)
-        # An absent counter-charge has no energy/force graph through proto.
-        self.counter = torch.zeros_like(self.proto)
-        self.counter_energy = torch.zeros_like(self.volume)
-        self.counter_moment = torch.zeros_like(self.volume)
-        counter_width = data.get("counter_charge_width")
-        has_counter = ("counter_slab_bounds" in data or
-                       (counter_width is not None and bool((counter_width > 0).any())))
-        if "counter_charge" in data and not has_counter and bool((data["counter_charge"] != 0).any()):
-            raise ValueError("A nonzero counter charge requires a specified spatial profile")
-        if "counter_charge" in data and has_counter:
-            counter = data["counter_charge"].reshape(-1)
-            if not bool(torch.isfinite(counter).all()):
-                raise ValueError("Counter charges must be finite")
-            if "counter_slab_bounds" in data:
-                bounds = data["counter_slab_bounds"].reshape(-1, 2)
-                width = bounds[:, 1]-bounds[:, 0]
-                if bool((width<=0).any()):
-                    raise ValueError("Counter-charge slab bounds must have positive width")
-                kz = (self.wave*self.normal[:, None]).sum(-1)
-                midpoint = bounds.mean(-1)
-                profile = torch.sinc(kz*width[:, None]/(2*math.pi))
-                phase_counter = -kz*midpoint[:, None]
-                planar = (self.modes[None]*self.pbc[:, None]).abs().sum(-1) == 0
-                profile = profile*planar
-            else:
-                center = data["counter_charge_center"].reshape(-1, 3)
-                width = data["counter_charge_width"].reshape(-1)
-                if not bool(torch.isfinite(width).all()) or bool(((width<=0) & (counter!=0)).any()) or bool((width<0).any()):
-                    raise ValueError("Counter-charge Gaussian widths must be positive")
-                width = torch.where(width > 0, width, 1.)
-                phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
-                profile = torch.exp(-.5*self.k2*width[:, None].square())
-                axis = data.get("counter_charge_axis", torch.full_like(counter, -1, dtype=torch.long)).reshape(-1)
-                sheet = axis >= 0
-                if bool(((axis < -1) | (axis > 2)).any()):
-                    raise ValueError("Invalid counter-charge sheet axis")
-                if bool((sheet & self.slab & (axis != self.axes)).any()):
-                    raise ValueError("The counter-charge sheet must be parallel to the slab")
-                fraction = data.get("counter_charge_fraction", torch.zeros_like(counter)).reshape(-1)
-                order = self.modes[None].expand(len(counter), -1, -1).gather(
-                    -1, axis.clamp_min(0)[:, None, None].expand(-1, len(self.modes), 1)).squeeze(-1)
-                planar = (self.modes.square().sum(-1)[None] == order.square())
-                profile = profile*torch.where(sheet[:, None], planar, True)
-                phase_counter = torch.where(sheet[:, None], -2*math.pi*order*fraction[:, None], phase_counter)
-            self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
-            counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
-            self.counter_moment = counter_moment
-            self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
-            self.counter_energy = (.5*self.volume*(self.coulomb*self.counter_density.abs().square()).sum(-1)
-                +.5*self.slab_factor*counter_moment.square()
-                -self.volume*(self.counter_density.conj()*(self.proto+self.applied)).real.sum(-1))
-            reservoir = data.get('vacuum_reservoir', torch.zeros_like(counter, dtype=torch.bool)).reshape(-1).bool()
-            if bool(reservoir.any()):
-                # A separated vacuum sheet has known full-bandwidth self energy
-                # and first moment. Do not smear it again with the learned
-                # carrier width, or truncate its self energy to the ML cutoff.
-                sigma = data['counter_charge_width'].reshape(-1)
-                z = ((fraction-self.branch).remainder(1.)-.5)*self.length
-                exact_moment = counter*z
-                area = self.volume/self.length
-                self_energy = FIELD_CONSTANT*counter.square()/(2*area)*(
-                    self.length/12-sigma/math.sqrt(math.pi)+sigma.square()/self.length)
-                proto_vacuum = (-(self.attrs.sum(1)@self.response.proto_coefficients[:, 0])/self.volume
-                                if bool(self.response.proto_fitted) else torch.zeros_like(counter))
-                exact_energy = self_energy+.5*self.slab_factor*exact_moment.square()-counter*proto_vacuum
-                self.counter_moment = torch.where(reservoir, exact_moment, self.counter_moment)
-                self.counter_energy = torch.where(reservoir, exact_energy, self.counter_energy)
-                self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*self.counter_moment)
+        if "counter_slab_bounds" in data:
+            raise NotImplementedError("Uniform jellium counter slabs are not a spectral MACE-VOLT source; "
+                                      "use a Gaussian sheet (counter_charge_zfrac) or counter_charge_center")
+        # Prescribed Gaussian source (sheet or 3D); all its own terms are exact.
+        self.counter_source = CounterCharge(self, data, positions)
+        self.counter_density = self.counter_source.density
+        self.counter = self.counter_source.potential
+        self.counter_energy = self.counter_source.energy
+        self.counter_moment = self.counter_source.moment
 
         self.molecular = None
         if bool(molecular_enabled(data, self.volume).any()):

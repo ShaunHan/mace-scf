@@ -385,13 +385,21 @@ class WeightedScalarLoss(torch.nn.Module):
     key = ''
 
     def weights(self, ref):
-        return (vacuum_observation_weight(ref) if self.key == 'vacuum_potential'
-                else ref.weight*ref.fermi_level_weight).reshape(-1)
+        if self.key == 'vacuum_potential':
+            return vacuum_observation_weight(ref).reshape(-1)
+        if self.key == 'work_function':
+            return (vacuum_observation_weight(ref)*ref.fermi_level_weight).reshape(-1)
+        return (ref.weight*getattr(ref, self.key+'_weight')).reshape(-1)
+
+    def label(self, ref):
+        if self.key == 'work_function':
+            return ref.vacuum_potential-ref.fermi_level
+        return getattr(ref, self.key)
 
     def errors(self, ref, pred):
         value = pred[self.key].reshape(-1)
         weight = self.weights(ref).to(value)
-        error = value-getattr(ref, self.key).reshape(-1).to(value)
+        error = value-self.label(ref).reshape(-1).to(value)
         if bool(((weight > 0) & ~torch.isfinite(error)).any()):
             raise FloatingPointError('Nonfinite observed '+self.key+' error')
         if not bool(torch.isfinite(weight).all()) or bool((weight < 0).any()):
@@ -422,10 +430,22 @@ class WeightedVacuumPotential(WeightedScalarLoss):
     key = 'vacuum_potential'
 
 
+class WeightedWorkFunction(WeightedScalarLoss):
+    """Gauge-invariant vacuum minus Fermi level; EF/vacuum fix the gauge."""
+    key = 'work_function'
+
+
+class WeightedCellVoltage(WeightedScalarLoss):
+    """<U>_cc - E_F of counter-charge DFT data, the potentiostat's variable."""
+    key = 'cell_voltage'
+
+
 _LOSS_FUNCTIONS = {
     "fourier_density": WeightedFourierDensity,
     "fourier_potential": WeightedFourierPotential,
     "vacuum_potential": WeightedVacuumPotential,
+    "work_function": WeightedWorkFunction,
+    "cell_voltage": WeightedCellVoltage,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
     "stress": weighted_mean_squared_stress,
@@ -501,7 +521,7 @@ class WeightedLoss(torch.nn.Module):
         """
         definition = deepcopy(definition)
         for name, options in definition.items():
-            if name in ('fermi_level', 'vacuum_potential') and (
+            if name in ('fermi_level', 'vacuum_potential', 'work_function', 'cell_voltage') and (
                     not isinstance(options, dict) or not (
                         options.get('objective') == 'absolute_mse'
                         or options.get('relative') is False)):
@@ -510,7 +530,7 @@ class WeightedLoss(torch.nn.Module):
                 if options.get('relative', False) or 'mean_weight' in options:
                     return None
                 options.pop('relative', None)
-                if name in ('fermi_level', 'vacuum_potential'):
+                if name in ('fermi_level', 'vacuum_potential', 'work_function', 'cell_voltage'):
                     options.pop('objective', None)
         return cls(definition)
         

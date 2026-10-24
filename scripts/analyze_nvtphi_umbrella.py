@@ -80,11 +80,8 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
     if not rows:
         raise ValueError('No production samples yet')
     kbt = KB_EV_K*cfg['settings']['TEMPERATURE_K']
-    pair_control = 'TARGET_PAIR_VOLTAGE' in cfg['settings']
-    target = cfg['settings']['TARGET_PAIR_VOLTAGE' if pair_control else 'TARGET_U_SHE']
-    voltage_key = 'pair_voltage_V' if pair_control else 'voltage_V_SHE'
-    report = dict(voltage_reference='pair' if pair_control else (
-                      'SHE vacuum reservoir' if cfg['initial']['info'].get('vacuum_reservoir') else 'legacy SHE'),
+    target = cfg['settings']['TARGET_U_SHE']
+    report = dict(voltage_reference='SHE: U = WF/e - 4.44 V; thermopotentiostat on V = dE/dQ at frozen V*',
                   source_index=cfg['initial']['info']['source_index'],
                   oxygen_pair=cfg['initial']['info']['oxygen_pair'],
                   meaning='Conditional O-O distance profile for this fixed composition/pair and the implemented controller.',
@@ -118,7 +115,8 @@ def analyze(folder, bin_width=BIN_WIDTH, bootstraps=BOOTSTRAPS):
                               distance_shift_from_center_A=float(distance.mean()-center[0]),
                               production_ps=float(values('phase_step').max()*cfg['settings']['TIMESTEP_FS']/1000),
                               effective_samples=float(len(rr)/g), correlation_stride=float(g),
-                              mean_control_voltage_V=float(values(voltage_key).mean()),
+                              mean_control_voltage_V=float(values('U_SHE_V').mean()),
+                              mean_cell_voltage_error_V=float((values('cell_voltage_V')-values('target_cell_voltage_V')).mean()),
                               mean_temperature_K=float(values('temperature_K').mean()),
                               distance_half_drift_A=float(distance[half:].mean()-distance[:half].mean()),
                               charge_half_drift_e=float(values('total_charge_e')[half:].mean()-values('total_charge_e')[:half].mean()),

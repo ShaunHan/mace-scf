@@ -242,6 +242,10 @@ def build_model(
         model = model.to(args.device)
         if getattr(response, 'coupled', False):
             from mace_scf.utils.foundation import condition_readouts
+            if getattr(args, 'neutral_atom_potcar', None):
+                # Fixed physics needed by any frame that places a counter charge.
+                from mace_scf.electrostatics.potential import install_neutral_atom_reference
+                install_neutral_atom_reference(response, args.neutral_atom_potcar, model.atomic_numbers.tolist())
             if getattr(args, 'restart_latest', False):
                 # Initialization needs the frozen observer, but must not refit
                 # an already saved map before the main checkpoint load.

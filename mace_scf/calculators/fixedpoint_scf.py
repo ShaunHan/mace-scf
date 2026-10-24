@@ -22,6 +22,17 @@ from mace_scf.electrostatics.compiled_fixed_point import (
 )
 
 
+def _cueq_kernels(device) -> bool:
+    """True when fused CuEq CUDA kernels can run on this device."""
+    if torch.device(device).type != "cuda":
+        return False
+    try:
+        import cuequivariance_ops_torch  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 CALCULATOR_SCF_DEFAULTS = {
     "num_scf_steps": 100,
     "scf_tolerance": 1e-6,
@@ -167,9 +178,10 @@ class MACEFixedPointSCF(Calculator):
         jellium_slab_bounds: Optional[tuple[float, float]] = None,
         adjust_kspace_cutoff: float = 1.0,
         counter_charge_width: float = 1.0,
-        voltage_reference: Optional[str] = None,
+        constant_potential: bool = False,
         **kwargs,
     ):
+        kwargs.pop("enable_cueq", None)  # backbone acceleration is a training-time choice
         Calculator.__init__(self, **kwargs)
         if verbose:
             mace.tools.setup_logger(level="DEBUG")
@@ -186,17 +198,19 @@ class MACEFixedPointSCF(Calculator):
         self.model = torch.load(
             f=model_path, map_location=self.device, weights_only=False
         ).to(self.device)
+        if getattr(self.model, "backbone_layout", "mul_ir") == "ir_mul" and not _cueq_kernels(self.device):
+            # The fused CuEq kernels need Linux CUDA ops; the e3nn form is identical.
+            from mace_scf.utils.foundation import decelerate_backbone
+            decelerate_backbone(self.model)
         self.model.kspace_cutoff *= adjust_kspace_cutoff
         response = getattr(self.model, "field_dependent_charges_map", None)
-        if voltage_reference not in (None, 'pair', 'SHE'):
-            raise ValueError("voltage_reference must be None, 'pair' or 'SHE'")
-        if voltage_reference in ('pair', 'SHE') and (not getattr(response, 'energy_derivatives', False)
+        if constant_potential and (not getattr(response, 'energy_derivatives', False)
                 or getattr(response, 'energy_reference', 'dft') != 'dft'
-                or pbc_handling != 'slab' or not self.scf_options.constant_charge
+                or not self.scf_options.constant_charge
                 or energy_units_to_eV != 1. or length_units_to_A != 1.):
-            raise ValueError('Charge-transfer MD requires a model trained with DFT energy and derivative-based EF, '
-                             'slab boundaries, fixed-charge SCF and eV/Angstrom units')
-        self.voltage_reference = voltage_reference
+            raise ValueError('Constant-potential MD requires a model trained with DFT energy and derivative-based EF, '
+                             'fixed-charge SCF and eV/Angstrom units')
+        self.constant_potential = bool(constant_potential)
         if getattr(response, "spectral", False):
             from dataclasses import replace
             if scf_options is None or "num_scf_steps" not in scf_options:
@@ -355,8 +369,10 @@ class MACEFixedPointSCF(Calculator):
         )
         profile = any(config.properties.get(key) is not None for key in
                       ("counter_charge_center", *[f"counter_charge_{a}frac" for a in "xyz"]))
-        if self.voltage_reference in ('pair', 'SHE') and (not profile or self.compensating_jellium):
-            raise ValueError('Charge-transfer MD requires an explicit counter-charge profile, including at Q=0')
+        if self.constant_potential and (not profile or self.compensating_jellium):
+            raise ValueError('Constant-potential MD requires an explicit Gaussian counter charge '
+                             '(counter_charge_zfrac for a sheet or counter_charge_center for a 3D '
+                             'Gaussian), including at Q=0')
         if (profile or config.properties.get("dipole_correction_center") is not None) and not getattr(
                 self.model.field_dependent_charges_map, "spectral", False):
             raise NotImplementedError("Prescribed Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
@@ -440,10 +456,9 @@ class MACEFixedPointSCF(Calculator):
 
     def _run_model(self, batch, restart_state):
         batch_dict = batch.to_dict()
-        if self.voltage_reference in ('pair', 'SHE'):
-            from mace_scf.electrostatics.reservoir import evaluate_pair, evaluate_she
-            evaluate = evaluate_she if self.voltage_reference == 'SHE' else evaluate_pair
-            return evaluate(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
+        if self.constant_potential:
+            from mace_scf.electrostatics.reservoir import evaluate_cell
+            return evaluate_cell(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
                 mixing=self.scf_options.mixing_parameter, tolerance=self.scf_options.scf_tolerance)
         if getattr(self.model.field_dependent_charges_map, "spectral", False):
             if self.compensating_jellium:
@@ -598,9 +613,8 @@ class MACEFixedPointSCF(Calculator):
             "electrostatic_features": electrostatic_features,
         }
         for key in ("vacuum_potential", "potential_reference", "charge_potential",
-                    "counter_charge_potential", "charging_potential", "electrode_potential",
-                    "work_function", "counter_reference_offset", "md_charge_potential",
-                    "dft_energy", "reservoir_energy_correction", "reservoir_voltage_correction"):
+                    "counter_charge_potential", "cell_voltage",
+                    "work_function", "she_offset", "electrode_potential_she"):
             if output.get(key) is not None:
                 results[key] = float(output[key].detach().reshape(-1)[0]) * self.energy_units_to_eV
         if self.save_full_scf_history:

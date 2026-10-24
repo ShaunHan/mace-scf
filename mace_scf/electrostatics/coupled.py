@@ -1204,6 +1204,12 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
+        # POTCAR neutral-atom form factors (n_s(q)-Z_s)/q^2 for counter-charge
+        # energies; fixed physics installed by install_neutral_atom_reference.
+        from .potential import FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM
+        nq = int(round(FORM_FACTOR_MAXIMUM/FORM_FACTOR_SPACING))+1
+        self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, nq))
+        self.register_buffer('neutral_atom_fitted', torch.tensor(False))
         # Scalar references also contribute charge-linear work to the energy.
         self.register_buffer('scalar_reference', torch.zeros(2))
         self.register_buffer('spectral_cutoff', torch.tensor(1.))
@@ -1221,13 +1227,17 @@ class CoupledResponse(AtomicPotentialResponse):
         # One DFT energy supplies forces and EF by differentiation. The raw
         # vacuum ESP then supplies WF; counter transfer has its own derivative.
         self.energy_reference = 'dft'
-        self.vacuum_reservoir_trained = False
+        # The scalar vacuum observer sees the multipole field and the exact
+        # boundary/source terms only; the zero-moment short-range completion
+        # is absent from mu, so letting it shift the vacuum would decouple WF
+        # from the energy. Older exports keep their 'complete' observer.
+        self.vacuum_observer = 'multipole'
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
                 'energy_derivatives': getattr(self, 'energy_derivatives', False),
                 'energy_reference': getattr(self, 'energy_reference', 'dft'),
-                'vacuum_reservoir_trained': getattr(self, 'vacuum_reservoir_trained', False),
+                'vacuum_observer': getattr(self, 'vacuum_observer', 'complete'),
                 'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
                 'response_reference': getattr(self, 'response_reference', 'total'),
                 'charge_response': getattr(self, 'charge_response', 'geometry'),
@@ -1276,7 +1286,8 @@ class CoupledResponse(AtomicPotentialResponse):
                 layer.in_features = self.field_channels
                 layer.weight = nn.Parameter(layer.weight.new_empty(layer.out_features, self.field_channels),
                                              requires_grad=layer.weight.requires_grad)
-        for name in ('vacuum_reference_integrals', 'scalar_reference'):
+        for name in ('vacuum_reference_integrals', 'scalar_reference', 'neutral_atom_form_factors',
+                     'neutral_atom_fitted'):
             key = prefix+name
             if key not in state_dict:
                 state_dict[key] = torch.zeros_like(getattr(self, name))
@@ -1286,7 +1297,7 @@ class CoupledResponse(AtomicPotentialResponse):
     def set_extra_state(self, state):
         self.energy_derivatives = bool(state.get('energy_derivatives', False))
         self.energy_reference = state.get('energy_reference', 'dft')
-        self.vacuum_reservoir_trained = bool(state.get('vacuum_reservoir_trained', False))
+        self.vacuum_observer = state.get('vacuum_observer', 'complete')
         if self.energy_reference not in ('dft', 'vacuum'):
             raise ValueError('Unknown saved energy reference')
         mode = state.get('deployment_mode', 'unroll_scf')
@@ -1343,7 +1354,8 @@ class CoupledGeometry(SpectralGeometry):
             self.vacuum_reference = (self.attrs.sum(1)@r.vacuum_reference_integrals)/self.volume*self.slab
             proto = torch.zeros_like(proto)
         ramp = self.ramp(-self.slab_factor)
-        zn = (self.pack(positions)*self.normal[:, None]).sum(-1)*self.present
+        # Zero-mean sawtooth coordinate: the same origin as the correction ramp.
+        zn = ((self.pack(positions)-self.origin[:, None])*self.normal[:, None]).sum(-1)*self.present
         self.tensors = (co, si, self.wave, basis.real*active[..., None], basis.imag*active[..., None],
                         radial*active[..., None], receiver*active[..., None], torch.view_as_real(proto),
                         torch.view_as_real(ramp), torch.view_as_real(self.applied+self.counter),
@@ -1580,12 +1592,18 @@ def reference_predictions(model, data, g, fixed, state, response, spectral, outp
     return result
 
 
-def counter_source_energy(g, coarse, normal_dipole):
-    """Periodic interaction plus the full slab dipole cross term and source work."""
-    periodic = g.volume*(coarse.conj()*g.coulomb*g.counter_density).real.sum(-1)
-    # Use the same physical moment as the electrode boundary self-energy.
-    # Sampling a truncated sawtooth through a smeared density changes this term.
-    return periodic+g.slab_factor*normal_dipole*g.counter_moment+g.counter_energy
+def counter_source_energy(g, coarse, regular, normal_dipole):
+    """Coulomb energy of the prescribed Gaussian source with the whole system.
+
+    -Q_cc <U>_g over the learned deformation field (coarse multipoles plus
+    its short-range completion, on the model grid), the slab-dipole cross
+    term, and the exact source terms of CounterCharge: self energy, its own
+    boundary term, the applied-field work and the point-nucleus neutral-atom
+    reference. d/dQ_cc of this energy is minus the potential at the source.
+    """
+    rho = g.counter_density
+    deformation = g.volume*(rho.conj()*(g.coulomb*coarse-regular)).real.sum(-1)
+    return deformation+g.slab_factor*normal_dipole*g.counter_moment+g.counter_energy
 
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
@@ -1620,10 +1638,6 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if not constant_charge:
             raise NotImplementedError('CoupledResponse uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
         data = dict(data)
-        from .reservoir import vacuum_boundary
-        reservoir_mask, reservoir_alpha = vacuum_boundary(data)
-        if bool(reservoir_mask.any()) and not energy_derivatives:
-            raise ValueError("Vacuum-reservoir data require the derivative-energy model")
         if energy_derivatives:
             # Sibling graph nodes give partial derivatives at fixed other
             # charge, even when the caller supplied counter_charge=-Q.
@@ -1676,7 +1690,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         charge = state[..., 0].sum(-1)
         zero = g.k2 == 0
         coarse = coarse+torch.stack((zero*(charge/g.volume)[:,None], torch.zeros_like(g.k2)), -1)
-        dipole = (moments[..., :1]*g.pack(local.positions)+moments[..., 1:4]).sum(1)
+        dipole = (moments[..., :1]*(g.pack(local.positions)-g.origin[:, None])+moments[..., 1:4]).sum(1)
         normal_dipole = (dipole*g.normal).sum(-1)
         periodic_energy = .5*g.volume*(coarse.square().sum(-1)*g.coulomb).sum(-1)
         boundary_energy = .5*g.slab_factor*normal_dipole.square()
@@ -1685,7 +1699,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             boundary_energy = boundary_energy+g.molecular.energy(
                 molecular_moments+g.molecular.counter)
             dipole = torch.where(g.molecular.active[:, None], molecular_moments[:, 1:4], dipole)
-        counter_energy = counter_source_energy(g, torch.view_as_complex(coarse.contiguous()), normal_dipole)
+        counter_energy = counter_source_energy(g, torch.view_as_complex(coarse.contiguous()),
+                                               torch.view_as_complex(regular.contiguous()), normal_dipole)
         electronic = periodic_energy+boundary_energy-(dipole*g.external).sum(-1)+counter_energy
         electronic = electronic-model.fermi_level_offset*charge
         if not getattr(model.coulomb_energy, 'include_self_interaction', True):
@@ -1701,16 +1716,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             common = (response[2]*response[5]).sum(-1)
             local_electronic = local_electronic+.5*target.square()/response[3]-target*common
             reference = r.scalar_reference
-            # Keep the DFT gauge and prescribed-source work in the ONE energy.
-            # The same scalar generates forces and both independent charge
-            # derivatives. No observer-only EF correction is added afterwards.
-            # The charge-source energy must not depend on where a user observes
-            # the vacuum. Use the atomic form-factor k=0 limit, not that plane.
-            proto_reference = (-(g.attrs.sum(1)@r.proto_coefficients[:, 0])/g.volume*g.slab
-                               if g.neutral_reference and bool(r.proto_fitted) else 0.)
-            counter_reference = g.vacuum_reference-proto_reference
-            electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
-                          -reference[0]*target-reference[1]*counter)
+            # Electrons are exchanged at the DFT Fermi-level gauge (the fitted
+            # vacuum reference and scalar EF offset). The counter charge needs
+            # no gauge term: its energy uses the zero-mean potential of point
+            # nuclei and electrons, as the plug-in does. Hence dE/dQ on the
+            # neutral path is <U>_cc - mu, the DFT plug-in identity.
+            electronic = electronic-g.vacuum_reference*target-reference[0]*target
         energy = local.energies.sum(-1)+electronic+local_electronic
         forces = stress = None
         charge_potential = counter_potential = None
@@ -1755,9 +1766,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             'electrostatic_features':g.unpack(potential),
             'chemical_level':g.unpack(response[5]), 'node_field':g.unpack(field)}
         if energy_derivatives:
+            # cell_voltage = dE/dQ on the neutral transfer path Q_cc = -Q:
+            # the electrode Fermi level measured from the potential at the
+            # counter charge. It is the conjugate of Q in NVT-Phi dynamics.
             output.update(charge_potential=charge_potential,
                           counter_charge_potential=counter_potential,
-                          charging_potential=charge_potential-counter_potential)
+                          cell_voltage=charge_potential-counter_potential)
         attach_observations(data, g, output)
         if 'fourier_density_dft' in output:
             output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
@@ -1775,29 +1789,22 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             output = observe_smoothed_fields(g, state, output)
         if decoder is not None:
             output = decoder(g, state, output)
+        if getattr(r, 'vacuum_observer', 'complete') == 'multipole':
+            for key in ('', 'smooth_'):
+                if key+'vacuum_potential' in output and key+'fourier_local_potential' in output:
+                    local = torch.view_as_complex(output[key+'fourier_local_potential'].contiguous())/g.ngrid
+                    output[key+'vacuum_potential'] = output[key+'vacuum_potential']-g.plane(local)
         output = apply_scalar_reference(output, r)
-        if bool(reservoir_mask.any()):
-            # Raw DFT energy remains the ONLY energy label. For this boundary,
-            # E_res = E_DFT + alpha*Q**2/2 is the sharp-plane reservoir energy.
-            # Its neutral-path derivative is WF; EF retains the DFT ESP gauge.
-            q = charge_input.reshape(-1)
-            wf = output['charging_potential']+reservoir_alpha*q
-            output['fermi_level'] = torch.where(reservoir_mask,
-                output['vacuum_potential']-wf, output['fermi_level'])
-            output['reservoir_energy_correction'] = .5*reservoir_alpha*q.square()
-            output['reservoir_voltage_correction'] = reservoir_alpha*q
-            observed = data.get('fermi_level_weight', torch.zeros_like(q)).reshape(-1)>0
-            if training and bool((reservoir_mask & observed & (q.abs()>1.e-3)).any()):
-                r.vacuum_reservoir_trained = True
-        # WF uses the final raw ESP observer, with EF still the DFT-energy
-        # derivative at fixed C, except for explicitly marked vacuum-reservoir data.
+        # WF uses the final raw ESP observer and EF = -dE/dQ at fixed Q_cc.
         output['work_function'] = output['vacuum_potential']-output['fermi_level']
         if energy_derivatives:
-            output['counter_reference_offset'] = output['work_function']-output['charging_potential']
+            # WF - e*V = potential step from the counter charge to the outer
+            # vacuum. It contains no Fermi level; it aligns V with the SHE scale.
+            output['she_offset'] = output['work_function']-output['cell_voltage']
         # A finite iterate does not imply finite derivatives of its trajectory.
         # Reject invalid observables before loss/Adam, metrics or MD consume them.
         checked = {key: output[key] for key in ('energy', 'forces', 'stress',
-                                               'fermi_level', 'vacuum_potential', 'charging_potential')
+                                               'fermi_level', 'vacuum_potential', 'cell_voltage')
                    if output.get(key) is not None}
         with torch.no_grad():
             finite = torch.stack([torch.isfinite(value).all() for value in checked.values()])

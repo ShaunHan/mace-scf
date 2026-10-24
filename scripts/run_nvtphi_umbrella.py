@@ -19,20 +19,23 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
-MODEL_FILE = 'models/fit_0_best_wf.model'     # Export from the new shared-energy training.
+MODEL_FILE = 'models/fit_0_best_wf.model'
+POTCAR = None                               # POTCAR of the DFT labels, if the model lacks its form factors.
 RUN_INDEXES = list(range(0, 10))
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
 MAX_WORKERS, REPLICAS = 10, 1                 # Workers share one visible GPU.
 DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
 SCF_STEPS = 50                              # None uses the exported model's deployment budget.
 OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
-TARGET_U_SHE = 1.60                        # Conventional absolute SHE = 4.44 V; no fitted offset.
+TARGET_U_SHE = 1.60                         # V vs SHE: <WF> = 4.44 eV + e U on the solution side.
+SHE_OFFSET = None                           # <Delta> = <WF - eV> in V; None aligns it in the initial stage.
 # Input-frame values take precedence; these defaults apply only if absent.
-COUNTER_CHARGE_ZFRAC = 0.20                 # Inside water for the supplied ~50 A cell.
-VACUUM_ZFRAC = 0.40                        # In the solution-side vacuum.
+COUNTER_CHARGE_ZFRAC = 0.20                 # Gaussian sheet inside the water (~50 A cell), or
+COUNTER_CHARGE_CENTER = None                # a 3D Gaussian centre (x, y, z) in Angstrom.
+VACUUM_ZFRAC = 0.40                         # Solution-side vacuum, beyond the water.
 DIPOLE_CORRECTION_ZFRAC = 0.50
-GAUSSIAN_WIDTH = 0.5                       # Angstrom; use the width in the DFT data.
-CAPACITANCE, TAUPHI_FS = 0.01, 100.0         # e/V for the whole cell; fs. Not an areal capacitance.
+GAUSSIAN_WIDTH = 1.0                        # Angstrom; the width of the DFT plug-in data.
+CAPACITANCE, TAUPHI_FS = 0.05, 100.0        # C0 (e/V, whole cell) only sets the charge relaxation; fs.
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
 PAIR_CUTOFF, OO_MIN = 3.0, 1.20
 WINDOW_SPACING = 0.15        # Å
@@ -77,8 +80,8 @@ def write_json(path, value):
 
 
 def settings():
-    names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_U_SHE '
-             'COUNTER_CHARGE_ZFRAC VACUUM_ZFRAC DIPOLE_CORRECTION_ZFRAC GAUSSIAN_WIDTH '
+    names = ('DEVICE HEAD ENABLE_CUEQ SCF_STEPS TARGET_U_SHE SHE_OFFSET COUNTER_CHARGE_ZFRAC '
+             'COUNTER_CHARGE_CENTER VACUUM_ZFRAC DIPOLE_CORRECTION_ZFRAC GAUSSIAN_WIDTH '
              'CAPACITANCE TAUPHI_FS Z_FIXED '
              'Z_REPULSIVE WALL_K PAIR_CUTOFF OO_MIN WINDOW_SPACING UMBRELLA_K '
              'REACTANT_MARGIN REQUIRE_ADSORBATE REVERSE_SWEEP TEMPERATURE_K '
@@ -143,26 +146,30 @@ def prepare_frame(source, index):
         fixed.update(map(int, constraint.get_indices()))
     pair, environments, candidates = select_pair(atoms, index, fixed)
     charge = scalar(info.get('total_charge', 0.))
-    planes = dict(counter_charge_zfrac=COUNTER_CHARGE_ZFRAC,
-                  vacuum_zfrac=VACUUM_ZFRAC, dipole_correction_zfrac=DIPOLE_CORRECTION_ZFRAC)
-    planes = {key: scalar(info.get(key, value)) for key, value in planes.items()}
-    width = scalar(info.get('counter_charge_width', GAUSSIAN_WIDTH))
-    if width == 0. and charge == 0.:
-        width = GAUSSIAN_WIDTH  # No source was present in this neutral frame.
-    if width <= 0. or (charge != 0. and 'counter_charge_center' in info
-                      and 'counter_charge_zfrac' not in info):
-        raise ValueError('Specify a Gaussian sheet with positive width and counter_charge_zfrac')
-    if any(not 0. <= scalar(value) < 1. for value in planes.values()):
-        raise ValueError('Plane zfrac values must be finite and in [0, 1)')
-    if charge != 0.:
-        if not np.isclose(scalar(info.get('counter_charge', np.nan)), -charge):
-            raise ValueError('A charged starting reference must already have counter_charge = -total_charge')
+    planes = {key: scalar(info.get(key, value)) for key, value in
+              (('vacuum_zfrac', VACUUM_ZFRAC), ('dipole_correction_zfrac', DIPOLE_CORRECTION_ZFRAC))}
+    # A fractional coordinate selects a Gaussian sheet; counter_charge_center a 3D Gaussian.
+    keys = ('counter_charge_zfrac', 'counter_charge_center')
+    source = {key: info[key] for key in keys if info.get(key) is not None}
+    if not source:
+        source = {key: value for key, value in zip(keys, (COUNTER_CHARGE_ZFRAC, COUNTER_CHARGE_CENTER))
+                  if value is not None}
+    if len(source) != 1:
+        raise ValueError('Give exactly one of counter_charge_zfrac (sheet) or counter_charge_center (3D)')
+    if 'counter_charge_zfrac' in source:
+        planes['counter_charge_zfrac'] = scalar(source.pop('counter_charge_zfrac'))
+    else:
+        source['counter_charge_center'] = np.asarray(source['counter_charge_center'], dtype=float).reshape(3)
+    width = scalar(info.get('counter_charge_width') or GAUSSIAN_WIDTH)
+    if width <= 0. or any(not 0. <= value < 1. for value in planes.values()):
+        raise ValueError('Need a positive Gaussian width and plane fractions in [0, 1)')
+    if charge != 0. and not np.isclose(scalar(info.get('counter_charge', np.nan)), -charge):
+        raise ValueError('A charged starting reference must already have counter_charge = -total_charge')
     scalar(TARGET_U_SHE)
-    # A fractional coordinate selects a sheet; counter_charge_center would select a 3D Gaussian.
     atoms.info = dict(source_index=index, oxygen_pair=pair,
                       total_charge=charge, counter_charge=-charge,
                       external_field=np.asarray(info.get('external_field', np.zeros(3)), dtype=float),
-                      counter_charge_width=width, **planes)
+                      counter_charge_width=width, **source, **planes)
     atoms.calc = None
     fixed = sorted(fixed)
     atoms.set_constraint(physical_constraints(atoms, fixed))
@@ -223,8 +230,8 @@ def make_calculator(model_file):
         options['num_scf_steps'] = int(SCF_STEPS)
     calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64',
                              pbc_handling='slab', scf_options=options, scf_restart=False,
-                             ignore_nonconverged=True, use_compile=False, enable_cueq=ENABLE_CUEQ,
-                             counter_charge_width=GAUSSIAN_WIDTH, voltage_reference='SHE')
+                             ignore_nonconverged=True, use_compile=False,
+                             counter_charge_width=GAUSSIAN_WIDTH, constant_potential=True)
     if getattr(calc.model.field_dependent_charges_map, 'energy_reference', 'dft') != 'dft':
         raise ValueError('Use a DFT-energy MACE-VOLT model trained with derivative-based EF')
     heads = list(getattr(calc.model, 'heads', [calc.head]))
@@ -242,7 +249,7 @@ def make_calculator(model_file):
 
 
 def charge_probe(atoms):
-    """Check the energy derivative and measure the WF response separately."""
+    """Frozen geometry: V = dE/dQ against finite differences, and dV/dQ, dWF/dQ."""
     q = scalar(atoms.info['total_charge'])
     data = []
     try:
@@ -251,22 +258,16 @@ def charge_probe(atoms):
             atoms.calc.reset()
             energy = scalar(atoms.get_potential_energy(apply_constraint=False))
             r = atoms.calc.results
-            if 'md_charge_potential' not in r:
-                raise RuntimeError("Use the patched MACEFixedPointSCF with voltage_reference='SHE'")
-            data.append([energy, scalar(r['work_function']),
-                         scalar(r['charging_potential'])])
+            data.append([energy, scalar(r['cell_voltage']), scalar(r['work_function'])])
     finally:
         atoms.info.update(total_charge=q, counter_charge=-q)
         atoms.calc.reset()
-    derivative, slope, _ = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
-    if abs(derivative-data[1][2]) > .005:
-        raise RuntimeError('Charge-transfer energy derivative fails its finite-difference check by >5 mV')
-    return dict(charge_e=q, dE_dQ_eV_per_e=float(derivative), model_WF_eV=data[1][1],
-                charging_potential_V=data[1][2], derivative_error_V=float(derivative-data[1][2]),
-                WF_minus_transfer_voltage_V=float(data[1][1]-data[1][2]),
-                dU_dQ_V_per_e=float(slope), E_curvature_eV_per_e2=float(
-                    (data[2][0]+data[0][0]-2*data[1][0])/CHARGE_PROBE_E**2),
-                note='The paper-style controller uses measured WF/e minus 4.44 V. The DFT-energy transfer derivative is audited independently.')
+    derivative, dv, dwf = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
+    if abs(derivative-data[1][1]) > .005:
+        raise RuntimeError('dE/dQ fails its finite-difference check against the cell voltage by >5 mV')
+    return dict(charge_e=q, cell_voltage_V=data[1][1], dE_dQ_fd_V=float(derivative),
+                work_function_eV=data[1][2], she_offset_V=data[1][2]-data[1][1],
+                dV_dQ_V_per_e=float(dv), dWF_dQ_V_per_e=float(dwf))
 
 
 def last_csv(path):
@@ -336,8 +337,8 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
         if CHECK_CHARGE_RESPONSE:
             probe = charge_probe(atoms)
             write_json(directory/'charge_response.json', probe)
-            if probe['dU_dQ_V_per_e'] <= 0.:
-                raise RuntimeError('Nonpositive local voltage response to electrode charge: inspect charge_response.json before MD')
+            if probe['dV_dQ_V_per_e'] <= 0.:
+                raise RuntimeError('Nonpositive voltage response to electrode charge: inspect charge_response.json before MD')
     fields, saved_csv = last_csv(csv_path)
     last_step = -1 if saved_csv is None else int(saved_csv['step'])
     start = 0 if state is None else int(atoms.info['step'])
@@ -348,14 +349,16 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
     bias = DistanceUmbrella(atoms.info['oxygen_pair'], stages[stage_id]['center_A'], UMBRELLA_K)
     atoms.set_constraint([bias]+physical)
     with ExitStack() as stack:
+        # <Delta> aligns during the initial stage; V* is then frozen for every window.
         dyn = stack.enter_context(NVTPhiLangevin(
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
-            friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE,
+            friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE, she_offset=SHE_OFFSET,
+            alignment_time=INITIAL_EQUIL_STEPS*TIMESTEP_FS*units.fs,
             C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng,
             logfile=str(directory / 'md.log'), loginterval=LOGINTERVAL))
         dyn.nsteps = start
         if state is not None:
-            dyn._read_potential()
+            dyn.restore_potentiostat_state(state['potentiostat'])
         trajectory = stack.enter_context(Trajectory(traj_path, 'a'))
         stream = stack.enter_context(csv_path.open('a', newline='', buffering=1))
 
@@ -391,13 +394,12 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        distance_A=distance, center_A=bias.center, k_eV_A2=bias.k,
                        bias_eV=umbrella, radial_bias_eV_A=radial, energy_model_eV=energy,
                        energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
-                       temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
-                       dft_energy_eV=scalar(r['dft_energy']),
-                       wf_voltage_V_SHE=scalar(r['electrode_potential']),
-                       counter_reference_offset_V=scalar(r['counter_reference_offset']),
-                       total_charge_e=scalar(atoms.info['total_charge']),
+                       temperature_K=temperature, total_charge_e=dyn.electrode_charge,
+                       cell_voltage_V=scalar(r['cell_voltage']), target_cell_voltage_V=dyn.target_cell_voltage,
+                       wf_eV=scalar(r['work_function']), U_SHE_V=scalar(r['electrode_potential_she']),
+                       she_offset_V=scalar(r['she_offset']), aligned=int(dyn.aligned),
+                       omega_eV=energy-dyn.target_cell_voltage*dyn.electrode_charge,
                        vacuum_potential_V=scalar(r['vacuum_potential']), fermi_level_eV=scalar(r['fermi_level']),
-                       wf_eV=scalar(r['vacuum_potential'])-scalar(r['fermi_level']),
                        scf_steps=int(r['num_scf_steps']), scf_residual=residual)
             for j, o in enumerate(atoms.info['oxygen_pair'], 1):
                 env = oxygen_environment(atoms, o)
@@ -405,7 +407,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
             frame = atoms.copy()
             frame.set_constraint([])  # Stored energy/forces include restraints exactly once.
             frame.info.update(step=dyn.nsteps, md_record=row, restart_state=dict(
-                run_id=run_id, rng_state=rng.bit_generator.state,
+                run_id=run_id, rng_state=rng.bit_generator.state, potentiostat=dyn.potentiostat_state(),
                 stage_id=stage_id, stage_done=dyn.nsteps-segment_start))
             trajectory.write(frame, energy=energy+wall+umbrella, forces=forces)
             write_row(row)
@@ -460,6 +462,16 @@ def main():
         print(f'{index}: pair {atoms.info["oxygen_pair"]}, {[e["kind"] for e in envs]}, '
               f'{n} eligible; {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps/replica', flush=True)
     model = Path(MODEL_FILE).resolve(strict=True)
+    if POTCAR is not None:  # Written once, so restarts see the same model hash.
+        counter = model.with_suffix('.counter.model')
+        if not counter.exists():
+            import torch
+            from mace_scf.electrostatics.potential import install_neutral_atom_reference
+            network = torch.load(model, map_location='cpu', weights_only=False)
+            install_neutral_atom_reference(network.field_dependent_charges_map, POTCAR,
+                                           [int(z) for z in network.atomic_numbers])
+            torch.save(network, counter)
+        model = counter
     hasher = hashlib.sha256()
     with model.open('rb') as f:
         for chunk in iter(lambda:f.read(4*1024*1024), b''):
