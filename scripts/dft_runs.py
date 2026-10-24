@@ -23,11 +23,11 @@ from ase.io import read, write
 from pymatgen.io.vasp import Chgcar, Locpot, Outcar
 
 
-BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
+BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft_plugin/")
 SYSTEM = "IrO2OH_110"
 INPUT = None  # Optional XYZ/trajectory; otherwise use the original batch file.
 INDEXES = None  # Optional frame indexes; None selects all frames.
-COMMAND = "mpirun vasp_std"
+COMMAND = 'env PYTHONPATH="$VASP_PLUGIN_PYTHONPATH" mpirun -x PYTHONPATH vasp_std'
 
 # Installed automatically in each output directory; requires only NumPy.
 PLUGIN = r'''
@@ -276,7 +276,7 @@ def make_vasp_calculator(atoms, directory, meta):
         # making every local density update as small as straight AMIX=0.02.
         # AMIN must be explicit; its default would undo this damping.
         settings.update(ldipol=False, idipol=0, efield=0.,
-                        amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12, lwave=True)
+                        amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12)
         settings["custom"].update({"plugins/force_and_stress": ".TRUE.",
                                    "lvacpotav": ".FALSE."})
     if meta['vacuum_reservoir']:
