@@ -72,6 +72,9 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
         self._sync_total_charge()
         if forces is None:
             forces = atoms.get_forces(md=True)
+        # Update Q from the old state; the final force evaluation supplies
+        # both the new-state nuclear force and its conjugate voltage.
+        self._update_counter_charge()
         momenta = atoms.get_momenta() + 0.5 * self.dt * forces
         masses = atoms.get_masses()[:, None]
         old_positions = atoms.get_positions()
@@ -79,8 +82,6 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
         if atoms.constraints:
             momenta = (atoms.get_positions() - old_positions) * masses / self.dt
         atoms.set_momenta(momenta, apply_constraint=False)
-        atoms.get_potential_energy()
-        self._update_counter_charge()
         forces = atoms.get_forces(md=True)
         self._read_potential()
         atoms.set_momenta(

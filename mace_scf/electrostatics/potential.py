@@ -221,6 +221,10 @@ class SpectralGeometry:
         self.counter = torch.zeros_like(self.proto)
         self.counter_energy = torch.zeros_like(self.volume)
         self.counter_moment = torch.zeros_like(self.volume)
+        self.counter_density_unit = torch.zeros_like(self.proto)
+        self.counter_moment_unit = torch.zeros_like(self.volume)
+        self.counter_unit = torch.zeros_like(self.proto)
+        self.counter_self_remainder = torch.zeros_like(self.volume)
         counter_width = data.get("counter_charge_width")
         has_counter = ("counter_slab_bounds" in data or
                        (counter_width is not None and bool((counter_width > 0).any())))
@@ -249,6 +253,7 @@ class SpectralGeometry:
                 width = torch.where(width > 0, width, 1.)
                 phase_counter = -torch.einsum("gkc,gc->gk", self.wave, center)
                 profile = torch.exp(-.5*self.k2*width[:, None].square())
+                profile = profile*(data['counter_charge_width'].reshape(-1)>0)[:, None]
                 axis = data.get("counter_charge_axis", torch.full_like(counter, -1, dtype=torch.long)).reshape(-1)
                 sheet = axis >= 0
                 if bool(((axis < -1) | (axis > 2)).any()):
@@ -261,7 +266,9 @@ class SpectralGeometry:
                 planar = (self.modes.square().sum(-1)[None] == order.square())
                 profile = profile*torch.where(sheet[:, None], planar, True)
                 phase_counter = torch.where(sheet[:, None], -2*math.pi*order*fraction[:, None], phase_counter)
-            self.counter_density = (counter/self.volume)[:, None]*profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask
+            self.counter_density_unit = profile*torch.complex(phase_counter.cos(), phase_counter.sin())*self.mask/self.volume[:, None]
+            self.counter_density = counter[:, None]*self.counter_density_unit
+            self.counter_moment_unit = self.volume*(self.counter_density_unit.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
             counter_moment = self.volume*(self.counter_density.conj()*self.ramp(torch.ones_like(self.volume))).real.sum(-1)
             self.counter_moment = counter_moment
             self.counter = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*counter_moment)
@@ -998,6 +1005,9 @@ def _target_fft(
 
 def evaluate_electronic(model, data, **kwargs):
     """Dispatch the saved response family without reinterpreting its weights."""
+    if getattr(model.field_dependent_charges_map, 'shared_nonlinear_energy', False):
+        from .nonlinear_energy import evaluate_nonlinear
+        return evaluate_nonlinear(model, data, **kwargs)
     if getattr(model.field_dependent_charges_map, 'coupled', False):
         from .coupled import evaluate_coupled
         return evaluate_coupled(model, data, **kwargs)

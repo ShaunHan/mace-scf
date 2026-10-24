@@ -13,13 +13,13 @@ from ase.md.velocitydistribution import (
 
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = "IrO2_water_interface.traj"
-MODEL_FILE = "fit_0.model"
-TARGET_U_SHE = 1.60  # Absolute electron-reservoir chemical potential: -(4.44+1.60) eV.
-# Fixed fractional planes for umbrella_10's 50.53842 A cell; match charged DFT.
-COUNTER_CHARGE_ZFRAC = 0.42    # z = 21.22614 A, beyond the water.
-VACUUM_ZFRAC = 0.48           # z = 24.25844 A, beyond the counter-sheet.
-DIPOLE_CORRECTION_ZFRAC = 0.50 # z = 25.26921 A.
-GAUSSIAN_WIDTH = 0.5  # Angstrom; match the charged DFT boundary.
+MODEL_FILE = "models/fit_0_best_wf.model"  # Export from the new shared-energy training.
+TARGET_U_SHE = 1.60  # Measured WF/e - conventional absolute SHE (4.44 V).
+# Input-frame values take precedence; these defaults apply only if absent.
+COUNTER_CHARGE_ZFRAC = 0.20   # Inside water for the supplied ~50 A cell.
+VACUUM_ZFRAC = 0.40          # In the solution-side vacuum.
+DIPOLE_CORRECTION_ZFRAC = 0.50
+GAUSSIAN_WIDTH = 0.5         # Angstrom; use the width in the DFT data.
 
 TEMPERATURE_K = 300.0
 TIMESTEP_FS = 0.5
@@ -52,23 +52,27 @@ def prepare_frame(source):
     atoms.pbc = [True, True, False]
     planes = dict(counter_charge_zfrac=COUNTER_CHARGE_ZFRAC,
                   vacuum_zfrac=VACUUM_ZFRAC, dipole_correction_zfrac=DIPOLE_CORRECTION_ZFRAC)
+    planes = {key: scalar(info.get(key, value)) for key, value in planes.items()}
     if any(not 0. <= scalar(value) < 1. for value in planes.values()):
         raise ValueError("Plane zfrac values must be finite and in [0, 1)")
     charge = scalar(info.get("total_charge", 0.))
+    width = scalar(info.get('counter_charge_width', GAUSSIAN_WIDTH))
+    if width == 0. and charge == 0.:
+        width = GAUSSIAN_WIDTH
+    if width <= 0. or (charge != 0. and 'counter_charge_center' in info
+                      and 'counter_charge_zfrac' not in info):
+        raise ValueError('Specify a Gaussian sheet with positive width and counter_charge_zfrac')
     if charge != 0.:
         if not np.isclose(scalar(info.get("counter_charge", np.nan)), -charge):
             raise ValueError("A charged starting reference must already have counter_charge = -total_charge")
-        if ("counter_charge_center" in info
-                or not np.isclose(scalar(info.get("counter_charge_zfrac", np.nan)), COUNTER_CHARGE_ZFRAC)
-                or not np.isclose(scalar(info.get("counter_charge_width", np.nan)), GAUSSIAN_WIDTH)):
-            raise ValueError("The charged DFT reference and configured Gaussian sheet must have identical geometry")
     for prefix in ("vacuum", "dipole_correction", "counter_charge"):
         for letter in "xyz":
             atoms.info.pop(f"{prefix}_{letter}frac", None)
     atoms.info.pop("counter_charge_center", None)
+    atoms.info.pop("vacuum_reservoir", None)
     atoms.info.update(
         counter_charge=-charge, total_charge=charge,
-        counter_charge_width=GAUSSIAN_WIDTH, vacuum_reservoir=True,
+        counter_charge_width=width,
         external_field=np.asarray(info.get("external_field", np.zeros(3)), dtype=float),
         **planes,
     )
@@ -110,7 +114,7 @@ def main() -> None:
     ZeroRotation(atoms)
 
     initial_energy = atoms.get_potential_energy()
-    print(f"Initial reservoir energy: {initial_energy:.10f} eV")
+    print(f"Initial potential energy: {initial_energy:.10f} eV")
     print(f"Initial voltage vs SHE: {atoms.calc.results['md_charge_potential']:.10f} V")
     print(f"Target voltage vs SHE: {TARGET_U_SHE:.10f} V")
 

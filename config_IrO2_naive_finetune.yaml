@@ -18,7 +18,6 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
-      vacuum_reservoir: vacuum_reservoir  # Read the per-frame boundary tag; absent means false.
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -68,7 +67,8 @@ foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 log_dir: logs
 results_dir: results
 model_dir: models
-# Joint absolute DFT targets; WF is a checkpoint metric, not a loss.
+# Fresh shared nonlinear energy; DFT energy is the only energy target.
+# WF is a checkpoint metric, not a loss.
 train_schedule:
   0:
     name: heads

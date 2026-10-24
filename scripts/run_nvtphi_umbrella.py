@@ -19,7 +19,7 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
-MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_203/models/fit_0_best_wf.model'
+MODEL_FILE = 'models/fit_0_best_wf.model'     # Export from the new shared-energy training.
 RUN_INDEXES = list(range(0, 10))
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
 MAX_WORKERS, REPLICAS = 10, 1                 # Workers share one visible GPU.
@@ -27,11 +27,11 @@ DEVICE, HEAD, ENABLE_CUEQ = 'cuda:0', None, True
 SCF_STEPS = 50                              # None uses the exported model's deployment budget.
 OXYGEN_PAIRS = {}                           # Optional {index: (O_id, O_id)}, zero-based ASE IDs.
 TARGET_U_SHE = 1.60                        # Conventional absolute SHE = 4.44 V; no fitted offset.
-# Fixed fractional planes for umbrella_10's 50.53842 A cell; match charged DFT.
-COUNTER_CHARGE_ZFRAC = 0.42                 # z = 21.22614 A, beyond the water.
-VACUUM_ZFRAC = 0.48                        # z = 24.25844 A, beyond the counter-sheet.
-DIPOLE_CORRECTION_ZFRAC = 0.50              # z = 25.26921 A.
-GAUSSIAN_WIDTH = 0.5                       # Angstrom; match the charged DFT boundary.
+# Input-frame values take precedence; these defaults apply only if absent.
+COUNTER_CHARGE_ZFRAC = 0.20                 # Inside water for the supplied ~50 A cell.
+VACUUM_ZFRAC = 0.40                        # In the solution-side vacuum.
+DIPOLE_CORRECTION_ZFRAC = 0.50
+GAUSSIAN_WIDTH = 0.5                       # Angstrom; use the width in the DFT data.
 CAPACITANCE, TAUPHI_FS = 0.01, 100.0         # e/V for the whole cell; fs. Not an areal capacitance.
 Z_FIXED, Z_REPULSIVE, WALL_K = -11.0, 15.0, 10.0
 PAIR_CUTOFF, OO_MIN = 3.0, 1.20
@@ -145,20 +145,24 @@ def prepare_frame(source, index):
     charge = scalar(info.get('total_charge', 0.))
     planes = dict(counter_charge_zfrac=COUNTER_CHARGE_ZFRAC,
                   vacuum_zfrac=VACUUM_ZFRAC, dipole_correction_zfrac=DIPOLE_CORRECTION_ZFRAC)
+    planes = {key: scalar(info.get(key, value)) for key, value in planes.items()}
+    width = scalar(info.get('counter_charge_width', GAUSSIAN_WIDTH))
+    if width == 0. and charge == 0.:
+        width = GAUSSIAN_WIDTH  # No source was present in this neutral frame.
+    if width <= 0. or (charge != 0. and 'counter_charge_center' in info
+                      and 'counter_charge_zfrac' not in info):
+        raise ValueError('Specify a Gaussian sheet with positive width and counter_charge_zfrac')
     if any(not 0. <= scalar(value) < 1. for value in planes.values()):
         raise ValueError('Plane zfrac values must be finite and in [0, 1)')
     if charge != 0.:
         if not np.isclose(scalar(info.get('counter_charge', np.nan)), -charge):
             raise ValueError('A charged starting reference must already have counter_charge = -total_charge')
-        if ('counter_charge_center' in info or not np.isclose(scalar(info.get('counter_charge_zfrac', np.nan)), COUNTER_CHARGE_ZFRAC)
-                or not np.isclose(scalar(info.get('counter_charge_width', np.nan)), GAUSSIAN_WIDTH)):
-            raise ValueError('The charged DFT reference and configured Gaussian sheet must have identical geometry')
     scalar(TARGET_U_SHE)
     # A fractional coordinate selects a sheet; counter_charge_center would select a 3D Gaussian.
     atoms.info = dict(source_index=index, oxygen_pair=pair,
-                      total_charge=charge, counter_charge=-charge, vacuum_reservoir=True,
+                      total_charge=charge, counter_charge=-charge,
                       external_field=np.asarray(info.get('external_field', np.zeros(3)), dtype=float),
-                      counter_charge_width=GAUSSIAN_WIDTH, **planes)
+                      counter_charge_width=width, **planes)
     atoms.calc = None
     fixed = sorted(fixed)
     atoms.set_constraint(physical_constraints(atoms, fixed))
@@ -238,30 +242,31 @@ def make_calculator(model_file):
 
 
 def charge_probe(atoms):
-    """Check the actual charge-transfer energy derivative and local curvature."""
+    """Check the energy derivative and measure the WF response separately."""
     q = scalar(atoms.info['total_charge'])
     data = []
     try:
         for dq in (-CHARGE_PROBE_E, 0., CHARGE_PROBE_E):
             atoms.info.update(total_charge=q+dq, counter_charge=-q-dq)
             atoms.calc.reset()
-            energy = atoms.get_potential_energy(apply_constraint=False)
+            energy = scalar(atoms.get_potential_energy(apply_constraint=False))
             r = atoms.calc.results
             if 'md_charge_potential' not in r:
-                raise RuntimeError('Use a newly trained energy-derived model for NVTPhi')
+                raise RuntimeError("Use the patched MACEFixedPointSCF with voltage_reference='SHE'")
             data.append([energy, scalar(r['work_function']),
-                         scalar(r['vacuum_potential'])-scalar(r['fermi_level'])])
+                         scalar(r['charging_potential'])])
     finally:
         atoms.info.update(total_charge=q, counter_charge=-q)
         atoms.calc.reset()
     derivative, slope, _ = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
-    if abs(derivative-data[1][1]) > .005:
-        raise RuntimeError('Charge-transfer energy derivative differs from the MD voltage by >5 mV')
-    return dict(charge_e=q, dE_dQ_eV_per_e=float(derivative), model_WF_eV=data[1][2],
-                charging_potential_V=data[1][1], derivative_error_V=float(derivative-data[1][1]),
+    if abs(derivative-data[1][2]) > .005:
+        raise RuntimeError('Charge-transfer energy derivative fails its finite-difference check by >5 mV')
+    return dict(charge_e=q, dE_dQ_eV_per_e=float(derivative), model_WF_eV=data[1][1],
+                charging_potential_V=data[1][2], derivative_error_V=float(derivative-data[1][2]),
+                WF_minus_transfer_voltage_V=float(data[1][1]-data[1][2]),
                 dU_dQ_V_per_e=float(slope), E_curvature_eV_per_e2=float(
                     (data[2][0]+data[0][0]-2*data[1][0])/CHARGE_PROBE_E**2),
-                note='Reservoir energy derivative equals WF; the controller subtracts the conventional 4.44 V SHE reference.')
+                note='The paper-style controller uses measured WF/e minus 4.44 V. The DFT-energy transfer derivative is audited independently.')
 
 
 def last_csv(path):
@@ -303,7 +308,7 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
     cfg_path, traj_path, csv_path = [directory/n for n in ('run.json', 'md.traj', 'md.csv')]
     rng = np.random.default_rng(np.random.SeedSequence([SEED, index, replica, 2]))
     state = None
-    if cfg_path.exists():
+    if cfg_path.exists() and (traj_path.exists() or csv_path.exists()):
         cfg = json.loads(cfg_path.read_text())
         if cfg.get('run_id') != run_id:
             raise ValueError('Source/model/physical settings differ from this run; use a fresh output folder')
@@ -388,8 +393,6 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        energy_wall_eV=wall, energy_total_eV=energy+wall+umbrella,
                        temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
                        dft_energy_eV=scalar(r['dft_energy']),
-                       reservoir_correction_eV=scalar(r['reservoir_energy_correction']),
-                       grand_energy_eV=energy-(4.44+TARGET_U_SHE)*scalar(atoms.info['total_charge']),
                        wf_voltage_V_SHE=scalar(r['electrode_potential']),
                        counter_reference_offset_V=scalar(r['counter_reference_offset']),
                        total_charge_e=scalar(atoms.info['total_charge']),

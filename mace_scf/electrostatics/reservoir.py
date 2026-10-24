@@ -1,4 +1,8 @@
-"""A vacuum-side planar charge reservoir, with one electronic trajectory.
+"""Conservative charge-transfer ensembles, with one electronic trajectory.
+
+NonlinearEnergyResponse obtains vacuum-reference work algebraically from its
+shared energy/ESP coefficients and supports a sheet inside the solvent. The
+separated-vacuum functions below retain compatibility with earlier exports.
 
 The prescribed Gaussian sheet lies beyond all atoms; an outer vacuum plateau
 lies beyond that sheet. A sharp, uniform reference plane has zero spread self
@@ -74,7 +78,7 @@ def vacuum_boundary(data):
 
 
 def _evaluate(model, data, *, steps, mixing, tolerance):
-    from .coupled import evaluate_coupled
+    from .potential import evaluate_electronic
     response = model.field_dependent_charges_map
     if (not getattr(response, 'energy_derivatives', False)
             or getattr(response, 'energy_reference', 'dft') != 'dft'):
@@ -85,7 +89,7 @@ def _evaluate(model, data, *, steps, mixing, tolerance):
     counter = data.get('counter_charge', torch.zeros_like(charge))
     if not torch.allclose(counter.reshape(-1), -charge.reshape(-1), atol=1.e-8, rtol=0):
         raise ValueError('Charge-transfer MD requires counter_charge=-total_charge')
-    return evaluate_coupled(model, data, steps=steps, mixing=mixing,
+    return evaluate_electronic(model, data, steps=steps, mixing=mixing,
                             tolerance=tolerance, compute_force=True)
 
 
@@ -98,24 +102,25 @@ def evaluate_pair(model, data, *, steps, mixing, tolerance):
 
 
 def evaluate_she(model, data, *, steps, mixing, tolerance):
-    """Return the DFT-trained energy E and its SHE controller, at fixed cell.
+    """Return the vacuum-referenced energy and ALL its nuclear forces.
 
-    The configurational grand energy in eV is
-        Omega = E + reservoir_energy_correction - (4.44 + U)*Q.
-    The analytic correction is boundary work, independent of nuclear positions
-    at fixed cell and sheet width. Thus forces=-dE/dR and
-    dOmega/dQ=md_charge_potential-U, with counter_charge=-Q.
-    Its derivative is already included in md_charge_potential; do not add it
-    again in the charge update. No learned energy or training target is added.
+    For the shared nonlinear model, dE_MD/dQ=WF and the controlled potential
+    is WF-4.44. Omega=E_MD-(4.44+U)*Q. Its reference work generally changes
+    forces; no force term is detached. Training retains one DFT energy label.
     """
     response = model.field_dependent_charges_map
+    if getattr(response, 'shared_nonlinear_energy', False):
+        from .nonlinear_energy import evaluate_nonlinear
+        return evaluate_nonlinear(model, data, steps=steps, mixing=mixing,
+                                  tolerance=tolerance, compute_force=True, reservoir=True)
     if not getattr(response, 'vacuum_reservoir_trained', False):
         raise ValueError('SHE control needs training/finetuning with charged vacuum_reservoir=True DFT '
                          'frames and Fermi labels. An old model cannot be converted by changing its metadata.')
     q = data['total_charge'].reshape(-1)
     data = dict(data, vacuum_reservoir=torch.ones_like(q, dtype=torch.bool))
     output = _evaluate(model, data, steps=steps, mixing=mixing, tolerance=tolerance)
-    output['dft_energy'] = output['energy']  # Compatibility alias, not another prediction.
+    output['dft_energy'] = output['energy']
+    output['energy'] = output['energy']+output['reservoir_energy_correction']
     output['md_charge_potential'] = output['work_function']-SHE_ABSOLUTE_V
     output['electrode_potential'] = output['md_charge_potential']
     return output

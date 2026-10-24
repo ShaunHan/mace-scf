@@ -1397,6 +1397,9 @@ class CoupledGeometry(SpectralGeometry):
             self.vacuum_reference = (self.attrs.sum(1)@r.vacuum_reference_integrals)/self.volume*self.slab
             proto = torch.zeros_like(proto)
         self.vacuum_reference = self.vacuum_reference+getattr(r, 'vacuum_reference_offset', 0.)
+        if getattr(r, 'shared_nonlinear_energy', False):
+            from .nonlinear_energy import complete_counter_profile
+            complete_counter_profile(self, data)
         ramp = self.ramp(-self.slab_factor)
         zn = (self.pack(positions)*self.normal[:, None]).sum(-1)*self.present
         self.tensors = (co, si, self.wave, basis.real*active[..., None], basis.imag*active[..., None],
