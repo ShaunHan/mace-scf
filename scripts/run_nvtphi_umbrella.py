@@ -233,7 +233,7 @@ def make_calculator(model_file):
 
 
 def charge_probe(atoms):
-    """Check the actual charge-transfer energy derivative and local curvature."""
+    """Check DFT-energy and grand-energy charge derivatives at fixed geometry."""
     q = scalar(atoms.info['total_charge'])
     data = []
     try:
@@ -244,19 +244,25 @@ def charge_probe(atoms):
             r = atoms.calc.results
             if 'md_charge_potential' not in r:
                 raise RuntimeError('Use a newly trained energy-derived model for NVTPhi')
-            data.append([energy, scalar(r['work_function']),
-                         scalar(r['vacuum_potential'])-scalar(r['fermi_level'])])
+            data.append([energy, scalar(r['charging_potential']), scalar(r['work_function']),
+                         scalar(r['reservoir_energy_correction']), scalar(r['md_charge_potential'])])
     finally:
         atoms.info.update(total_charge=q, counter_charge=-q)
         atoms.calc.reset()
-    derivative, slope, _ = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
-    if abs(derivative-data[1][1]) > .005:
-        raise RuntimeError('Charge-transfer energy derivative differs from the MD voltage by >5 mV')
-    return dict(charge_e=q, dE_dQ_eV_per_e=float(derivative), model_WF_eV=data[1][2],
-                charging_potential_V=data[1][1], derivative_error_V=float(derivative-data[1][1]),
-                dU_dQ_V_per_e=float(slope), E_curvature_eV_per_e2=float(
+    derivatives = (np.asarray(data[2])-np.asarray(data[0]))/(2*CHARGE_PROBE_E)
+    dE = derivatives[0]
+    dOmega = dE+derivatives[3]-(4.44+TARGET_U_SHE)
+    error = max(abs(dE-data[1][1]), abs(dE+derivatives[3]-data[1][2]),
+                abs(dOmega-(data[1][4]-TARGET_U_SHE)))
+    if error > .005:
+        raise RuntimeError('DFT-energy or grand-energy charge derivative is inconsistent by >5 mV')
+    return dict(charge_e=q, dE_dQ_eV_per_e=float(dE), model_WF_eV=data[1][2],
+                charging_potential_V=data[1][1], derivative_error_V=float(error),
+                dOmega_dQ_eV_per_e=float(dOmega), dU_dQ_V_per_e=float(derivatives[4]),
+                E_curvature_eV_per_e2=float(
                     (data[2][0]+data[0][0]-2*data[1][0])/CHARGE_PROBE_E**2),
-                note='Reservoir energy derivative equals WF; the controller subtracts the conventional 4.44 V SHE reference.')
+                note='E is the DFT energy. Omega=E+boundary_work-(4.44+U)*Q; '
+                     'dOmega/dQ=U_SHE-U. The boundary work is analytic, not fitted.')
 
 
 def last_csv(path):
@@ -385,7 +391,8 @@ def _simulate(source, index, replica, model_file, model_sha, directory):
                        temperature_K=temperature, voltage_V_SHE=dyn._read_potential(),
                        dft_energy_eV=scalar(r['dft_energy']),
                        reservoir_correction_eV=scalar(r['reservoir_energy_correction']),
-                       grand_energy_eV=energy-(4.44+TARGET_U_SHE)*scalar(atoms.info['total_charge']),
+                       grand_energy_eV=(energy+scalar(r['reservoir_energy_correction'])
+                                        -(4.44+TARGET_U_SHE)*scalar(atoms.info['total_charge'])),
                        wf_voltage_V_SHE=scalar(r['electrode_potential']),
                        counter_reference_offset_V=scalar(r['counter_reference_offset']),
                        total_charge_e=scalar(atoms.info['total_charge']),

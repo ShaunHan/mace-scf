@@ -245,7 +245,7 @@ def main() -> None:
         args,
         device,
     )
-    logging.info(f"using Fermi level offset {args.fermi_level_offset}")
+    logging.info('Chemical-level initialization: %s', args.fermi_level_offset)
     args.field_feature_norms = mace_scf.utils.run_train_utils.get_field_feature_norms(
         train_loader,
         args,

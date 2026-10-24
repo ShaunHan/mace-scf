@@ -110,7 +110,7 @@ def main() -> None:
     ZeroRotation(atoms)
 
     initial_energy = atoms.get_potential_energy()
-    print(f"Initial reservoir energy: {initial_energy:.10f} eV")
+    print(f"Initial DFT energy: {initial_energy:.10f} eV")
     print(f"Initial voltage vs SHE: {atoms.calc.results['md_charge_potential']:.10f} V")
     print(f"Target voltage vs SHE: {TARGET_U_SHE:.10f} V")
 

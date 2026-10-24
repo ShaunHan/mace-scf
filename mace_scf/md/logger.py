@@ -27,6 +27,7 @@ class NVTPhiMDLogger(IOContext):
         self.vacuum_potential_key = vacuum_potential_key
         self.fermi_level_key = fermi_level_key
         self.peratom = peratom
+        self.log_grand_energy = self.dyn is not None and hasattr(self.dyn, "target_potential")
         self.logfile = self.openfile(file=logfile, mode=mode, comm=comm)
 
         self.header = "%-9s " % "Time[ps]" if self.dyn is not None else ""
@@ -49,7 +50,11 @@ class NVTPhiMDLogger(IOContext):
             digits = 2
         else:
             digits = 1
-        self.fmt += 3 * (f"%12.{digits}f ") + "%8.1f %16.8f %16.8f\n"
+        self.fmt += 3 * (f"%12.{digits}f ") + "%8.1f %16.8f %16.8f"
+        if self.log_grand_energy:
+            self.header += f" {'Omega' + scale + '[eV]':>16}"
+            self.fmt += f" %16.{digits}f"
+        self.fmt += "\n"
         if header:
             self.logfile.write(self.header + "\n")
 
@@ -59,12 +64,23 @@ class NVTPhiMDLogger(IOContext):
     def __call__(self):
         epot = self.atoms.get_potential_energy()
         ekin = self.atoms.get_kinetic_energy()
+        counter = self.atoms.info.get(self.counter_charge_key, np.nan)
+        electrode_charge = -float(np.asarray(counter).reshape(-1)[0])
+        if self.log_grand_energy:
+            target = float(self.dyn.target_potential)
+            if getattr(self.atoms.calc, "voltage_reference", None) == "SHE":
+                from ..electrostatics.reservoir import SHE_ABSOLUTE_V
+
+                target += SHE_ABSOLUTE_V
+            # Epot already includes the boundary correction and any ASE bias.
+            # Q is a charge number; target[V] * Q is numerically energy[eV].
+            omega = epot - target * electrode_charge
         if self.peratom:
             natoms = self.atoms.get_global_number_of_atoms()
             epot /= natoms
             ekin /= natoms
-        counter = self.atoms.info.get(self.counter_charge_key, np.nan)
-        electrode_charge = -float(np.asarray(counter).reshape(-1)[0])
+            if self.log_grand_energy:
+                omega /= natoms
         if self.dyn is not None and hasattr(self.dyn, "_read_potential"):
             potential = self.dyn._read_potential()
         else:
@@ -81,5 +97,7 @@ class NVTPhiMDLogger(IOContext):
             electrode_charge,
             float(np.asarray(potential).reshape(-1)[0]),
         )
+        if self.log_grand_energy:
+            values += (omega,)
         self.logfile.write(self.fmt % values)
         self.logfile.flush()

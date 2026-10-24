@@ -98,12 +98,15 @@ def evaluate_pair(model, data, *, steps, mixing, tolerance):
 
 
 def evaluate_she(model, data, *, steps, mixing, tolerance):
-    """Conservative MD at U vs SHE: H=E_res-(4.44+U)*Q, fixed cell.
+    """Return the DFT-trained energy E and its SHE controller, at fixed cell.
 
-    E_res has the same atomic forces as E_DFT: the analytic correction depends
-    only on charge and fixed cell/width. EF is learned with this boundary's
-    energy derivative on explicitly tagged DFT data, not overwritten on a
-    legacy independent-EF export. Training still has exactly one energy label.
+    The configurational grand energy in eV is
+        Omega = E + reservoir_energy_correction - (4.44 + U)*Q.
+    The analytic correction is boundary work, independent of nuclear positions
+    at fixed cell and sheet width. Thus forces=-dE/dR and
+    dOmega/dQ=md_charge_potential-U, with counter_charge=-Q.
+    Its derivative is already included in md_charge_potential; do not add it
+    again in the charge update. No learned energy or training target is added.
     """
     response = model.field_dependent_charges_map
     if not getattr(response, 'vacuum_reservoir_trained', False):
@@ -112,8 +115,7 @@ def evaluate_she(model, data, *, steps, mixing, tolerance):
     q = data['total_charge'].reshape(-1)
     data = dict(data, vacuum_reservoir=torch.ones_like(q, dtype=torch.bool))
     output = _evaluate(model, data, steps=steps, mixing=mixing, tolerance=tolerance)
-    output['dft_energy'] = output['energy']
-    output['energy'] = output['energy']+output['reservoir_energy_correction']
+    output['dft_energy'] = output['energy']  # Compatibility alias, not another prediction.
     output['md_charge_potential'] = output['work_function']-SHE_ABSOLUTE_V
     output['electrode_potential'] = output['md_charge_potential']
     return output

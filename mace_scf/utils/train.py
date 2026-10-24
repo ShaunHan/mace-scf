@@ -222,6 +222,16 @@ class CheckpointHandler(NativeCheckpointHandler):
                                  + '. Resume with the original architecture, or start a fresh run. '
                                    'Resizing learned receivers after optimizer construction would leave stale Adam/EMA owners.')
         value, self._desmearing_migrated = _migrate_desmearing_checkpoint(value, state)
+        from mace_scf.electrostatics.coupled import migrate_chemical_reference
+        shift = migrate_chemical_reference(value['model'])
+        if shift is not None:
+            index = [name for name, _ in state.model.named_parameters()].index(
+                'field_dependent_charges_map.species_level')
+            for name in ('shadow_params', 'collected_params'):
+                parameters = (value.get('ema') or {}).get(name)
+                if parameters is not None:
+                    parameters[index] = parameters[index]+shift.to(parameters[index])
+            logging.info('Absorbed saved Fermi intercept into chemical levels; Adam and EMA retained')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         if value.get('training_guard') is not None:
             state.optimizer._training_guard = value['training_guard']
