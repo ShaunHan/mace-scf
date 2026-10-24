@@ -11,23 +11,15 @@ from ase.md.velocitydistribution import (
     ZeroRotation,
 )
 
-from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
-from mace_scf.md import NVTPhiLangevin
-
-
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0.model"
 TARGET_U_SHE = 1.60  # Absolute electron-reservoir chemical potential: -(4.44+1.60) eV.
-VACUUM_POTENTIAL_KEY = "vacuum_potential"
-FERMI_LEVEL_KEY = "fermi_level"
-
-# Change both suffixes to xfrac or yfrac for a different open cell axis.
-PLANE_FRACTIONS = {"dipole_correction_zfrac": 0.50}
-VACUUM_POINT = [0.0, 0.0, 23.5]  # Same physical outer vacuum as the new DFT data.
-COUNTER_SHEET_POINT = [0.0, 0.0, 20.0]  # Cartesian point on the sheet; converted to a cell fraction below.
-INITIAL_COUNTER_CHARGE = 0.0
-GAUSSIAN_WIDTH = 0.5
+# Fixed fractional planes for umbrella_10's 50.53842 A cell; match charged DFT.
+COUNTER_CHARGE_ZFRAC = 0.42    # z = 21.22614 A, beyond the water.
+VACUUM_ZFRAC = 0.48           # z = 24.25844 A, beyond the counter-sheet.
+DIPOLE_CORRECTION_ZFRAC = 0.50 # z = 25.26921 A.
+GAUSSIAN_WIDTH = 0.5  # Angstrom; match the charged DFT boundary.
 
 TEMPERATURE_K = 300.0
 TIMESTEP_FS = 0.5
@@ -38,8 +30,6 @@ STEPS = 10000
 SEED = 7777
 
 SCF_STEPS = 50
-SCF_TOLERANCE = 1.0e-5
-STRICT_SCF = True
 
 DEVICE = "cuda"
 TRAJECTORY = "nvtphi.traj"
@@ -49,60 +39,70 @@ LOGINTERVAL = 10
 
 
 def scalar(value) -> float:
-    return float(np.asarray(value).reshape(-1)[0])
+    a = np.asarray(value, dtype=float)
+    if a.size != 1 or not np.isfinite(a).all():
+        raise ValueError(f"Expected one finite scalar, got {value}")
+    return float(a.item())
+
+
+def prepare_frame(source):
+    atoms, info = source.copy(), source.info
+    if not np.allclose(atoms.cell.array[:2, 2], 0.):
+        raise ValueError("This driver expects an xy-periodic slab, open along Cartesian z")
+    atoms.pbc = [True, True, False]
+    planes = dict(counter_charge_zfrac=COUNTER_CHARGE_ZFRAC,
+                  vacuum_zfrac=VACUUM_ZFRAC, dipole_correction_zfrac=DIPOLE_CORRECTION_ZFRAC)
+    if any(not 0. <= scalar(value) < 1. for value in planes.values()):
+        raise ValueError("Plane zfrac values must be finite and in [0, 1)")
+    charge = scalar(info.get("total_charge", 0.))
+    if charge != 0.:
+        if not np.isclose(scalar(info.get("counter_charge", np.nan)), -charge):
+            raise ValueError("A charged starting reference must already have counter_charge = -total_charge")
+        if ("counter_charge_center" in info
+                or not np.isclose(scalar(info.get("counter_charge_zfrac", np.nan)), COUNTER_CHARGE_ZFRAC)
+                or not np.isclose(scalar(info.get("counter_charge_width", np.nan)), GAUSSIAN_WIDTH)):
+            raise ValueError("The charged DFT reference and configured Gaussian sheet must have identical geometry")
+    for prefix in ("vacuum", "dipole_correction", "counter_charge"):
+        for letter in "xyz":
+            atoms.info.pop(f"{prefix}_{letter}frac", None)
+    atoms.info.pop("counter_charge_center", None)
+    atoms.info.update(
+        counter_charge=-charge, total_charge=charge,
+        counter_charge_width=GAUSSIAN_WIDTH, vacuum_reservoir=True,
+        external_field=np.asarray(info.get("external_field", np.zeros(3)), dtype=float),
+        **planes,
+    )
+    atoms.calc = None
+    return atoms
 
 
 def main() -> None:
-    if not np.isfinite(TARGET_U_SHE):
-        raise ValueError("TARGET_U_SHE must be finite")
+    from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
+    from mace_scf.md import NVTPhiLangevin
+
+    scalar(TARGET_U_SHE)
     if not Path(ATOMS_FILE).is_file():
         raise FileNotFoundError(ATOMS_FILE)
     if not Path(MODEL_FILE).is_file():
         raise FileNotFoundError(MODEL_FILE)
-
     rng = np.random.default_rng(SEED)
-    atoms = read(ATOMS_FILE, index=-1)
-    axes = [i for i, letter in enumerate("xyz")
-            if set(PLANE_FRACTIONS) == {f"dipole_correction_{letter}frac"}]
-    if len(axes) != 1:
-        raise ValueError("Choose vacuum and dipole-correction planes on the same cell axis")
-    axis = axes[0]
-    atoms.pbc = True
-    atoms.pbc[axis] = False
-    for prefix in ("vacuum", "dipole_correction", "counter_charge"):
-        for letter in "xyz":
-            atoms.info.pop(f"{prefix}_{letter}frac", None)
-    atoms.info.update(PLANE_FRACTIONS)
-    atoms.info[f"vacuum_{'xyz'[axis]}frac"] = float(
-        (np.asarray(VACUUM_POINT) @ np.linalg.inv(atoms.cell.array))[axis] % 1.)
-    atoms.info.pop("counter_charge_center", None)
-    atoms.info[f"counter_charge_{'xyz'[axis]}frac"] = float(
-        (np.asarray(COUNTER_SHEET_POINT) @ np.linalg.inv(atoms.cell.array))[axis] % 1.)
-    atoms.info.update(
-        counter_charge=float(INITIAL_COUNTER_CHARGE),
-        total_charge=-float(INITIAL_COUNTER_CHARGE),
-        counter_charge_width=GAUSSIAN_WIDTH, vacuum_reservoir=True,
-        external_field=np.zeros(3, dtype=float),
-    )
+    atoms = prepare_frame(read(ATOMS_FILE, index=-1))
 
     atoms.calc = MACEFixedPointSCF(
         model_path=MODEL_FILE,
         device=DEVICE,
-        external_field_key="external_field",
-        total_charge_key="total_charge",
         pbc_handling="slab",
         counter_charge_width=GAUSSIAN_WIDTH,
         scf_restart=False,
         voltage_reference='SHE',
         scf_options={
             "num_scf_steps": SCF_STEPS,
-            "scf_tolerance": SCF_TOLERANCE,
             "constant_charge": True,
             "use_autograd_forces": True,
             "initial_density": "local_guess",
             "initial_fermi_level": "zero",
         },
-        ignore_nonconverged=not STRICT_SCF,
+        ignore_nonconverged=True,  # Finite unrolled model, as in the umbrella driver.
     )
 
     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=rng)
@@ -110,7 +110,7 @@ def main() -> None:
     ZeroRotation(atoms)
 
     initial_energy = atoms.get_potential_energy()
-    print(f"Initial DFT energy: {initial_energy:.10f} eV")
+    print(f"Initial reservoir energy: {initial_energy:.10f} eV")
     print(f"Initial voltage vs SHE: {atoms.calc.results['md_charge_potential']:.10f} V")
     print(f"Target voltage vs SHE: {TARGET_U_SHE:.10f} V")
 
@@ -122,11 +122,6 @@ def main() -> None:
         target_potential=TARGET_U_SHE,
         C0=CAPACITANCE,
         tauphi=TAUPHI_FS * units.fs,
-        counter_charge_key="counter_charge",
-        total_charge_key="total_charge",
-        vacuum_potential_key=VACUUM_POTENTIAL_KEY,
-        fermi_level_key=FERMI_LEVEL_KEY,
-        reference_potential=None,
         trajectory=TRAJECTORY,
         logfile=LOGFILE,
         loginterval=LOGINTERVAL,
