@@ -18,6 +18,7 @@ heads:
       counter_charge: counter_charge
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
+      vacuum_reservoir: vacuum_reservoir
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -66,8 +67,7 @@ compute_forces: true
 log_dir: logs
 results_dir: results
 model_dir: models
-# Fresh shared nonlinear energy; DFT energy is the only energy target.
-# WF is a checkpoint metric, not a loss.
+refit_fermi_readout: false
 train_schedule:
   0:
     name: stage1

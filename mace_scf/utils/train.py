@@ -222,16 +222,6 @@ class CheckpointHandler(NativeCheckpointHandler):
                                  + '. Resume with the original architecture, or start a fresh run. '
                                    'Resizing learned receivers after optimizer construction would leave stale Adam/EMA owners.')
         value, self._desmearing_migrated = _migrate_desmearing_checkpoint(value, state)
-        from mace_scf.electrostatics.coupled import migrate_chemical_reference
-        shift = migrate_chemical_reference(value['model'])
-        if shift is not None:
-            index = [name for name, _ in state.model.named_parameters()].index(
-                'field_dependent_charges_map.species_level')
-            for name in ('shadow_params', 'collected_params'):
-                parameters = (value.get('ema') or {}).get(name)
-                if parameters is not None:
-                    parameters[index] = parameters[index]+shift.to(parameters[index])
-            logging.info('Absorbed saved Fermi intercept into chemical levels; Adam and EMA retained')
         self.builder.load_checkpoint(state=state,checkpoint=value,strict=strict)
         if value.get('training_guard') is not None:
             state.optimizer._training_guard = value['training_guard']
@@ -367,8 +357,8 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             valid_err_log(valid_loss, metrics, logger, log_errors, epoch)
             if replay is not None:
                 replay_metrics = replay.evaluate(model, device, ema=ema)
-                logging.info('Replay validation epoch %d: RMSE_E/atom=%.3f meV, RMSE_F=%.3f meV/A',
-                    epoch, 1000*replay_metrics['rmse_e_per_atom'], 1000*replay_metrics['rmse_f'])
+                logging.info('Replay validation epoch %d: RMSE_E/atom=%.3f meV, RMSE_F=%.3f meV/A, relative F RMSE=%.2f%%',
+                    epoch, 1000*replay_metrics['rmse_e_per_atom'], 1000*replay_metrics['rmse_f'], replay_metrics['rel_rmse_f'])
                 if logger is not None:
                     logger.log({**replay_metrics, 'mode':'eval', 'split':'replay_valid', 'epoch':epoch,
                                 'metric_context':'replay_checkpoint_evaluation'})
@@ -869,6 +859,8 @@ def _evaluate(
     objective_sums = {}
     scalar_objectives = {}
     scalar_metrics = {}
+    wf_moments = []
+    paired_scalar_moments = []
     voltage_rows = []
     debug_stability = logging.getLogger().isEnabledFor(logging.DEBUG)
     force_outliers, residual_outliers, graph_offset = [], [], 0
@@ -937,6 +929,12 @@ def _evaluate(
                 use = weight>0
                 if bool((use & ~torch.isfinite(difference)).any()):
                     raise FloatingPointError('Nonfinite observed potential difference error')
+                wf_moments.append(torch.stack(((difference[use]*weight[use]).sum(),
+                                               (difference[use].square()*weight[use]).sum(), weight[use].sum())))
+                ef = (output['fermi_level']-batch.fermi_level)[use]
+                vac = (output['vacuum_potential']-target)[use]
+                paired_scalar_moments.append(torch.stack(((ef*weight[use]).sum(),
+                    (vac*weight[use]).sum(),(ef*vac*weight[use]).sum(),weight[use].sum())))
                 if debug_stability and bool(use.any()):
                     from graph_longrange.utils import FIELD_CONSTANT
                     cell = batch.cell.reshape(-1, 3, 3)
@@ -1176,20 +1174,35 @@ def _evaluate(
                         'fourier_total_potential':'esp_with_proto',
                         'vacuum_potential':'esp_vac', 'potential_difference':'wf_abs'}[key]
                 aux["rmse_"+name] = float((sums[0]/sums[1]).sqrt())
+    if wf_moments:
+        first, second, weight = torch.stack(wf_moments).sum(0)
+        if weight>0:
+            # One weighted offset over the WHOLE validation split, never a
+            # per-batch correction or a shift installed in the deployed model.
+            aux['wf_bias'] = float(first/weight)
+            aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
     for key, (square, weight) in smooth_errors.items():
         if weight > 0:
             aux[key] = float((square/weight).sqrt())
     for key, moments in scalar_metrics.items():
-        weight, _, second = moments
+        weight, first, second = moments
         if weight > 0:
             name = 'fermi_level' if key == 'fermi_level' else 'esp_vac'
             aux['rmse_'+name] = float((second/weight).sqrt())
+            aux['rmse_'+name+'_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
+            aux[name+'_bias'] = float(first/weight)
     aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
         aux["scf_residual_max"] = float(torch.stack(scf_residuals).max())
         if debug_stability:
             logging.debug('%s stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): '
                           'by force contribution=%s; by SCF residual=%s', split, force_outliers, residual_outliers)
+    if 'rmse_wf_rel' in aux:
+        ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
+        logging.debug('Validation voltage: centered (EF/e)/vacuum covariance=%.6g V^2, '
+                      'WF bias=%.6g eV, maximum SCF residual=%.6g',
+                      float(product/weight-ef*vac/weight.square()),
+                      aux.get('wf_bias',0.),aux.get('scf_residual_max',0.))
     if voltage_rows:
         _voltage_diagnostics(voltage_rows, split)
     return avg_loss, aux
@@ -1199,23 +1212,25 @@ def _voltage_diagnostics(rows, split):
     """Reuse evaluation residuals; no extra model call or fitted correction."""
     weight = np.array([row['weight'] for row in rows])
     error = np.array([row['wf_error'] for row in rows])
+    error -= np.average(error, weights=weight)
     contribution = weight*error**2
     largest = np.argsort(-contribution)[:5]
-    logging.debug('%s largest WF contributions (zero-based evaluation indices): %s', split,
+    logging.debug('%s largest relative WF contributions (zero-based evaluation indices): %s', split,
         [{'index':rows[i]['index'], 'WF_error_meV':float(1000*error[i]),
-          'WF_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
+          'relative_WF_SSE_fraction':float(contribution[i]/max(contribution.sum(),1.e-30)),
           'EF_error_meV':1000*rows[i]['ef_error'],
-          'vacuum_error_mV':1000*rows[i]['vacuum_error'],
-          'dipole_step_error_mV':1000*rows[i]['dipole_step_error']} for i in largest])
+          'vacuum_error_mV':1000*rows[i]['vacuum_error']} for i in largest])
     dipole = np.array([row['dipole_step_error'] for row in rows])
     use = np.isfinite(dipole)
     if np.count_nonzero(use)>1:
         w = weight[use]
-        rmse = np.sqrt(np.average(dipole[use]**2, weights=w))
-        logging.debug('%s polarization diagnostic: dipole-step RMSE=%.6g mV; '
-                      '4*pi*kappa*delta(D_normal)/area, '
+        x, y = dipole[use], error[use]
+        x, y = x-np.average(x,weights=w), y-np.average(y,weights=w)
+        xx, yy, xy = (np.average(value,weights=w) for value in (x*x,y*y,x*y))
+        logging.debug('%s polarization diagnostic: centered dipole-step RMSE=%.6g mV, '
+                      'correlation with WF residual=%.6g; 4*pi*kappa*delta(D_normal)/area, '
                       'observed slab components only, no prediction correction',
-                      split,1000*rmse)
+                      split,1000*np.sqrt(xx),xy/max(np.sqrt(xx*yy),1.e-30))
 
 
 def valid_err_log(
@@ -1237,16 +1252,16 @@ def valid_err_log(
                 value += '/'+fmt('rmse_rho_smooth')+'/'+fmt('rmse_rho_farfield_smooth')
             pieces.append(label+'='+value+' me/A^3')
         if 'rmse_fermi_level' in eval_metrics:
-            pieces.append('RMSE_EF='+fmt('rmse_fermi_level')+' meV')
+            pieces.append('RMSE_EF(abs/centered)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
         if 'rmse_esp' in eval_metrics:
             if 'rmse_esp_smooth' in eval_metrics:
                 pieces.append('RMSE_ESP(raw/smeared)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
             else:
                 pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:
-            pieces.append('RMSE_ESPvac='+fmt('rmse_esp_vac')+' mV')
+            pieces.append('RMSE_ESPvac(abs/centered)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
         if 'rmse_wf_abs' in eval_metrics:
-            pieces.append('RMSE_WF='+fmt('rmse_wf_abs')+' meV')
+            pieces.append('RMSE_WF(abs/centered)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
         logging.debug('50-step electronic residual maximum: %.5g', eval_metrics.get('scf_residual_max', float('nan')))
     eval_metrics["mode"] = "eval"

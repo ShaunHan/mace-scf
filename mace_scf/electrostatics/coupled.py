@@ -20,56 +20,6 @@ from e3nn import o3
 from .potential import SpectralGeometry, initialize_response, attach_observations
 from .molecular import enabled as molecular_enabled, moment_sum
 
-def migrate_chemical_reference(state, prefix=''):
-    """Absorb saved EF intercepts into the existing chemical-level parameters.
-
-    A uniform species-level translation leaves fixed-Q response invariant and
-    contributes -Q*shift to energy. No parameter is added or reordered, so Adam
-    moments remain valid; callers restoring EMA must translate its levels too.
-    """
-    response = prefix+'field_dependent_charges_map.'
-    if not state.get(response+'_extra_state', {}).get('energy_derivatives', False):
-        return None
-    offset_key, scalar_key = prefix+'fermi_level_offset', response+'scalar_reference'
-    if offset_key not in state and scalar_key not in state:
-        return None
-    level_key = response+'species_level'
-    levels = state[level_key]
-    offset = state.pop(offset_key, levels.new_zeros(()))
-    scalar = state.pop(scalar_key, levels.new_zeros(2))
-    shift = offset+scalar[0]-scalar[1]
-    state[level_key] = levels+shift.to(levels)
-    # Preserve a nonzero saved vacuum origin as shared reference work, rather
-    # than an observer-only correction. Fresh models have no such buffer.
-    if bool(scalar[1] != 0):
-        key = response+'vacuum_reference_offset'
-        state[key] = state.get(key, levels.new_zeros(()))+scalar[1].to(levels)
-    return shift
-
-
-@torch.no_grad()
-def absorb_chemical_reference(model):
-    """Apply the same exact translation to a newly built or unpickled model."""
-    response = getattr(model, 'field_dependent_charges_map', None)
-    if not getattr(response, 'coupled', False) or not getattr(response, 'energy_derivatives', False):
-        return
-    prefix = 'field_dependent_charges_map.'
-    state = {prefix+'_extra_state': {'energy_derivatives': True},
-             prefix+'species_level': response.species_level}
-    for owner, name, key in ((model, 'fermi_level_offset', 'fermi_level_offset'),
-                              (response, 'scalar_reference', prefix+'scalar_reference'),
-                              (response, 'vacuum_reference_offset', prefix+'vacuum_reference_offset')):
-        if hasattr(owner, name):
-            state[key] = getattr(owner, name)
-    if migrate_chemical_reference(state) is None:
-        return
-    response.species_level.copy_(state[prefix+'species_level'])
-    model._buffers.pop('fermi_level_offset', None)
-    response._buffers.pop('scalar_reference', None)
-    if prefix+'vacuum_reference_offset' in state:
-        response.register_buffer('vacuum_reference_offset', state[prefix+'vacuum_reference_offset'])
-
-
 def transport_difference(matrix, values):
     """Neighbor-minus-center differences, for either scalar or vector channels."""
     original = values.shape
@@ -1254,6 +1204,8 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
+        # Scalar references also contribute charge-linear work to the energy.
+        self.register_buffer('scalar_reference', torch.zeros(2))
         self.register_buffer('spectral_cutoff', torch.tensor(1.))
         self.register_buffer('deployment_steps', torch.tensor(50))
         self.register_buffer('deployment_mixing', torch.tensor(.5))
@@ -1324,13 +1276,7 @@ class CoupledResponse(AtomicPotentialResponse):
                 layer.in_features = self.field_channels
                 layer.weight = nn.Parameter(layer.weight.new_empty(layer.out_features, self.field_channels),
                                              requires_grad=layer.weight.requires_grad)
-        for name in ('scalar_reference', 'vacuum_reference_offset'):
-            key = prefix+name
-            if key in state_dict:
-                self.register_buffer(name, torch.empty_like(state_dict[key]))
-            else:
-                self._buffers.pop(name, None)
-        for name in ('vacuum_reference_integrals',):
+        for name in ('vacuum_reference_integrals', 'scalar_reference'):
             key = prefix+name
             if key not in state_dict:
                 state_dict[key] = torch.zeros_like(getattr(self, name))
@@ -1396,10 +1342,6 @@ class CoupledGeometry(SpectralGeometry):
             # the chosen vacuum plane and common to EF and vacuum.
             self.vacuum_reference = (self.attrs.sum(1)@r.vacuum_reference_integrals)/self.volume*self.slab
             proto = torch.zeros_like(proto)
-        self.vacuum_reference = self.vacuum_reference+getattr(r, 'vacuum_reference_offset', 0.)
-        if getattr(r, 'shared_nonlinear_energy', False):
-            from .nonlinear_energy import complete_counter_profile
-            complete_counter_profile(self, data)
         ramp = self.ramp(-self.slab_factor)
         zn = (self.pack(positions)*self.normal[:, None]).sum(-1)*self.present
         self.tensors = (co, si, self.wave, basis.real*active[..., None], basis.imag*active[..., None],
@@ -1745,8 +1687,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             dipole = torch.where(g.molecular.active[:, None], molecular_moments[:, 1:4], dipole)
         counter_energy = counter_source_energy(g, torch.view_as_complex(coarse.contiguous()), normal_dipole)
         electronic = periodic_energy+boundary_energy-(dipole*g.external).sum(-1)+counter_energy
-        if not energy_derivatives:
-            electronic = electronic-model.fermi_level_offset*charge
+        electronic = electronic-model.fermi_level_offset*charge
         if not getattr(model.coulomb_energy, 'include_self_interaction', True):
             self_terms = model.coulomb_energy.self_interaction_terms(density_coefficients)
             electronic = electronic-.5*g.pack((density_coefficients*self_terms).sum(-1)).sum(-1)
@@ -1754,10 +1695,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if energy_derivatives:
             target = charge_input.reshape(-1)
             counter = counter_input.reshape(-1)
-            # One chemical level, in the DFT potential reference, supplies the
-            # charging work. Differentiate its complete Q/R dependence.
-            common = (response[2]*response[5]).sum(-1)+g.vacuum_reference
+            # The former common-level observer now parameterizes chemical
+            # charging work. Its complete Q/R dependence is differentiated;
+            # the conditional charge-closure multiplier is not a Fermi level.
+            common = (response[2]*response[5]).sum(-1)
             local_electronic = local_electronic+.5*target.square()/response[3]-target*common
+            reference = r.scalar_reference
             # Keep the DFT gauge and prescribed-source work in the ONE energy.
             # The same scalar generates forces and both independent charge
             # derivatives. No observer-only EF correction is added afterwards.
@@ -1766,7 +1709,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             proto_reference = (-(g.attrs.sum(1)@r.proto_coefficients[:, 0])/g.volume*g.slab
                                if g.neutral_reference and bool(r.proto_fitted) else 0.)
             counter_reference = g.vacuum_reference-proto_reference
-            electronic = electronic-counter_reference*counter
+            electronic = (electronic-g.vacuum_reference*target-counter_reference*counter
+                          -reference[0]*target-reference[1]*counter)
         energy = local.energies.sum(-1)+electronic+local_electronic
         forces = stress = None
         charge_potential = counter_potential = None
@@ -1831,8 +1775,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             output = observe_smoothed_fields(g, state, output)
         if decoder is not None:
             output = decoder(g, state, output)
-        if not energy_derivatives:
-            output = apply_scalar_reference(output, r)
+        output = apply_scalar_reference(output, r)
         if bool(reservoir_mask.any()):
             # Raw DFT energy remains the ONLY energy label. For this boundary,
             # E_res = E_DFT + alpha*Q**2/2 is the sharp-plane reservoir energy.
@@ -1866,10 +1809,13 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
 
 
 def apply_scalar_reference(output, response):
-    """Read compatibility for independent-observer exports only.
+    """Map scalar observations to their saved training-label references.
 
-    Energy-derived models instead store their complete chemical level in the
-    charging energy and restore the same vacuum origin inside the geometry.
+    Spatial Fourier quantities retain their zero-mean convention. A calibrated
+    vacuum observation equals the model plane plus its scalar reference; the
+    latter is not a deformation-field coefficient. No force/energy or SCF state
+    changes for legacy models. For energy-derived models the EF reference has
+    already entered the energy; adding it again here would double count it.
     """
     reference = getattr(response, 'scalar_reference', None)
     if reference is not None:

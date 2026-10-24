@@ -75,11 +75,9 @@ class NVTPhiLangevin(NVTPhiMixin, Langevin):
 
     def step(self, forces=None):
         self._sync_total_charge()
-        if forces is None:
-            forces = self.atoms.get_forces(md=True)
-        # Explicit charge drift/noise uses the old state's voltage. Reuse its
-        # forces for the first kick, then evaluate the new R and Q together.
+        Langevin.step(self, forces)
+        self.atoms.get_potential_energy()
         self._update_counter_charge()
-        forces = Langevin.step(self, forces)
+        forces = self.atoms.get_forces(md=True)
         self._read_potential()
         return forces

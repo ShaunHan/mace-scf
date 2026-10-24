@@ -358,35 +358,16 @@ class FixedPointCore(torch.nn.Module):
             node_feats_irreps=hidden_irreps,
             num_interactions=num_interactions,
         )
-        from .coupled import absorb_chemical_reference
-        absorb_chemical_reference(self)
-
-    def __setstate__(self, state):
-        super().__setstate__(state)
-        from .coupled import absorb_chemical_reference
-        absorb_chemical_reference(self)
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        from .coupled import migrate_chemical_reference
-        migrate_chemical_reference(state_dict, prefix)
-        key = prefix+'fermi_level_offset'
-        if key in state_dict:
-            self.register_buffer('fermi_level_offset', torch.empty_like(state_dict[key]))
-        else:
-            self._buffers.pop('fermi_level_offset', None)
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                     missing_keys, unexpected_keys, error_msgs)
 
     # ------------------------------------------------------------------ #
     #  Core decomposed methods                                            #
     # ------------------------------------------------------------------ #
 
     def center_fermi_level(self, fermi_level: torch.Tensor) -> torch.Tensor:
-        return fermi_level - getattr(self, 'fermi_level_offset', 0.)
+        return fermi_level - self.fermi_level_offset
 
     def uncenter_fermi_level(self, centered_fermi_level: torch.Tensor) -> torch.Tensor:
-        return centered_fermi_level + getattr(self, 'fermi_level_offset', 0.)
+        return centered_fermi_level + self.fermi_level_offset
 
     def features_from_fermi_level(
         self,

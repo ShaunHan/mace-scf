@@ -1369,4 +1369,3 @@ class ManyBodyChargesFieldReadout(PostScfReadout):
 from .potential import VariationalResponse
 
 from .coupled import CoupledResponse
-from .nonlinear_energy import NonlinearEnergyResponse
