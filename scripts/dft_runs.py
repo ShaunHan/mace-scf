@@ -4,11 +4,13 @@ The Python local-potential plugin captures LOCPOT_proto from the initial
 atomic-density Hamiltonian, before adding the prescribed external potential.
 Requires a plugin-enabled VASP executable. No separate proto calculation.
 
-Counter-charge runs (a Gaussian sheet, counter_charge_<axis>frac, or a 3D
-Gaussian, counter_charge_center) always use the plug-in, including Q = 0, so
-every member of a charge scan shares one energy convention and mixing scheme.
-plugin_observables.npz then also stores <U>_cc; collect_vasp_data.py turns
-it into the cell-voltage label <U>_cc - E_F = dE/dQ.
+Every slab uses the same electronic settings. A nonzero counter charge (a
+Gaussian sheet, counter_charge_<axis>frac, or a 3D Gaussian,
+counter_charge_center) is added by the plug-in, which then also applies the
+slab dipole correction, since VASP's own correction needs a neutral cell.
+Neutral slabs use VASP's dipole correction. A placed source is recorded even
+at Q = 0, so collect_vasp_data.py labels every member of a charge scan with
+its cell voltage.
 """
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,16 +172,10 @@ def force_and_stress(constants, additions):
     p, slope, delta, _ = correction(constants)
     force = valence[:, None] * (q * grad_ion + slope * normal)
     additions.forces += force
-    # <U>_cc: zero-mean potential of electrons, point ions, the source and the
-    # sawtooth, averaged over the unit source. Then dE/dQ = <U>_cc - E_F.
-    hartree = np.asarray(constants.hartree_potential)
-    counter_potential = (volume * np.mean(rho_cc * hartree) + valence @ phi_ion
-                         - 2 * q * self_energy + slope * pcc)
     np.savez("plugin_observables.npz", electrode_dipole=p,
              callback_dipole=previous_p, nelect=float(np.asarray(constants.charge_density).mean()),
              plugin_profile=delta.mean(axis=tuple(j for j in range(3) if j != axis)),
              callback_plugin_profile=previous_delta.mean(axis=tuple(j for j in range(3) if j != axis)),
-             counter_potential=counter_potential,
              expected_forces=np.asarray(constants.forces) + force)
 '''
 
@@ -218,7 +214,7 @@ def configuration(atoms):
     meta = dict(schema="mace_volt_cdce_v2", slab_axis=axis, total_charge=charge,
                 counter_charge=qcc, counter_charge_center=center.tolist(),
                 counter_charge_width=float(info.get("counter_charge_width", 1.0)),
-                external_field=field.tolist(), plugin=source,
+                external_field=field.tolist(), plugin=bool(qcc),
                 config_type="slab" if slab else "bulk")
     if planes:
         key = planes[0][1]
@@ -253,7 +249,7 @@ def configuration(atoms):
         key = f"vacuum_{'xyz'[axis]}frac"
         if key in info:
             meta[key] = (float(info[key]) - origin) % 1.0
-    if meta['plugin'] and (not np.isfinite(meta['counter_charge_width']) or meta['counter_charge_width'] <= 0):
+    if source and (not np.isfinite(meta['counter_charge_width']) or meta['counter_charge_width'] <= 0):
         raise ValueError('The Gaussian width must be positive and finite')
     return meta
 
@@ -274,20 +270,23 @@ def make_vasp_calculator(atoms, directory, meta):
                             "wrt_potential": "hartree ionic"})
     axis = meta["slab_axis"]
     if axis is not None:
+        # One mixing scheme for every slab, charged or not. Kerker damping
+        # suppresses long-wavelength charge sloshing along the open axis;
+        # AMIN must be explicit, since its default would undo this damping.
         settings['kpts'][axis] = 1
-        normal = np.linalg.inv(atoms.cell.array)[:, axis]
-        normal /= np.linalg.norm(normal)
-        settings.update(ldipol=True, idipol=axis + 1, dipol=[0., 0., 0.],
-                        efield=-float(np.asarray(meta["external_field"]) @ normal))
-        settings["custom"]["lvacpotav"] = ".TRUE."
-    if meta["plugin"]:
-        # Kerker damping suppresses long-wavelength charge sloshing without
-        # making every local density update as small as straight AMIX=0.02.
-        # AMIN must be explicit; its default would undo this damping.
-        settings.update(ldipol=False, idipol=0, efield=0.,
-                        amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12)
-        settings["custom"].update({"plugins/force_and_stress": ".TRUE.",
-                                   "lvacpotav": ".FALSE."})
+        settings.update(amix=0.1, bmix=1.0, amin=0.001, nelmdl=-12)
+        if meta["plugin"]:
+            # VASP's dipole correction needs a neutral cell; the plug-in
+            # applies it together with the counter charge.
+            settings.update(ldipol=False, idipol=0, efield=0.)
+            settings["custom"].update({"plugins/force_and_stress": ".TRUE.",
+                                       "lvacpotav": ".FALSE."})
+        else:
+            normal = np.linalg.inv(atoms.cell.array)[:, axis]
+            normal /= np.linalg.norm(normal)
+            settings.update(ldipol=True, idipol=axis + 1, dipol=[0., 0., 0.],
+                            efield=-float(np.asarray(meta["external_field"]) @ normal))
+            settings["custom"]["lvacpotav"] = ".TRUE."
     calc = Vasp(**settings)
     calc.initialize(atoms)
     neutral = float(calc.default_nelect_from_ppp())
@@ -354,9 +353,6 @@ def diagnose(atoms, outdir, meta):
             report['removed_force_drift_eV_A'] = difference.mean(0).tolist()
             report['nonuniform_force_difference_max_eV_A'] = float(np.max(abs(difference-difference.mean(0))))
             meta['forces_file'] = 'plugin_observables.npz'
-            if 'counter_potential' in obs:
-                # Energy-conjugate cell voltage: dE/dQ on Q_cc = -Q is <U>_cc - E_F.
-                meta['cell_voltage'] = report['cell_voltage_V'] = float(obs['counter_potential'])-fermi
     report['max_force_eV_A'] = float(np.linalg.norm(atoms.get_forces(apply_constraint=False),axis=1).max())
     # Keep OSZICAR residuals alongside the density diagnostics. A tiny dE alone
     # does not establish a stationary electronic state (especially ALGO=All).

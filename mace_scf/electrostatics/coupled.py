@@ -1227,11 +1227,10 @@ class CoupledResponse(AtomicPotentialResponse):
         # One DFT energy supplies forces and EF by differentiation. The raw
         # vacuum ESP then supplies WF; counter transfer has its own derivative.
         self.energy_reference = 'dft'
-        # The scalar vacuum observer sees the multipole field and the exact
-        # boundary/source terms only; the zero-moment short-range completion
-        # is absent from mu, so letting it shift the vacuum would decouple WF
-        # from the energy. Older exports keep their 'complete' observer.
-        self.vacuum_observer = 'multipole'
+        # The scalar vacuum observer uses the complete learned deformation
+        # potential. 'multipole' (patch-1 checkpoints only) drops its
+        # short-range completion; it trained the dipole worse.
+        self.vacuum_observer = 'complete'
 
     def get_extra_state(self):
         return {'deployment_mode': self.deployment_mode,
@@ -1844,9 +1843,9 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     from .potential import initialize_vacuum_reference
     from .desmearing import configure_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    # The frozen neutral-atom reference and independent vacuum labels are raw.
-    # A field-loss reference must not silently change either physical observer.
-    initialize_response(model, loader, device, apply_potential_smearing=False)
+    # The neutral-atom reference is the POTCAR (install_neutral_atom_reference),
+    # not a band-limited refit of its proto potential; vacuum labels are raw.
+    initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=False)
     initialize_vacuum_reference(model, loader, device,
         apply_potential_smearing=False)
     r = model.field_dependent_charges_map

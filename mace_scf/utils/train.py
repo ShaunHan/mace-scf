@@ -1180,7 +1180,6 @@ def _evaluate(
             # One weighted offset over the WHOLE validation split, never a
             # per-batch correction or a shift installed in the deployed model.
             aux['wf_bias'] = float(first/weight)
-            aux['rmse_wf_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
     for key, (square, weight) in smooth_errors.items():
         if weight > 0:
             aux[key] = float((square/weight).sqrt())
@@ -1189,7 +1188,6 @@ def _evaluate(
         if weight > 0:
             name = {'fermi_level': 'fermi_level', 'vacuum_potential': 'esp_vac'}.get(key, key)
             aux['rmse_'+name] = float((second/weight).sqrt())
-            aux['rmse_'+name+'_rel'] = float((second/weight-(first/weight).square()).clamp_min(0.).sqrt())
             aux[name+'_bias'] = float(first/weight)
     aux['esp_vacuum_enabled'] = bool(loss_fn.loss_weights.get('vacuum_potential', 0.))
     if scf_residuals:
@@ -1197,7 +1195,7 @@ def _evaluate(
         if debug_stability:
             logging.debug('%s stability outliers (zero-based evaluation order; force SSE in eV^2/A^2): '
                           'by force contribution=%s; by SCF residual=%s', split, force_outliers, residual_outliers)
-    if 'rmse_wf_rel' in aux:
+    if 'wf_bias' in aux:
         ef, vac, product, weight = torch.stack(paired_scalar_moments).sum(0)
         logging.debug('Validation voltage: centered (EF/e)/vacuum covariance=%.6g V^2, '
                       'WF bias=%.6g eV, maximum SCF residual=%.6g',
@@ -1252,16 +1250,16 @@ def valid_err_log(
                 value += '/'+fmt('rmse_rho_smooth')+'/'+fmt('rmse_rho_farfield_smooth')
             pieces.append(label+'='+value+' me/A^3')
         if 'rmse_fermi_level' in eval_metrics:
-            pieces.append('RMSE_EF(abs/centered)='+fmt('rmse_fermi_level')+'/'+fmt('rmse_fermi_level_rel')+' meV')
+            pieces.append('RMSE_EF='+fmt('rmse_fermi_level')+' meV')
         if 'rmse_esp' in eval_metrics:
             if 'rmse_esp_smooth' in eval_metrics:
                 pieces.append('RMSE_ESP(raw/smeared)='+fmt('rmse_esp')+'/'+fmt('rmse_esp_smooth')+' mV')
             else:
                 pieces.append('RMSE_ESP='+fmt('rmse_esp')+' mV')
         if 'rmse_esp_vac' in eval_metrics:
-            pieces.append('RMSE_ESPvac(abs/centered)='+fmt('rmse_esp_vac')+'/'+fmt('rmse_esp_vac_rel')+' mV')
+            pieces.append('RMSE_ESPvac='+fmt('rmse_esp_vac')+' mV')
         if 'rmse_wf_abs' in eval_metrics:
-            pieces.append('RMSE_WF(abs/centered)='+fmt('rmse_wf_abs')+'/'+fmt('rmse_wf_rel')+' meV')
+            pieces.append('RMSE_WF='+fmt('rmse_wf_abs')+' meV')
         if 'rmse_cell_voltage' in eval_metrics:
             pieces.append('RMSE_V='+fmt('rmse_cell_voltage')+' mV')
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))

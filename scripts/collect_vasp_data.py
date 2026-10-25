@@ -29,8 +29,11 @@ OUT_XYZ = BASE_PATH / "combined_VASP_shifted_superraw.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train_superraw.xyz"
 OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid_superraw.xyz"
 
-# Plug-in runs carry their controls in dft_metadata.json (scripts/dft_runs.py).
+# Presence only: these files mark a charged plug-in run. scripts/dft_runs.py
+# also writes dft_metadata.json, which records a placed counter charge, Q = 0 included.
 PLUGIN_FILES = ("vasp_plugin.py", "plugin_observables.npz", "plugin_scf.csv")
+COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
+                         "counter_charge_zfrac")
 
 
 def get_output_dirs():
@@ -128,7 +131,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
     """Cache unsmoothed Fourier grids; widths and vacuum sampling remain editable."""
     names = ["fourier_density"] if DENSITY_SIGMAS else []
     if POTENTIAL_SIGMAS:
-        names += ["fourier_potential", "proto_fourier_potential"]
+        names += ["fourier_potential"]
         if axis is not None:
             names += ["planar_potential"]
     if plugin:
@@ -164,10 +167,14 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         if not parameters["lvhar"]:
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
         potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
-        proto_dir = PROTO_BASE_PATH / outdir.relative_to(BASE_PATH)
-        proto_path = proto_dir / "LOCPOT"
+        # The in-run proto is VASP's first ICHARG=2 density, the neutral-atom
+        # superposition for every charge state. A separate proto run is only a
+        # fallback for old neutral outputs; it would carry a charged run's NELECT.
+        proto_path = outdir / "LOCPOT_proto"
         if not proto_path.is_file():
-            proto_path = outdir / "LOCPOT_proto"
+            if plugin:
+                raise ValueError(f"Charged plug-in run without its in-run LOCPOT_proto: {outdir}")
+            proto_path = PROTO_BASE_PATH / outdir.relative_to(BASE_PATH) / "LOCPOT"
         proto = read_grid(proto_path, atoms, Locpot)
         if potential.shape != proto.shape:
             raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
@@ -175,7 +182,6 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
             data["planar_potential"] = potential.mean(axis=tuple(i for i in range(3) if i != axis))
         potential -= proto  # No mean subtraction; retain the potential zero mode.
         data["fourier_potential"] = truncate_fft(np.fft.fftn(potential), shape)
-        data["proto_fourier_potential"] = truncate_fft(np.fft.fftn(proto), shape)
     temporary = path.with_suffix(".tmp")
     with h5py.File(temporary, "w") as handle:
         handle.attrs["k_cutoff"] = K_CUTOFF
@@ -213,12 +219,12 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     atoms.info[f"{prefix}_fftn_shifted"] = target
 
 
-def add_vacuum_target(atoms, planar, axis, correction, fraction=None):
+def add_vacuum_target(atoms, planar, axis, correction):
     key = f"vacuum_{'xyz'[axis]}frac"
     if VACUUM_PLANE and set(VACUUM_PLANE) != {key}:
         raise ValueError(f"For this VASP IDIPOL, specify only {key}")
-    if VACUUM_PLANE or fraction is not None:
-        fraction = float(VACUUM_PLANE.get(key, fraction))
+    if VACUUM_PLANE:
+        fraction = float(VACUUM_PLANE[key])
     else:
         distances = (correction - atoms.get_scaled_positions()[:, axis]) % 1.0
         fraction = (correction - 0.5 * np.min(distances[distances > 1e-8])) % 1.0
@@ -233,32 +239,29 @@ def add_vacuum_target(atoms, planar, axis, correction, fraction=None):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
-def cell_voltage(outdir, atoms, meta, fermi):
-    """<U>_cc - E_F of a plug-in run, i.e. dE/dQ on Q_cc = -Q.
+def cell_voltage(outdir, meta, fermi):
+    """Fermi level measured from the potential at the counter charge, <U>_cc - E_F.
 
-    New runs store <U>_cc; older ones are reconstructed with the same plug-in
-    code from the final CHGCAR and the saved Hartree grid.
+    This is the DFT dE/dQ for moving charge Q from the counter charge to the
+    slab. U is LOCPOT, which holds whichever dipole correction and source field
+    the run used, with the pseudopotential ions replaced by point valence ions
+    as in the plug-in energy. A constant shift of U also shifts E_F and cancels.
     """
-    with np.load(outdir / "plugin_observables.npz") as obs:
-        if "counter_potential" in obs:
-            return float(obs["counter_potential"]) - fermi
     from dft_runs import PLUGIN
     namespace = {"C": dict(meta)}
     exec(PLUGIN, namespace)
     ions = read(str(outdir / "POSCAR"))
     outcar = Outcar(str(outdir / "OUTCAR"))
     outcar.read_pseudo_zval()
+    potential = read_grid(outdir / "LOCPOT", ions, Locpot)
     with h5py.File(outdir / "vaspout.h5", "r") as handle:
-        hartree = handle["results/potential/hartree"][0].transpose(2, 1, 0)
+        potential -= handle["results/potential/ionic"][0].transpose(2, 1, 0)
     c = SimpleNamespace(lattice_vectors=ions.cell.array, positions=ions.get_scaled_positions(),
-                        charge_density=read_grid(outdir / "CHGCAR", ions, Chgcar), ion_types=np.arange(len(ions)),
-                        NELECT=float(meta["nelect"]), ZVAL=np.array([outcar.zval_dict[s] for s in ions.symbols]),
-                        hartree_potential=hartree, forces=np.zeros((len(ions), 3)))
-    _, normal, volume, ramp, rho_cc, _, pcc, self_energy, _, phi_ion, _, valence = namespace["geometry"](c)
-    _, slope, _, _ = namespace["correction"](c)
-    potential = (volume * np.mean(rho_cc * hartree) + valence @ phi_ion
-                 - 2 * namespace["C"]["counter_charge"] * self_energy + slope * pcc)
-    return float(potential) - fermi
+                        charge_density=potential,  # geometry() reads only the grid shape
+                        ion_types=np.arange(len(ions)), NELECT=float(meta["nelect"]),
+                        ZVAL=np.array([outcar.zval_dict[s] for s in ions.symbols]))
+    _, _, volume, _, unit, _, _, _, _, point_ions, _, valence = namespace["geometry"](c)
+    return float(volume * np.mean(unit * potential) + valence @ point_ions) - fermi
 
 
 def collect_job(outdir):
@@ -283,7 +286,8 @@ def collect_job(outdir):
     converged = "EDIFF is reached" in text.rsplit("Iteration", 1)[-1]
 
     plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
-    meta = json.loads((outdir / "dft_metadata.json").read_text()) if plugin else {}
+    path = outdir / "dft_metadata.json"
+    meta = json.loads(path.read_text()) if path.is_file() else {}
     counter = -charge if plugin else 0.0
     slab = plugin or bool(parameters["ldipol"])
     axis = meta["slab_axis"] if plugin else (int(parameters["idipol"]) - 1 if slab else None)
@@ -329,12 +333,14 @@ def collect_job(outdir):
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
+    places = [key for key in COUNTER_CHARGE_PLACES if key in meta]
+    if places:
+        # The Gaussian counter charge as placed, also at Q = 0.
+        atoms.info["counter_charge_width"] = float(meta["counter_charge_width"])
+        for key in places:
+            atoms.info[key] = np.asarray(meta[key], dtype=float) if key.endswith("center") else float(meta[key])
+        atoms.info["cell_voltage"] = cell_voltage(outdir, meta, fermi)
     if plugin:
-        # The Gaussian source of every plug-in run, also at Q = 0, as written.
-        for key in ("counter_charge_width", "counter_charge_center", *[f"counter_charge_{a}frac" for a in "xyz"]):
-            if key in meta:
-                atoms.info[key] = np.asarray(meta[key]) if key.endswith("center") else float(meta[key])
-        atoms.info["cell_voltage"] = cell_voltage(outdir, atoms, meta, fermi)
         # The plug-in implements forces, but not its stress derivative.
         atoms.info["config_stress_weight"] = 0.
         atoms.info["config_virials_weight"] = 0.
@@ -353,10 +359,8 @@ def collect_job(outdir):
         add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
     if POTENTIAL_SIGMAS:
         if slab:
-            add_vacuum_target(atoms, data["planar_potential"], axis, correction,
-                              meta.get(f"vacuum_{'xyz'[axis]}frac"))
+            add_vacuum_target(atoms, data["planar_potential"], axis, correction)
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
-        add_fourier_targets(atoms, data["proto_fourier_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 

@@ -805,7 +805,7 @@ def attach_observations(data, geom, output):
 
 
 @torch.no_grad()
-def initialize_response(model, loader, device, apply_potential_smearing=False):
+def initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=True):
     """Fit only training-set feature scales and frozen proto form factors."""
     from mace.tools import torch_geometric
     loader = torch_geometric.dataloader.DataLoader(loader.dataset,
@@ -828,7 +828,7 @@ def initialize_response(model, loader, device, apply_potential_smearing=False):
             norms += local.all_layer_feats.square().sum(0)
             count += len(local.positions)
             norm_graphs += len(data["ptr"])-1
-        if not bool((data.get("fourier_proto_potential_weight", torch.zeros(1, device=device))>0).any()):
+        if not fit_proto or not bool((data.get("fourier_proto_potential_weight", torch.zeros(1, device=device))>0).any()):
             continue
         geom = SpectralGeometry(model, data, data["positions"])
         target = _target_fft(data, "fourier_proto_potential", "fourier_proto_potential_shape", geom.shape, data["positions"].dtype)
