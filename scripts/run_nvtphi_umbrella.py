@@ -1,21 +1,3 @@
-"""Umbrella sampling of one O-O distance at constant electrode potential (NVT-Phi, MACE-VOLT).
-
-Each run starts from one frame of ATOMS_FILE. Only the atoms are read; frame info is ignored,
-and every plane follows from the geometry of that frame:
-  counter charge  a Gaussian sheet SHEET_HEIGHT A above the highest Ir-bound O, inside the
-                  water, starting at Q = Q_cc = 0; the thermopotentiostat then sets Q,
-  dipole cut      the middle of the vacuum gap; the work function is read halfway between
-                  the water surface and the cut,
-  restraints      atoms within FIXED_DEPTH A of the slab bottom are fixed, and every mobile
-                  O feels a one-sided wall WALL_GAP A above the highest O.
-The studied pair is OXYGEN_PAIRS[index] if given, else an O2 already in the frame
-(O-O < O2_BOND), else the closest exposed, singly Ir-bound O (at most one H) and free O.
-Window centers lie on one grid from R_MIN to R_MAX and are visited away from the starting
-distance: upwards from a bonded O2 (cleavage), downwards otherwise (formation). The initial
-stage equilibrates the water and aligns V* to TARGET_U_SHE; V* is then frozen for all
-windows. Interrupted runs continue from their last record. Analyze the output folders
-with analyze_nvtphi_umbrella.py.
-"""
 import csv
 import hashlib
 import json
@@ -35,13 +17,13 @@ from ase.io.trajectory import Trajectory
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 
 # ------------------------------ user settings ------------------------------ #
-ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_water8A.xyz'
-MODEL_FILE = 'models/fit_0_best_wf.model'
+ATOMS_FILE = 'IrO2OH_110_mdinit_0_51.xyz'
+MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_209/models/fit_0_best_wf.model'
 NEUTRAL_ATOM_FILE = None    # Collected xyz with neutral_atom_* tables; only for a model without them.
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
-RUN_INDEXES = None          # None: every frame that already holds an O2; or a list of frame indexes.
+RUN_INDEXES = list(range(0, 10))                # A list of frame indexes.
 OXYGEN_PAIRS = {}           # Optional {index: (O_id, O_id)}, zero-based ASE indexes.
-MAX_WORKERS, REPLICAS = 8, 1                    # Workers share one visible GPU.
+MAX_WORKERS, REPLICAS = len(RUN_INDEXES), 1                    # Workers share one visible GPU.
 DEVICE, HEAD, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', None, True, 50
 TARGET_U_SHE = 1.60                             # V vs SHE: <WF> = 4.44 eV + e U*.
 SHE_OFFSET = None                               # <WF - eV> in V from an earlier run; None aligns online.
@@ -51,9 +33,9 @@ FIXED_DEPTH, WALL_GAP, WALL_K = 6.5, 3.0, 10.0  # A, A, eV/A^2.
 O2_BOND, PAIR_CUTOFF = 1.60, 3.00               # A: an existing O2; partner search in other frames.
 R_MIN, R_MAX, WINDOW_SPACING = 1.20, 3.00, 0.10  # A: one grid of window centers.
 UMBRELLA_K = 20.0                               # eV/A^2: thermal width 0.036 A at 300 K.
-INITIAL_EQUIL_STEPS = 10000                     # 5 ps: equilibrates the added water, aligns V*.
+INITIAL_EQUIL_STEPS = 3000                      # 1.5 ps: equilibrates the added water, aligns V*.
 ALIGNMENT_CONSTANT_FS = 1000.0                  # Memory of the online <WF - eV> average.
-EQUIL_STEPS, SAMPLE_STEPS = 1000, 4000          # 0.5 ps + 2 ps per window.
+EQUIL_STEPS, SAMPLE_STEPS = 500, 1000           # 0.25 ps + 0.5 ps per window.
 RETURN_SWEEP = False                            # Sweep back afterwards to check hysteresis.
 TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300.0, 0.5, 0.01
 LOGINTERVAL, SEED = 20, 7777                    # 10 fs records; each record is a restart point.
@@ -435,7 +417,7 @@ def main():
         if o2_pairs(atoms, mobile):
             with_o2.append(index)
     print(f'Frames that already hold an O2: {with_o2}', flush=True)
-    indexes = with_o2 if RUN_INDEXES is None else list(RUN_INDEXES)
+    indexes = list(RUN_INDEXES)
     if not indexes or len(set(indexes)) != len(indexes) or not set(indexes) <= set(range(len(frames))):
         raise ValueError('RUN_INDEXES must list distinct frames of ATOMS_FILE')
     for index in indexes:

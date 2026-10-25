@@ -24,12 +24,12 @@ VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
-HDF_NAME = "superraw_fourier_data.hdf"
+HDF_NAME = "fourier_data.hdf"
 FORM_FACTOR_SPACING, FORM_FACTOR_END = 0.05, 30.0  # Neutral-atom table grid, inverse Angstrom.
 
-OUT_XYZ = BASE_PATH / "combined_VASP_shifted_superraw.xyz"
-OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train_superraw.xyz"
-OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid_superraw.xyz"
+OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
+OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
+OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 
 # Presence only: these files mark a charged plug-in run. scripts/dft_runs.py
 # also writes dft_metadata.json, which records a placed counter charge, Q = 0 included.
