@@ -20,7 +20,6 @@ import logging
 import math
 from math import pi
 from functools import lru_cache
-from pathlib import Path
 from typing import Dict, Optional, Sequence
 
 import numpy as np
@@ -144,52 +143,28 @@ def radial_basis(k2, cutoff, knots=64):
 FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM, TAIL = .01, 40., 36.
 
 
-def read_potcar(path):
-    """{symbol: (Z_val, q, n(q))}: the POTCAR atomic pseudo densities in k-space."""
-    lines = Path(path).read_text(errors='replace').splitlines()
-    datasets, symbol, zval, qmax = {}, None, None, None
-    for i, line in enumerate(lines):
-        if 'VRHFIN' in line:
-            symbol = line.split('=')[1].split(':')[0].strip()
-        elif 'ZVAL' in line and 'POMASS' in line:
-            zval = float(line.split('ZVAL')[1].split('=')[1].split()[0])
-        elif line.strip() == 'local part':
-            qmax = float(lines[i+1].split()[0])
-        elif line.strip() == 'atomic pseudo charge-density':
-            values, j = [], i+1
-            while len(values) < 1000:
-                values += [float(x) for x in lines[j].split()]
-                j += 1
-            if not np.isclose(values[0], zval, rtol=0, atol=1.e-6):
-                raise ValueError(f'POTCAR {symbol}: atomic density integrates to {values[0]}, not ZVAL')
-            datasets[symbol] = (zval, np.arange(1000)*qmax/1000, np.asarray(values[:1000]))
-    if not datasets:
-        raise ValueError(f'No PAW datasets in {path}')
-    return datasets
+def install_neutral_atom_reference(response, reference, atomic_numbers):
+    """Interpolate the data's neutral-atom form factors onto the model grid.
 
-
-def install_neutral_atom_reference(response, potcar, atomic_numbers):
-    """Store f_s(q) = (n_s(q)-Z_s)/q^2 for point-nucleus neutral atoms.
-
-    Fixed physics, no parameters: it only enters counter-charge energies, so
-    neutral predictions are unchanged. Interpolating f rather than n keeps
-    the long-wavelength limit -Z<r^2>/6 exact.
+    reference is {Z: (dq, f(q))} from neutral_atom_reference, which the DFT
+    collection script writes into every frame. It is fixed physics without
+    parameters and enters only counter-charge energies, so neutral
+    predictions are unchanged. Elements without a table keep a zero row, and
+    a placed counter charge refuses frames that contain them. Interpolating
+    f rather than the density keeps the limit f(0) = -Z<r^2>/6 exact.
     """
-    from ase.data import chemical_symbols
     from scipy.interpolate import CubicSpline
-    datasets = read_potcar(potcar)
     grid = np.arange(0., FORM_FACTOR_MAXIMUM+.5*FORM_FACTOR_SPACING, FORM_FACTOR_SPACING)
-    rows = []
-    for z in atomic_numbers:
-        zval, q, density = datasets[next(key for key in datasets
-                                         if key.split('_')[0] == chemical_symbols[int(z)])]
-        f = np.empty_like(q)
-        f[1:] = (density[1:]-zval)/q[1:]**2
-        f[0] = np.polyval(np.polyfit(q[1:7]**2, f[1:7], 2), 0.)
-        rows.append(np.where(grid <= q[-1], CubicSpline(q, f)(np.minimum(grid, q[-1])), 0.))
-    table = torch.as_tensor(np.stack(rows)).to(response.source_widths)
-    for name, value in (('neutral_atom_form_factors', table),
-                        ('neutral_atom_fitted', torch.tensor(True, device=table.device))):
+    table = np.zeros((len(atomic_numbers), len(grid)))
+    for row, z in enumerate(atomic_numbers):
+        if int(z) in reference:
+            spacing, values = reference[int(z)]
+            q = spacing*np.arange(len(values))
+            inside = grid <= q[-1]
+            table[row, inside] = CubicSpline(q, values)(grid[inside])
+    table = torch.as_tensor(table).to(response.source_widths)
+    installed = torch.tensor(bool((table[:, 0] != 0).any()), device=table.device)
+    for name, value in (('neutral_atom_form_factors', table), ('neutral_atom_fitted', installed)):
         response._buffers[name] = value
     return response
 
@@ -217,9 +192,10 @@ class CounterCharge:
         -Q_cc <U_atoms>_g + E_self + (K/2V) p^2 - (E_app.n) p,
 
     with p = Q_cc m the source moment on the zero-mean slab sawtooth and
-    U_atoms the zero-mean periodic potential of POINT valence nuclei and
-    their atomic pseudo densities, as in the VASP-Python plug-in. These terms
-    are summed to full bandwidth. density and potential are the model-grid
+    U_atoms the zero-mean periodic potential of the neutral atoms as the DFT
+    counter charge sees them, from the data's form factors (point valence
+    nuclei plus atomic pseudo densities for the VASP-Python plug-in). These
+    terms are summed to full bandwidth. density and potential are the model-grid
     source and its field (periodic part plus slab boundary term).
     """
 
@@ -256,15 +232,22 @@ class CounterCharge:
         # Every placed source, also at Q_cc = 0: the linear term gives dE/dQ_cc.
         for i in torch.nonzero(present).flatten().tolist():
             if table is None or not bool(getattr(g.response, 'neutral_atom_fitted', False)):
-                raise ValueError('A placed counter charge needs the POTCAR neutral-atom reference: set '
-                                 'neutral_atom_potcar for training, or POTCAR in the NVT-Phi drivers')
+                raise ValueError('A placed counter charge needs neutral-atom form factors. Train on frames '
+                                 'that carry them (scripts/collect_vasp_data.py writes neutral_atom_* into '
+                                 'every frame), or install them from such a frame')
             sigma = float(width[i])
+            atoms = data['batch'] == i
+            rows = table[species[atoms].unique()]
+            covered = FORM_FACTOR_SPACING*(rows.shape[-1]-1-(rows != 0).flip(-1).int().argmax(-1))
+            if bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any()):
+                raise ValueError('The neutral-atom form factors miss an element of this frame or end below '
+                                 f'the {math.sqrt(2*TAIL)/sigma:.3g} 1/Angstrom that a {sigma:.3g} Angstrom '
+                                 'counter charge needs')
             waves = source_waves(g, i, sigma, bool(sheet[i]))
             k2 = waves.square().sum(-1)
             # Self energy (K Q^2/2V) sum_k exp(-s^2 k^2)/k^2, summed over +/-k pairs.
             energy[i] = FIELD_CONSTANT*self.charge[i].square()/g.volume[i]*(torch.exp(-sigma**2*k2)/k2).sum()
             # -Q <U_atoms>_g = -(2KQ/V) sum_k exp(-s^2 k^2/2) sum_j f_j(k) cos k.(R_j-c)
-            atoms = data['batch'] == i
             coordinate = (k2.sqrt()/FORM_FACTOR_SPACING).clamp_max(table.shape[-1]-1.001)
             left = coordinate.long()
             form = (table[:, left]*(left+1-coordinate)+table[:, left+1]*(coordinate-left))[species[atoms]]

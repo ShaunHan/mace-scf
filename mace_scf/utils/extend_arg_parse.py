@@ -43,7 +43,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--refit_fermi_readout', type=strict_str2bool, default=False,
                         help='Retired option; must remain false. Train energy, forces and EF jointly.')
     parser.add_argument('--neutral_atom_potcar', type=str, default=None,
-                        help='POTCAR of the DFT labels: point-nucleus neutral-atom reference for counter charges')
+                        help='Retired option; must remain unset. Neutral-atom form factors come with the data.')
     parser.add_argument("--amsgrad", type=strict_str2bool, nargs="?", const=True,
                         default=True, help="Use the AMSGrad optimizer variant")
     for action in parser._actions:

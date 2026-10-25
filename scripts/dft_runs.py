@@ -9,8 +9,7 @@ Gaussian sheet, counter_charge_<axis>frac, or a 3D Gaussian,
 counter_charge_center) is added by the plug-in, which then also applies the
 slab dipole correction, since VASP's own correction needs a neutral cell.
 Neutral slabs use VASP's dipole correction. A placed source is recorded even
-at Q = 0, so collect_vasp_data.py labels every member of a charge scan with
-its cell voltage.
+at Q = 0, so every member of a charge scan shares one counter-charge geometry.
 """
 from pathlib import Path
 from types import SimpleNamespace

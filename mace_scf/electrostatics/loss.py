@@ -435,17 +435,11 @@ class WeightedWorkFunction(WeightedScalarLoss):
     key = 'work_function'
 
 
-class WeightedCellVoltage(WeightedScalarLoss):
-    """<U>_cc - E_F of counter-charge DFT data, the potentiostat's variable."""
-    key = 'cell_voltage'
-
-
 _LOSS_FUNCTIONS = {
     "fourier_density": WeightedFourierDensity,
     "fourier_potential": WeightedFourierPotential,
     "vacuum_potential": WeightedVacuumPotential,
     "work_function": WeightedWorkFunction,
-    "cell_voltage": WeightedCellVoltage,
     "energy_per_atom": weighted_mean_squared_error_energy,
     "forces": mean_squared_error_forces,
     "stress": weighted_mean_squared_stress,
@@ -480,6 +474,10 @@ class WeightedLoss(torch.nn.Module):
         self.definition = {name: deepcopy(value) if isinstance(value, dict) else {'weight': value}
                            for name, value in weights_and_options.items()}
         for name, options in weights_and_options.items():
+            if name == 'cell_voltage':
+                raise ValueError('cell_voltage is no longer a training target: NVT-Phi uses the cell voltage '
+                                 'as the energy derivative dE/dQ along Q_cc = -Q, which needs no label. '
+                                 'Remove cell_voltage from the loss.')
             if not name in _LOSS_FUNCTIONS:
                 raise ValueError(f"requested `{name}` in loss, which is not recognised")
             if isinstance(options, (int, float)):
@@ -520,8 +518,10 @@ class WeightedLoss(torch.nn.Module):
         must re-evaluate that checkpoint on the current objective instead.
         """
         definition = deepcopy(definition)
+        if 'cell_voltage' in definition:
+            return None
         for name, options in definition.items():
-            if name in ('fermi_level', 'vacuum_potential', 'work_function', 'cell_voltage') and (
+            if name in ('fermi_level', 'vacuum_potential', 'work_function') and (
                     not isinstance(options, dict) or not (
                         options.get('objective') == 'absolute_mse'
                         or options.get('relative') is False)):
@@ -530,7 +530,7 @@ class WeightedLoss(torch.nn.Module):
                 if options.get('relative', False) or 'mean_weight' in options:
                     return None
                 options.pop('relative', None)
-                if name in ('fermi_level', 'vacuum_potential', 'work_function', 'cell_voltage'):
+                if name in ('fermi_level', 'vacuum_potential', 'work_function'):
                     options.pop('objective', None)
         return cls(definition)
         

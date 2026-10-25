@@ -32,6 +32,44 @@ COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charg
                        "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
 COUNTER_CHARGE_FIELDS = ("counter_charge", "counter_charge_center", "counter_charge_width",
                          "counter_charge_axis", "counter_charge_fraction")
+NEUTRAL_ATOM_KEYS = ("neutral_atom_numbers", "neutral_atom_q_spacing", "neutral_atom_form_factors")
+
+
+def neutral_atom_reference(records):
+    """{Z: (dq, f(q))} from frame metadata, the same in every frame that has it.
+
+    f_Z(q) = -rho_Z(q)/q^2 in Angstrom^2 on q = 0, dq, 2dq, ... (inverse
+    Angstrom), where rho_Z(q) is the Fourier transform of the charge density of
+    an isolated neutral atom as the DFT counter charge couples to it, so that
+    f_Z(0) = -Z<r^2>/6. The collection script of each DFT code writes these
+    tables into every frame; the model only interpolates them. records are
+    dict-like frame metadata, Configuration.properties or ase.Atoms.info.
+    """
+    reference = {}
+    for properties in records:
+        numbers = properties.get("neutral_atom_numbers")
+        if numbers is None:
+            continue
+        numbers = np.atleast_1d(np.asarray(numbers)).astype(int)
+        spacing = properties.get("neutral_atom_q_spacing")
+        values = properties.get("neutral_atom_form_factors")
+        if spacing is None or values is None:
+            raise ValueError("Neutral-atom form factors need neutral_atom_numbers, neutral_atom_q_spacing "
+                             "and neutral_atom_form_factors together")
+        spacing, values = float(spacing), np.asarray(values, dtype=float).reshape(-1)
+        if (not np.isfinite(spacing) or spacing <= 0. or values.size % len(numbers)
+                or not np.isfinite(values).all()):
+            raise ValueError("Invalid neutral-atom form-factor table")
+        values = values.reshape(len(numbers), -1)
+        if values.shape[1] < 4 or not (values[:, 0] < 0.).all():
+            raise ValueError("A neutral-atom form factor must start at f(0) = -Z<r^2>/6 < 0")
+        for z, row in zip(numbers.tolist(), values):
+            known = reference.setdefault(z, (spacing, row))
+            if known[0] != spacing or known[1].shape != row.shape or not np.allclose(
+                    known[1], row, rtol=1.e-6, atol=1.e-9):
+                raise ValueError(f"Neutral-atom form factors of Z={z} differ between frames: "
+                                 "the data mix different pseudopotentials")
+    return reference
 
 
 def counter_charge_data(properties, pbc=None):
@@ -156,7 +194,6 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
         "potcar_match_key",
         "vacuum_potential_weight_key",
-        "cell_voltage_key",
         *[f"{key}_key" for key in COUNTER_CHARGE_KEYS],
     ]
     arrays = [
@@ -202,8 +239,6 @@ class ExtAtomicData(AtomicData):
     fourier_proto_potential_weight: torch.Tensor
     vacuum_potential: torch.Tensor
     vacuum_potential_weight: torch.Tensor
-    cell_voltage: torch.Tensor
-    cell_voltage_weight: torch.Tensor
     vacuum_fraction: torch.Tensor
     dipole_correction_fraction: torch.Tensor
     potcar_match: torch.Tensor
@@ -269,8 +304,6 @@ class ExtAtomicData(AtomicData):
         fourier_proto_potential_weight = kwargs.pop("fourier_proto_potential_weight", None)
         vacuum_potential = kwargs.pop("vacuum_potential", None)
         vacuum_potential_weight = kwargs.pop("vacuum_potential_weight", None)
-        cell_voltage = kwargs.pop("cell_voltage", None)
-        cell_voltage_weight = kwargs.pop("cell_voltage_weight", None)
         vacuum_fraction = kwargs.pop("vacuum_fraction", None)
         dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
         potcar_match = kwargs.pop("potcar_match", None)
@@ -335,8 +368,6 @@ class ExtAtomicData(AtomicData):
             "fourier_proto_potential_weight": fourier_proto_potential_weight,
             "vacuum_potential": vacuum_potential,
             "vacuum_potential_weight": vacuum_potential_weight,
-            "cell_voltage": cell_voltage,
-            "cell_voltage_weight": cell_voltage_weight,
             "vacuum_fraction": vacuum_fraction,
             "dipole_correction_fraction": dipole_correction_fraction,
             "potcar_match": potcar_match,
@@ -572,12 +603,6 @@ class ExtAtomicData(AtomicData):
         vacuum_potential_weight = torch.tensor(
             vacuum_potential_weight_value, dtype=torch.get_default_dtype()
         )
-        # DFT <U>_cc - E_F of a counter-charge run: the energy-conjugate cell voltage.
-        cell_voltage_value = config.properties.get("cell_voltage")
-        cell_voltage = torch.tensor(0.0 if cell_voltage_value is None else cell_voltage_value,
-                                    dtype=torch.get_default_dtype())
-        cell_voltage_weight = torch.tensor(config.property_weights.get(
-            "cell_voltage", float(cell_voltage_value is not None)), dtype=torch.get_default_dtype())
         vacuum_fraction = torch.tensor(
             plane_fraction(config.properties, "vacuum", pbc), dtype=torch.get_default_dtype())
         dipole_correction_fraction = torch.tensor(
@@ -593,7 +618,6 @@ class ExtAtomicData(AtomicData):
             ("fourier_potential", fourier_potential_weight),
             ("fourier_proto_potential", fourier_proto_potential_weight),
             ("vacuum_potential", vacuum_potential_weight),
-            ("cell_voltage", cell_voltage_weight),
         ):
             if not torch.isfinite(property_weight) or property_weight.item() < 0.0:
                 raise ValueError(
@@ -672,8 +696,6 @@ class ExtAtomicData(AtomicData):
             fourier_proto_potential_weight=fourier_proto_potential_weight,
             vacuum_potential=vacuum_potential,
             vacuum_potential_weight=vacuum_potential_weight,
-            cell_voltage=cell_voltage,
-            cell_voltage_weight=cell_voltage_weight,
             vacuum_fraction=vacuum_fraction,
             dipole_correction_fraction=dipole_correction_fraction,
             potcar_match=potcar_match,

@@ -17,7 +17,6 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "models/fit_0_best_wf.model"
-POTCAR = None                 # POTCAR of the DFT labels; None if the model already holds it.
 TARGET_U_SHE = 1.60           # V vs SHE: imposes <WF> = 4.44 eV + 1.60 eV.
 SHE_OFFSET = None             # <Delta> in V from a previous run; None aligns it online.
 ALIGNMENT_FS = 1000.0         # Alignment period of <Delta>, then V* is frozen.
@@ -133,16 +132,24 @@ def main() -> None:
     for path in (ATOMS_FILE, MODEL_FILE):
         if not Path(path).is_file():
             raise FileNotFoundError(path)
-    model_file = MODEL_FILE
-    if POTCAR is not None:
+    model_file, frame = MODEL_FILE, read(ATOMS_FILE, index=-1)
+    model = torch.load(MODEL_FILE, map_location="cpu", weights_only=False)
+    if not bool(getattr(model.field_dependent_charges_map, "neutral_atom_fitted", False)):
+        # A model trained before the form factors travelled with the data
+        # takes them from the starting frame, if that frame carries them.
+        from mace_scf.data.new_atomic_data import neutral_atom_reference
         from mace_scf.electrostatics.potential import install_neutral_atom_reference
-        model = torch.load(MODEL_FILE, map_location="cpu", weights_only=False)
-        install_neutral_atom_reference(model.field_dependent_charges_map, POTCAR,
+        reference = neutral_atom_reference([frame.info])
+        if not reference:
+            raise ValueError(f"{MODEL_FILE} has no neutral-atom form factors and {ATOMS_FILE} carries none; "
+                             "start from a frame collected by scripts/collect_vasp_data.py")
+        install_neutral_atom_reference(model.field_dependent_charges_map, reference,
                                        [int(z) for z in model.atomic_numbers])
         model_file = str(Path(MODEL_FILE).with_suffix(".counter.model"))
         torch.save(model, model_file)
+    del model
     rng = np.random.default_rng(SEED)
-    atoms = prepare_frame(read(ATOMS_FILE, index=-1))
+    atoms = prepare_frame(frame)
     atoms.calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype="float64",
                                    constant_potential=True, scf_options={"num_scf_steps": SCF_STEPS},
                                    ignore_nonconverged=True)

@@ -1204,8 +1204,8 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
-        # POTCAR neutral-atom form factors (n_s(q)-Z_s)/q^2 for counter-charge
-        # energies; fixed physics installed by install_neutral_atom_reference.
+        # Neutral-atom form factors f_s(q) = -rho_s(q)/q^2 for counter-charge
+        # energies, fixed physics from the data (install_neutral_atom_reference).
         from .potential import FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM
         nq = int(round(FORM_FACTOR_MAXIMUM/FORM_FACTOR_SPACING))+1
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, nq))
@@ -1767,7 +1767,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
         if energy_derivatives:
             # cell_voltage = dE/dQ on the neutral transfer path Q_cc = -Q:
             # the electrode Fermi level measured from the potential at the
-            # counter charge. It is the conjugate of Q in NVT-Phi dynamics.
+            # counter charge, the conjugate of Q in NVT-Phi dynamics. It is a
+            # derivative of the trained energy, never a training label.
             output.update(charge_potential=charge_potential,
                           counter_charge_potential=counter_potential,
                           cell_voltage=charge_potential-counter_potential)
@@ -1843,8 +1844,9 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     from .potential import initialize_vacuum_reference
     from .desmearing import configure_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    # The neutral-atom reference is the POTCAR (install_neutral_atom_reference),
-    # not a band-limited refit of its proto potential; vacuum labels are raw.
+    # Counter charges use the data's exact neutral-atom form factors
+    # (install_neutral_atom_reference), not a band-limited refit of a proto
+    # potential; vacuum labels are raw.
     initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=False)
     initialize_vacuum_reference(model, loader, device,
         apply_potential_smearing=False)

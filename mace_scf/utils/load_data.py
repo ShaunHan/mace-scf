@@ -209,6 +209,20 @@ def load_train_valid_sets_from_xyz(args: argparse.Namespace,  config_type_weight
         max_volume_per_atom=args.low_density_pbc_max_volume_per_atom,
         allow_low_density_pbc=args.allow_low_density_pbc,
     )
+    # Neutral-atom form factors travel with the data. Every element of a frame
+    # that places a counter charge needs one, also at zero counter charge.
+    from mace_scf.data.new_atomic_data import counter_charge_data, neutral_atom_reference
+    configs = [config for split in (collections.train, collections.valid) for config in split]
+    args.neutral_atom_reference = neutral_atom_reference(config.properties for config in configs)
+    placed = {int(z) for config in configs
+              if float(counter_charge_data(config.properties, config.pbc)["counter_charge_width"]) > 0.
+              for z in config.atomic_numbers}
+    missing = sorted(placed-set(args.neutral_atom_reference))
+    if missing:
+        raise ValueError(f"Frames with a placed counter charge contain elements {missing} without "
+                         "neutral-atom form factors; collect the data with scripts/collect_vasp_data.py")
+    if args.neutral_atom_reference:
+        logging.info("Neutral-atom form factors from the data for Z = %s", sorted(args.neutral_atom_reference))
 
     # Atomic number table
     z_table = tools.get_atomic_number_table_from_zs(

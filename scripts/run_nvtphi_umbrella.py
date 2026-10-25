@@ -20,7 +20,6 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_51_vasp_sp.xyz'
 MODEL_FILE = 'models/fit_0_best_wf.model'
-POTCAR = None                               # POTCAR of the DFT labels, if the model lacks its form factors.
 RUN_INDEXES = list(range(0, 10))
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
 MAX_WORKERS, REPLICAS = 10, 1                 # Workers share one visible GPU.
@@ -462,16 +461,24 @@ def main():
         print(f'{index}: pair {atoms.info["oxygen_pair"]}, {[e["kind"] for e in envs]}, '
               f'{n} eligible; {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps/replica', flush=True)
     model = Path(MODEL_FILE).resolve(strict=True)
-    if POTCAR is not None:  # Written once, so restarts see the same model hash.
+    import torch
+    network = torch.load(model, map_location='cpu', weights_only=False)
+    if not bool(getattr(network.field_dependent_charges_map, 'neutral_atom_fitted', False)):
+        # A model trained before the form factors travelled with the data takes
+        # them from the source frames, written once so restarts see one hash.
         counter = model.with_suffix('.counter.model')
-        if not counter.exists():
-            import torch
+        if not counter.exists() or counter.stat().st_mtime < model.stat().st_mtime:
+            from mace_scf.data.new_atomic_data import neutral_atom_reference
             from mace_scf.electrostatics.potential import install_neutral_atom_reference
-            network = torch.load(model, map_location='cpu', weights_only=False)
-            install_neutral_atom_reference(network.field_dependent_charges_map, POTCAR,
+            reference = neutral_atom_reference(frames[index].info for index in RUN_INDEXES)
+            if not reference:
+                raise ValueError(f'{MODEL_FILE} has no neutral-atom form factors and the source frames '
+                                 'carry none; use frames collected by scripts/collect_vasp_data.py')
+            install_neutral_atom_reference(network.field_dependent_charges_map, reference,
                                            [int(z) for z in network.atomic_numbers])
             torch.save(network, counter)
         model = counter
+    del network
     hasher = hashlib.sha256()
     with model.open('rb') as f:
         for chunk in iter(lambda:f.read(4*1024*1024), b''):
