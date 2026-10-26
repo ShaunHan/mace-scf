@@ -271,17 +271,17 @@ def vacuum_observation_weight(ref):
 
 
 class WeightedFourierDensity(torch.nn.Module):
-    """Density at the Gaussian resolution of the model (smeared) or of the far field (farfield)."""
+    """Raw density, or density at the Gaussian resolution of the model (smeared) or of the far field."""
     def __init__(self, reference='smeared'):
         super().__init__()
-        if reference not in ('smeared', 'farfield'):
-            raise ValueError('fourier_density reference must be smeared or farfield')
-        self.reference = reference
+        keys = {'raw': 'fourier_density', 'smeared': 'smooth_fourier_density', 'farfield': 'fourier_farfield_density'}
+        if reference not in keys:
+            raise ValueError('fourier_density reference must be raw, smeared or farfield')
+        self.reference, self.key = reference, keys[reference]
 
     def forward(self, ref, pred):
-        key = 'fourier_farfield_density' if self.reference == 'farfield' else 'fourier_density'
         weights = ref.weight*ref.fourier_density_weight
-        return (spectral_errors(ref, pred, key)/1.e-6*weights).sum()/weights.sum().clamp_min(1.e-30)
+        return (spectral_errors(ref, pred, self.key)/1.e-6*weights).sum()/weights.sum().clamp_min(1.e-30)
 
 
 class WeightedFourierPotential(torch.nn.Module):

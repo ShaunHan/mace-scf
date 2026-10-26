@@ -601,12 +601,14 @@ def valid_err_log(
     epoch,
 ):
     if log_errors == "ElectrostaticRMSE" or "rmse_wf_abs" in eval_metrics or "rmse_rho" in eval_metrics:
-        fields = (('rmse_e_per_atom', 'RMSE_E_per_atom', 'meV'), ('rmse_f', 'RMSE_F', 'meV/A'),
-                  ('rmse_mu_per_atom', 'RMSE_dip_per_atom', 'meA'), ('rmse_rho', 'RMSE_rho', 'me/A^3'),
-                  ('rmse_rho_farfield', 'RMSE_rho_farfield', 'me/A^3'), ('rmse_fermi_level', 'RMSE_EF', 'meV'),
-                  ('rmse_esp', 'RMSE_ESP', 'mV'), ('rmse_esp_smooth', 'RMSE_ESP_smooth', 'mV'),
-                  ('rmse_esp_vac', 'RMSE_ESPvac', 'mV'), ('rmse_wf_abs', 'RMSE_WF', 'meV'))
-        pieces = [f"{label}={1000*eval_metrics[key]:.4f} {unit}" for key, label, unit in fields if key in eval_metrics]
+        fields = ((('rmse_e_per_atom',), 'RMSE_E_per_atom', 'meV'), (('rmse_f',), 'RMSE_F', 'meV/A'),
+                  (('rmse_mu_per_atom',), 'RMSE_dip_per_atom', 'meA'),
+                  (('rmse_rho', 'rmse_rho_smooth', 'rmse_rho_farfield_smooth'), 'RMSE_rho(raw/smeared/farfield)',
+                   'me/A^3'), (('rmse_fermi_level',), 'RMSE_EF', 'meV'),
+                  (('rmse_esp', 'rmse_esp_smooth'), 'RMSE_ESP(raw/smeared)', 'mV'),
+                  (('rmse_esp_vac',), 'RMSE_ESPvac', 'mV'), (('rmse_wf_abs',), 'RMSE_WF', 'meV'))
+        pieces = [f"{label}={'/'.join(f'{1000*eval_metrics[key]:.4f}' for key in keys)} {unit}"
+                  for keys, label, unit in fields if all(key in eval_metrics for key in keys)]
         logging.info("Epoch %d: loss=%.6g, %s", epoch, valid_loss, ', '.join(pieces))
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch

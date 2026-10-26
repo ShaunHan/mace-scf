@@ -10,9 +10,11 @@ import torch
 from mace_scf.electrostatics.loss import WeightedWorkFunction, spectral_errors
 
 
-FIELD_ERRORS = (("rmse_rho", "fourier_density"), ("rmse_rho_farfield", "fourier_farfield_density"),
-                ("rmse_esp", "fourier_potential"), ("rmse_esp_smooth", "smooth_fourier_potential"))
-RMSE_KEYS = ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", *[key for key, _ in FIELD_ERRORS], "rmse_wf_abs")
+FIELD_ERRORS = (("rmse_rho", "fourier_density"), ("rmse_esp", "fourier_potential"),
+                ("rmse_rho_smooth", "smooth_fourier_density"), ("rmse_rho_farfield_smooth", "fourier_farfield_density"),
+                ("rmse_esp_smooth", "smooth_fourier_potential"))
+RMSE_KEYS = ("rmse_e_per_atom", "rmse_f", "rmse_mu_per_atom", "rmse_rho", "rmse_esp", "rmse_wf_abs",
+             "rmse_rho_smooth", "rmse_rho_farfield_smooth", "rmse_esp_smooth")
 
 
 @torch.no_grad()

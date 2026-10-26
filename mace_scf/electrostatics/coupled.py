@@ -757,9 +757,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         if compute_stress:
             stress = torch.zeros_like(strain) if derivatives[-1] is None else derivatives[-1]/g.volume[:, None, None]
 
-    # The raw potential undoes the Gaussian smoothing sigma of the learned field,
-    # smooth = raw exp(-sigma^2 k^2/2); the prescribed sawtooth enters the vacuum
-    # level exactly. Labels are attached at the resolution of each prediction.
+    # Raw fields undo the Gaussian smoothing of the learned ones, smooth = raw exp(-sigma^2 k^2/2):
+    # sigma is the density width for the density and the amplitude width for the potential.
+    # The prescribed sawtooth enters the vacuum level exactly. Labels are attached at the
+    # resolution of each prediction.
+    sharpen = torch.exp(.5*r.density_width**2*g.k2)[..., None]
     smoothing = torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)
     learned = torch.view_as_complex((carrier+regular).contiguous())
     boundary = (g.external*g.normal).sum(-1)-g.slab_factor*(normal_dipole+g.counter_moment)
@@ -774,7 +776,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
               'fermi_level': fermi_level, 'vacuum_potential': vacuum, 'work_function': vacuum-fermi_level,
               'potential_reference': g.vacuum_reference, 'charge_potential': charge_potential,
               'counter_charge_potential': counter_potential, 'cell_voltage': charge_potential-counter_potential,
-              'fourier_density': coarse*g.ngrid, 'fourier_farfield_density': coarse*farfield*g.ngrid,
+              'fourier_density': coarse*sharpen*g.ngrid, 'smooth_fourier_density': coarse*g.ngrid,
+              'fourier_farfield_density': coarse*farfield*g.ngrid,
               'fourier_potential': torch.view_as_real(raw+g.ramp(boundary, width=0.))*g.ngrid,
               'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smoothing)*g.ngrid,
               'k_vectors': g.wave, 'k_vectors_mask': g.mask,
@@ -787,8 +790,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     output['she_offset'] = output['work_function']-output['cell_voltage']
     attach_labels(data, g, output)
     if 'fourier_density_dft' in output:
-        output['fourier_density_dft'] = output['fourier_density_dft']*torch.exp(-.5*r.density_width**2*g.k2)[..., None]
-        output['fourier_farfield_density_dft'] = output['fourier_density_dft']*farfield
+        output['smooth_fourier_density_dft'] = output['fourier_density_dft']/sharpen
+        output['fourier_farfield_density_dft'] = output['smooth_fourier_density_dft']*farfield
     if 'fourier_potential_dft' in output:
         output['smooth_fourier_potential_dft'] = output['fourier_potential_dft']*smoothing[..., None]
     with torch.no_grad():
