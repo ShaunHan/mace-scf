@@ -7,7 +7,9 @@ voltage V = dE/dQ (one electronic evaluation per step). U_SHE = <WF>/e - 4.44 V
 with WF on the solution side; V* = 4.44 V + U* - <Delta> is aligned during the
 first ALIGNMENT_FS and then frozen (Delta = WF - eV contains no Fermi level).
 Only the geometry is needed: the calculator places the sheet, the dipole cut and
-the vacuum plane once, unless the starting frame gives them.
+the vacuum plane once, unless the starting frame gives them. A model without
+neutral atoms fits them from the frame's proto_fourier_potential and
+neutral_atom_alpha, which scripts/collect_vasp_data.py writes.
 """
 from pathlib import Path
 
@@ -80,11 +82,12 @@ def main() -> None:
         if not Path(path).is_file():
             raise FileNotFoundError(path)
     rng = np.random.default_rng(SEED)
-    atoms = prepare_frame(read(ATOMS_FILE, index=-1))
+    source = read(ATOMS_FILE, index=-1)
+    atoms = prepare_frame(source)
     atoms.calc = MACEFixedPointSCF(model_path=MODEL_FILE, device=DEVICE, default_dtype="float64",
                                    constant_potential=True, scf_options={"num_scf_steps": SCF_STEPS},
                                    ignore_nonconverged=True, counter_charge_height=SHEET_HEIGHT,
-                                   counter_charge_width=SHEET_WIDTH)
+                                   counter_charge_width=SHEET_WIDTH, neutral_atoms=source)
     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=rng)
     Stationary(atoms)
     ZeroRotation(atoms)

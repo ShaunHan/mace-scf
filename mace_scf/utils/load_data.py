@@ -209,17 +209,24 @@ def load_train_valid_sets_from_xyz(args: argparse.Namespace,  config_type_weight
         max_volume_per_atom=args.low_density_pbc_max_volume_per_atom,
         allow_low_density_pbc=args.allow_low_density_pbc,
     )
-    # A counter charge overlaps the built-in neutral atoms of every element of its frame.
+    # Neutral atoms of the DFT counter charge, from the frames' proto modes and PSCENC.
     from mace_scf.data.new_atomic_data import counter_charge_data
-    from mace_scf.electrostatics.potential import NEUTRAL_ATOMS
+    from mace_scf.electrostatics.potential import NEUTRAL_ATOM_KEYS, fit_neutral_atoms
     configs = [config for split in (collections.train, collections.valid) for config in split]
+    args.neutral_atoms, report = fit_neutral_atoms(
+        [(config.cell, config.positions, config.atomic_numbers, config.properties) for config in collections.train])
+    logging.info(report)
     placed = {int(z) for config in configs
               if float(counter_charge_data(config.properties, config.pbc)["counter_charge_width"]) > 0.
               for z in config.atomic_numbers}
-    missing = sorted(placed-set(NEUTRAL_ATOMS))
+    missing = sorted(placed-set(args.neutral_atoms))
     if missing:
-        raise ValueError(f"Frames with a placed counter charge contain elements {missing}; add their valence "
-                         "charge and cloud width to potential.NEUTRAL_ATOMS")
+        raise ValueError(f"Frames with a placed counter charge contain elements {missing} without neutral atoms; "
+                         "collect them with scripts/collect_vasp_data.py, which keeps proto_fourier_potential "
+                         "and PSCENC")
+    for config in configs+[config for _, test in collections.tests for config in test]:
+        for key in NEUTRAL_ATOM_KEYS:
+            config.properties.pop(key, None)  # Used once; the model stores the fitted atoms.
 
     # Atomic number table
     z_table = tools.get_atomic_number_table_from_zs(

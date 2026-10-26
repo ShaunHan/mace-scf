@@ -180,14 +180,17 @@ class MACEFixedPointSCF(Calculator):
         counter_charge_width: float = 1.0,
         counter_charge_height: float = 6.0,
         constant_potential: bool = False,
+        neutral_atoms=None,
         **kwargs,
     ):
         """With constant_potential=True the calculator needs only the geometry: on the
         first call on a slab it stores in atoms.info the dipole cut, the vacuum plane
         and a Gaussian counter-charge sheet of width counter_charge_width,
         counter_charge_height above the electrode surface (reservoir.slab_controls),
-        unless atoms.info gives them, and they stay fixed for the trajectory. Models
-        without neutral-atom form factors get the built-in neutral atoms."""
+        unless atoms.info gives them, and they stay fixed for the trajectory. A model
+        without neutral atoms fits them from neutral_atoms (collected frames) or on
+        the first call from atoms.info: proto_fourier_potential with vasp_pscenc or
+        neutral_atom_alpha, as scripts/collect_vasp_data.py writes them."""
         kwargs.pop("enable_cueq", None)  # backbone acceleration is a training-time choice
         Calculator.__init__(self, **kwargs)
         if verbose:
@@ -218,10 +221,7 @@ class MACEFixedPointSCF(Calculator):
             raise ValueError('Constant-potential MD requires a model trained with DFT energy and derivative-based EF, '
                              'fixed-charge SCF and eV/Angstrom units')
         self.constant_potential = bool(constant_potential)
-        if response is not None and not bool(getattr(response, 'neutral_atom_fitted', True)):
-            # Built-in neutral atoms: counter charges need no POTCAR or form-factor file.
-            from mace_scf.electrostatics.potential import install_neutral_atoms
-            install_neutral_atoms(response, [int(z) for z in self.model.atomic_numbers])
+        self._install_neutral_atoms(neutral_atoms)
         if getattr(response, "spectral", False):
             from dataclasses import replace
             if scf_options is None or "num_scf_steps" not in scf_options:
@@ -655,6 +655,19 @@ class MACEFixedPointSCF(Calculator):
                     changes.append(key)
         return changes
 
+    def _install_neutral_atoms(self, images):
+        """Fit the DFT neutral atoms from frames with proto_fourier_potential, unless the model has them."""
+        response = getattr(self.model, "field_dependent_charges_map", None)
+        if images is None or response is None or bool(getattr(response, "neutral_atom_fitted", True)):
+            return
+        images = [images] if hasattr(images, "numbers") else list(images)
+        if not any(a.info.get("proto_fourier_potential") is not None for a in images):
+            return
+        from mace_scf.electrostatics.potential import fit_neutral_atoms, install_neutral_atoms
+        rows, report = fit_neutral_atoms([(a.cell.array, a.positions, a.numbers, a.info) for a in images])
+        install_neutral_atoms(response, [int(z) for z in self.model.atomic_numbers], rows)
+        print(report, flush=True)
+
     def _place_slab_controls(self, atoms):
         """Fix the dipole cut, vacuum plane and counter-charge sheet of a slab once, from its geometry."""
         info = atoms.info
@@ -675,6 +688,7 @@ class MACEFixedPointSCF(Calculator):
         info.setdefault("counter_charge_width", controls["counter_charge_width"])
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        self._install_neutral_atoms(atoms)
         if atoms is not None and self.constant_potential and tuple(bool(p) for p in atoms.pbc) == (True, True, False):
             self._place_slab_controls(atoms)
         Calculator.calculate(self, atoms, system_changes=system_changes)

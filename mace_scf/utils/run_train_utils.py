@@ -242,9 +242,9 @@ def build_model(
         model = model.to(args.device)
         if getattr(response, 'coupled', False):
             from mace_scf.utils.foundation import condition_readouts
-            # The built-in neutral atoms that counter charges overlap.
+            # The DFT neutral atoms that counter charges overlap, fitted in load_data.
             from mace_scf.electrostatics.potential import install_neutral_atoms
-            install_neutral_atoms(response, model.atomic_numbers.tolist())
+            install_neutral_atoms(response, model.atomic_numbers.tolist(), getattr(args, 'neutral_atoms', None) or {})
             if getattr(args, 'restart_latest', False):
                 # Initialization needs the frozen observer, but must not refit
                 # an already saved map before the main checkpoint load.

@@ -182,9 +182,13 @@ def main() -> None:
         info_keys=head_dict.get("info_keys", {}),
         arrays_keys=head_dict.get("arrays_keys", {}),
     )
+    # Counter charges use neutral atoms fitted from every frame's proto modes and PSCENC.
+    from mace_scf.electrostatics.potential import NEUTRAL_ATOM_KEYS
+    args.key_specification.update(info_keys={
+        key: args.key_specification.info_keys.get(key, key) for key in NEUTRAL_ATOM_KEYS})
     if getattr(args, 'neutral_atom_potcar', None):
-        raise ValueError('neutral_atom_potcar is retired: counter charges use the built-in neutral atoms. '
-                         'Delete it from the configuration.')
+        raise ValueError('neutral_atom_potcar is retired: counter charges use neutral atoms fitted from '
+                         'proto_fourier_potential and PSCENC. Delete it from the configuration.')
     logging.info("Using the key specifications to parse data:")
     logging.info(args.key_specification)
 

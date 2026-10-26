@@ -190,7 +190,7 @@ def make_stages(distance):
     return stages
 
 
-def make_calculator(model_file):
+def make_calculator(model_file, source):
     import torch
     from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
     torch.set_num_threads(1)
@@ -198,7 +198,7 @@ def make_calculator(model_file):
                    initial_fermi_level='zero', **({} if SCF_STEPS is None else dict(num_scf_steps=int(SCF_STEPS))))
     calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64', pbc_handling='slab',
                              scf_options=options, scf_restart=False, ignore_nonconverged=True, use_compile=False,
-                             counter_charge_width=GAUSSIAN_WIDTH, constant_potential=True)
+                             counter_charge_width=GAUSSIAN_WIDTH, constant_potential=True, neutral_atoms=source)
     heads = list(getattr(calc.model, 'heads', [calc.head]))
     head = HEAD or (heads[0] if len(heads) == 1 else next((h for h in heads if h.lower() == 'default'), None))
     if head not in heads:
@@ -273,7 +273,7 @@ def simulate(source, index, replica, model_file, model_sha, directory):
                                 proton_ensemble='Fixed atom counts; pH is not imposed by this driver.'))
     physical = restraints(atoms, fixed, wall)
     atoms.set_constraint(physical)
-    atoms.calc = make_calculator(model_file)
+    atoms.calc = make_calculator(model_file, source)
     if state is None:
         MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, force_temp=True, rng=rng)
         if CHECK_CHARGE_RESPONSE:
@@ -380,7 +380,7 @@ def run_one(source, index, replica, model_file, model_sha, directory):
 
 
 def prepared_model():
-    """The model file to run and its hash; the calculator supplies any missing neutral atoms."""
+    """The model file to run and its hash; a model without neutral atoms fits them from its source frame."""
     model = Path(MODEL_FILE).resolve(strict=True)
     hasher = hashlib.sha256()
     with model.open('rb') as f:

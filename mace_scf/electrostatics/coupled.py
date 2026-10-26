@@ -1205,7 +1205,7 @@ class CoupledResponse(AtomicPotentialResponse):
         self.register_buffer('proto_fitted', torch.tensor(False))
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         # Neutral-atom form factors f_s(q) = -rho_s(q)/q^2 for counter-charge
-        # energies, fixed physics of the built-in atoms (install_neutral_atoms).
+        # energies, fixed physics of the DFT neutral atoms (fit_neutral_atoms).
         from .potential import FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM
         nq = int(round(FORM_FACTOR_MAXIMUM/FORM_FACTOR_SPACING))+1
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, nq))
@@ -1844,9 +1844,9 @@ def initialize_coupled(model, loader, device, options=None, loss_config=None):
     from .potential import initialize_vacuum_reference
     from .desmearing import configure_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    # Counter charges use the built-in neutral-atom form factors
-    # (install_neutral_atoms), not a band-limited refit of a proto
-    # potential; vacuum labels are raw.
+    # Counter charges use the DFT neutral atoms of load_data
+    # (fit_neutral_atoms), not this band-limited proto refit; vacuum
+    # labels are raw.
     initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=False)
     initialize_vacuum_reference(model, loader, device,
         apply_potential_smearing=False)
