@@ -1,4 +1,3 @@
-# v371: independent physical observations; reference-free 50-step validation.
 heads:
   default:
     arrays_keys:
@@ -33,7 +32,6 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
   type: CoupledResponse
-  potential_widths: '[]'
 batch_size: 4
 valid_batch_size: 4
 lr: 0.001

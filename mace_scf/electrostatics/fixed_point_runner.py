@@ -101,15 +101,12 @@ class FixedPointSCFRunner:
         For custom initial values, call local_part/converge/build_observables
         directly instead.
         """
-        if getattr(model.field_dependent_charges_map, "spectral", False):
-            from .potential import evaluate_electronic
-            steps = self.scf_options.num_scf_steps if num_scf_steps is None else num_scf_steps
-            return evaluate_electronic(
-                model, data, steps=steps, training=training, compute_force=compute_force,
-                constant_charge=self.scf_options.constant_charge,
-                compute_stress=compute_stress or compute_virials,
+        if getattr(model.field_dependent_charges_map, "coupled", False):
+            from .coupled import evaluate_coupled
+            return evaluate_coupled(
+                model, data, steps=self.scf_options.num_scf_steps if num_scf_steps is None else num_scf_steps,
+                training=training, compute_force=compute_force, compute_stress=compute_stress or compute_virials,
                 mixing=self.scf_options.mixing_parameter,
-                tolerance=self.scf_options.scf_tolerance,
             )
 
         local_state = model.local_part(

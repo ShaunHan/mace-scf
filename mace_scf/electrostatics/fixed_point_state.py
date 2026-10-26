@@ -46,4 +46,3 @@ class FixedPointTrainingOptions:
     scf: Optional[FixedPointSCFOptions] = None
     linear_solve: str = "inverse"
     fixedpoint_scf_stability: bool = False
-    reference_conditioning: str = "none"

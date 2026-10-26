@@ -309,8 +309,7 @@ class FixedPointCore(torch.nn.Module):
             num_elements=num_elements,
             field_norm_factor=field_norm_factor,
             atom_density_scaling=atom_density_scaling,
-            **({"density_width": atomic_multipoles_smearing_width, "field_widths": field_feature_widths,
-                "include_local_energy": add_local_electron_energy}
+            **({"density_width": atomic_multipoles_smearing_width, "field_widths": field_feature_widths}
                if getattr(lr_source_cls, "coupled", False) else {}),
             **fixed_point_update_config,
         )
@@ -401,10 +400,9 @@ class FixedPointCore(torch.nn.Module):
         compute_force: bool = False,
     ) -> LocalState:
         """Run the MACE backbone and prepare all SCF-independent state."""
-        if not getattr(self.field_dependent_charges_map, "spectral", False):
-            for key in ("counter_charge_width", "molecular_correction"):
-                if key in data and bool((data[key] > 0).any()):
-                    raise NotImplementedError("Explicit Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
+        if not getattr(self.field_dependent_charges_map, "coupled", False):
+            if "counter_charge_width" in data and bool((data["counter_charge_width"] > 0).any()):
+                raise NotImplementedError("A Gaussian counter charge requires the MACE-VOLT CoupledResponse")
         if not hasattr(self, "from_ell_max_field_update"):
             self.from_ell_max_field_update = 9
 
@@ -438,7 +436,7 @@ class FixedPointCore(torch.nn.Module):
         )
 
         k_vectors = k_vectors_norms_squared = k_vectors_batch = k0_mask = None
-        if not getattr(self.field_dependent_charges_map, "spectral", False):
+        if not getattr(self.field_dependent_charges_map, "coupled", False):
             # K-space grid
             k_vectors, k_vectors_norms_squared, k_vectors_batch, k0_mask = (
                 compute_k_vectors_flat(
@@ -502,9 +500,9 @@ class FixedPointCore(torch.nn.Module):
             energies[0] = energies[0]+(data["ptr"][1:]-data["ptr"][:-1])*self.foundation_energy_shift
         stacked_energies = torch.stack(energies, dim=-1)
 
-        # The variational functional assembles its own shared Fourier operator.
+        # CoupledResponse assembles its own Fourier operators.
         electrostatics_cache = None
-        if not getattr(self.field_dependent_charges_map, "spectral", False):
+        if not getattr(self.field_dependent_charges_map, "coupled", False):
             # Precompute geometry for electrostatics
             electrostatics_cache = self.electric_potential_descriptor.precompute_geometry(
                 k_vectors=k_vectors,

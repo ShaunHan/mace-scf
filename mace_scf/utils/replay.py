@@ -210,25 +210,12 @@ class ReplayTraining:
         self.loss_fn = WeightedLoss({'energy_per_atom':energy_weight, 'forces':forces_weight})
         self.weight = weight
 
-    def backward(self, model, batch, parameters, device, limit):
-        from copy import copy
-        normalizers = {k:v.to(device) for k,v in self.loss_fn.normalizers(batch).items()}
-        total = 0.
-        if batch.num_graphs <= limit:
-            pieces = (copy(batch),)
-        else:
-            graphs = batch.to_data_list()
-            pieces = (torch_geometric.Batch.from_data_list(graphs[start:start+limit])
-                      for start in range(0,len(graphs),limit))
-        for piece in pieces:
-            piece = piece.to(device)
-            output = model.replay_head(piece.to_dict(), training=True, compute_force=True)
-            loss = self.weight*self.loss_fn(ref=piece, pred=output, normalizers=normalizers)
-            if not bool(torch.isfinite(loss.detach())):
-                raise FloatingPointError('Nonfinite replay loss; no optimizer/EMA update performed')
-            torch.autograd.backward(loss, inputs=parameters)
-            total = total+loss.detach()
-        return total
+    def backward(self, model, batch, parameters, device):
+        batch = batch.to(device)
+        output = model.replay_head(batch.to_dict(), training=True, compute_force=True)
+        loss = self.weight*self.loss_fn(ref=batch, pred=output)
+        torch.autograd.backward(loss, inputs=parameters)
+        return loss.detach()
 
     def evaluate(self, model, device, ema=None, training_set=False):
         loader = self.valid_loader

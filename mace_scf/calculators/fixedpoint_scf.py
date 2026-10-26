@@ -181,7 +181,6 @@ class MACEFixedPointSCF(Calculator):
         counter_charge_height: float = 6.0,
         constant_potential: bool = False,
         counter_charge_overlap: Optional[bool] = None,
-        allow_unconfined_charging: bool = False,
         **kwargs,
     ):
         """With constant_potential=True the calculator needs only the geometry: on the
@@ -192,10 +191,7 @@ class MACEFixedPointSCF(Calculator):
         model carries the neutral atoms of its training data. In constant-potential
         MD the counter charge stands for solvated ions and acts through
         electrostatics only: counter_charge_overlap (default: off exactly when
-        constant_potential) drops the DFT sheet's overlap with the neutral atoms.
-        Constant-potential MD needs a model trained with electrode charging, which
-        keeps the electrode charge out of the electrolyte molecules;
-        allow_unconfined_charging runs an older model anyway."""
+        constant_potential) drops the DFT sheet's overlap with the neutral atoms."""
         kwargs.pop("enable_cueq", None)  # backbone acceleration is a training-time choice
         Calculator.__init__(self, **kwargs)
         if verbose:
@@ -219,30 +215,24 @@ class MACEFixedPointSCF(Calculator):
             decelerate_backbone(self.model)
         self.model.kspace_cutoff *= adjust_kspace_cutoff
         response = getattr(self.model, "field_dependent_charges_map", None)
-        if constant_potential and (not getattr(response, 'energy_derivatives', False)
-                or getattr(response, 'energy_reference', 'dft') != 'dft'
-                or not self.scf_options.constant_charge
-                or energy_units_to_eV != 1. or length_units_to_A != 1.):
-            raise ValueError('Constant-potential MD requires a model trained with DFT energy and derivative-based EF, '
-                             'fixed-charge SCF and eV/Angstrom units')
+        coupled = getattr(response, "coupled", False)
+        if constant_potential and (not coupled or not self.scf_options.constant_charge
+                                   or energy_units_to_eV != 1. or length_units_to_A != 1.):
+            raise ValueError('Constant-potential MD requires a MACE-VOLT CoupledResponse model, fixed-charge SCF '
+                             'and eV/Angstrom units')
         self.constant_potential = bool(constant_potential)
-        if (self.constant_potential and not getattr(response, 'confined_charging', False)
-                and not allow_unconfined_charging):
-            raise ValueError('This model was trained without electrode charging: it puts most of the electrode '
-                             'charge on the water, so its potential does not follow the charge. Retrain with this '
-                             'mace_scf, or pass allow_unconfined_charging=True to run it anyway.')
         self.counter_charge_overlap = (not self.constant_potential if counter_charge_overlap is None
                                        else bool(counter_charge_overlap))
         if response is not None:
             response.counter_charge_overlap = self.counter_charge_overlap
-        if getattr(response, "spectral", False):
+        if coupled:
             from dataclasses import replace
             if scf_options is None or "num_scf_steps" not in scf_options:
                 self.scf_options = replace(self.scf_options, num_scf_steps=int(response.deployment_steps))
-            if getattr(response, 'coupled', False) and (scf_options is None or 'mixing_parameter' not in scf_options):
+            if scf_options is None or 'mixing_parameter' not in scf_options:
                 self.scf_options = replace(self.scf_options, mixing_parameter=float(response.deployment_mixing))
             if use_compile:
-                raise ValueError("Spectral responses currently use the differentiable eager solver; use_compile=False")
+                raise ValueError("CoupledResponse uses the differentiable eager solver; use_compile=False")
 
 
         if isinstance(self.model, FixedPoint) and not isinstance(
@@ -260,7 +250,7 @@ class MACEFixedPointSCF(Calculator):
             pbc_handling=pbc_handling,
             jellium_slab_bounds=jellium_slab_bounds,
         )
-        if compensating_jellium and not getattr(response, "spectral", False):
+        if compensating_jellium and not coupled:
             self._apply_compensating_jellium(
                 self.model,
                 slab_bounds=jellium_slab_bounds,
@@ -300,11 +290,9 @@ class MACEFixedPointSCF(Calculator):
             external_field_key=external_field_key,
             total_charge_key=total_charge_key,
         )
-        # A saved finite-step model is defined by its trajectory, not a root.
+        # A finite-step coupled model is defined by its trajectory, not a root.
         # Explicit False still requests the strict equilibrium check for MD.
-        self.ignore_nonconverged = (
-            getattr(response, 'deployment_mode', 'implicit') == 'unroll_scf'
-            if ignore_nonconverged is None else bool(ignore_nonconverged))
+        self.ignore_nonconverged = coupled if ignore_nonconverged is None else bool(ignore_nonconverged)
         self.save_full_scf_history = save_full_scf_history
         self.scf_restart = scf_restart
         self.restart_density = scf_restart if restart_density is None else restart_density
@@ -377,7 +365,6 @@ class MACEFixedPointSCF(Calculator):
                 "fermi_level": fermi_level_key,
                 "total_charge": total_charge_key,
                 **{key: key for key in COUNTER_CHARGE_KEYS},
-                "dipole_correction_center": "dipole_correction_center",
                 **{f"{prefix}_{axis}frac": f"{prefix}_{axis}frac"
                    for prefix in ("vacuum", "dipole_correction") for axis in "xyz"},
             },
@@ -398,9 +385,8 @@ class MACEFixedPointSCF(Calculator):
             raise ValueError('Constant-potential MD requires an explicit Gaussian counter charge '
                              '(counter_charge_zfrac for a sheet or counter_charge_center for a 3D '
                              'Gaussian), including at Q=0')
-        if (profile or config.properties.get("dipole_correction_center") is not None) and not getattr(
-                self.model.field_dependent_charges_map, "spectral", False):
-            raise NotImplementedError("Prescribed Gaussian sources and dipole_correction_center require a spectral MACE-VOLT response")
+        if profile and not getattr(self.model.field_dependent_charges_map, "coupled", False):
+            raise NotImplementedError("A Gaussian counter charge requires the MACE-VOLT CoupledResponse")
         if self.compensating_jellium:
             if profile:
                 raise ValueError("Specify a Gaussian counter charge or compensating_jellium, not both")
@@ -484,12 +470,11 @@ class MACEFixedPointSCF(Calculator):
         if self.constant_potential:
             from mace_scf.electrostatics.reservoir import evaluate_cell
             return evaluate_cell(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
-                mixing=self.scf_options.mixing_parameter, tolerance=self.scf_options.scf_tolerance)
-        if getattr(self.model.field_dependent_charges_map, "spectral", False):
+                                 mixing=self.scf_options.mixing_parameter)
+        if getattr(self.model.field_dependent_charges_map, "coupled", False):
             if self.compensating_jellium:
-                batch_dict["counter_charge"] = -batch_dict["total_charge"]
-                batch_dict["counter_slab_bounds"] = batch_dict["positions"].new_tensor(self.jellium_slab_bounds).reshape(1,2)
-            return self.runner.eval(self.model,batch_dict,compute_force=True)
+                raise NotImplementedError("CoupledResponse takes a Gaussian counter charge, not compensating_jellium")
+            return self.runner.eval(self.model, batch_dict, compute_force=True)
         if self.compiled_evaluator is not None:
             return self.compiled_evaluator.evaluate(batch_dict)
 
@@ -552,7 +537,7 @@ class MACEFixedPointSCF(Calculator):
         }
 
     def _handle_scf_status(self, diagnostics):
-        if getattr(self.model.field_dependent_charges_map, "spectral", False):
+        if getattr(self.model.field_dependent_charges_map, "coupled", False):
             residual = diagnostics["final_abs_difference"]
             if not np.isfinite(residual):
                 raise FloatingPointError("Nonfinite electronic solve residual")
@@ -656,7 +641,6 @@ class MACEFixedPointSCF(Calculator):
 
     def _control_keys(self):
         return (self.total_charge_key, self.external_field_key, self.fermi_level_key,
-                "dipole_correction_center",
                 *[f"{prefix}_{axis}frac" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
                 *COUNTER_CHARGE_KEYS)
 

@@ -1,825 +1,485 @@
-"""Coupled density/potential response, screened solves and physical observers.
+"""Coupled density/potential response of MACE-VOLT, its screened updates and observations.
 
-One nonlinear constitutive map sees the evolving deformation field, including
-its long- and short-range parts. The neutral-atom reference is an observation,
-not an additional applied drive. Coarse density and potential remain distinct.
-Finite trajectories and converged-root differentiation are explicit modes.
+Charges follow the fixed-Q law q_i = S_i (chi_i + phi_i - mu) with positive
+softness S_i and chemical levels chi_i of the geometry, dipoles respond linearly
+to the field, and two local potential amplitudes complete the short-range field
+as a nonlinear function of the evolving deformation field. Every update solves
+the affine electrostatic block exactly; the unrolled trajectory only resolves the
+nonlinear amplitudes. Potentials are electron referenced (in V, equal to eV).
 """
-from dataclasses import dataclass
-from typing import Callable, Tuple
 import logging
 import math
 
 import numpy as np
 import torch
+from e3nn import o3
+from graph_longrange.utils import FIELD_CONSTANT
 from torch import nn
 from torch.nn import functional as F
-from torch.func import functional_call
 from torch.utils.checkpoint import checkpoint
-from e3nn import o3
 
-from .potential import SpectralGeometry, initialize_response, attach_observations
-from .molecular import enabled as molecular_enabled, moment_sum
+from .potential import FORM_FACTOR_GRID, CounterCharge, attach_labels, reciprocal_grid
 
-def transport_difference(matrix, values):
-    """Neighbor-minus-center differences, for either scalar or vector channels."""
-    original = values.shape
-    flat = values.flatten(2)
-    return (torch.bmm(matrix, flat) - matrix.sum(-1, keepdim=True)*flat).reshape(original)
+SOFTNESS_SCALE = .02
 
-def angular_transport(positions, edge_index, shifts, batch, slot, graphs, max_nodes,
-                      cutoff, width):
-    """l=0 and l=1 transport on the SAME existing graph, no learned attention.
 
-    Channel 0 is T_ij=w_ij/(1+sum_j w_ij). Repeated periodic images add;
-    the extra 1 fixes the isolated-atom limit and bounds the row sum below 1.
-    Channels 1:4 contain T_ij*r_ij/width, with r_ij pointing from receiving
-    atom i to neighbor/image j. Solid l=1
-    harmonics avoid the non-differentiable unit direction at a coincident edge.
-    The same smooth cutoff supplies second derivatives for force training.
+def _positive(x):
+    """Softness from an unconstrained readout: SOFTNESS_SCALE at x = 0."""
+    return SOFTNESS_SCALE*(F.softplus(x+math.log(math.expm1(1.)))+1.e-6)
+
+
+def angular_transport(positions, edge_index, shifts, batch, slot, graphs, size, cutoff, width):
+    """l=0 and l=1 transport on the MACE graph, no learned attention.
+
+    Channel 0 is T_ij=w_ij/(1+sum_j w_ij): periodic images add and the extra 1
+    bounds the row sum below 1. Channels 1:4 hold T_ij*r_ij/width, with r_ij from
+    atom i to neighbor image j; solid harmonics stay smooth at coincident edges
+    and the smooth cutoff supplies the second derivatives of force training.
     """
-    if cutoff <= 0 or width <= 0:
-        raise ValueError('current transport cutoff and width must be positive')
-    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
-        raise ValueError('current edge_index must have shape [2, edges]')
     sender, receiver = edge_index
-    if shifts is None:
-        if sender.numel():
-            raise ValueError('current transport requires the Cartesian image shifts of the MACE graph')
-        shifts = positions.new_zeros((0, 3))
-    if shifts.shape != (sender.numel(), 3):
-        raise ValueError('current Cartesian edge shifts must have shape [edges, 3]')
-    if sender.numel() and bool((batch[sender] != batch[receiver]).any()):
-        raise ValueError('current electronic transport cannot connect different graphs')
-    shifts = shifts.to(positions)
-    vector = positions[sender]-positions[receiver]-shifts
+    vector = positions[sender]-positions[receiver]-shifts.to(positions)
     square = vector.square().sum(-1)
-    weights = torch.exp(-.5*square/float(width)**2)*(1.-square/float(cutoff)**2).clamp_min(0.).pow(3)
-    index = (batch[receiver]*max_nodes+slot[receiver])*max_nodes+slot[sender]
-    # One edge reduction supplies both the scalar weights and their first
-    # moment. The original implementation built the same dense scalar matrix
-    # twice, including two independent coordinate-derivative graphs.
-    values = torch.cat((weights[:, None], weights[:, None]*vector/float(width)), -1)
-    raw = positions.new_zeros((graphs*max_nodes*max_nodes, 4)).index_add(
-        0, index, values).reshape(graphs,max_nodes,max_nodes,4)
-    denom = 1.+raw[..., 0].sum(-1,keepdim=True)
-    return raw/denom[..., None]
-
-def angular_differences(operator, scalar_values, vector_values):
-    """(l=1 x vector)->scalar and (l=1 x scalar)->vector neighbor differences."""
-    directional = operator[..., 1:]
-    row = directional.sum(2)
-    div = torch.einsum('bijr,bjcr->bic',directional,vector_values)
-    div = div-(row[:,:,None]*vector_values).sum(-1)
-    grad = torch.einsum('bijr,bjc->bicr',directional,scalar_values)
-    grad = grad-row[:,:,None]*scalar_values[...,None]
-    return div,grad
-
-def neighbor_messages(operator, phi, field):
-    """One scalar/vector message: radial sums and the allowed l<=1 couplings.
-
-    The dense operator is only a batched representation of the MACE edges.
-    Its four entries are a radial weight and a Cartesian direction, not four
-    learned graphs. Parameter names/order remain unchanged for saved models.
-    """
-    difference = transport_difference(operator[..., 0], torch.cat((phi, field.flatten(-2)), -1))
-    scalar, vector = difference.split((phi.shape[-1], field.shape[-2]*3), -1)
-    divergence, gradient = angular_differences(operator, phi, field)
-    return torch.cat((scalar, divergence), -1), torch.cat((vector.reshape_as(field), gradient), -2)
+    weights = torch.exp(-.5*square/width**2)*(1.-square/cutoff**2).clamp_min(0.).pow(3)
+    index = (batch[receiver]*size+slot[receiver])*size+slot[sender]
+    values = torch.cat((weights[:, None], weights[:, None]*vector/width), -1)
+    raw = positions.new_zeros((graphs*size*size, 4)).index_add(0, index, values).reshape(graphs, size, size, 4)
+    return raw/(1.+raw[..., 0].sum(-1, keepdim=True))[..., None]
 
 
 def vector_asinh(vector):
-    """Invertible, rotation-equivariant counterpart of scalar asinh.
+    """Invertible, rotation-equivariant counterpart of scalar asinh for descriptors.
 
-    Preserve the linear small-field response and compress large *descriptors*,
-    not physical fields, moments or SCF iterates. The Taylor branch avoids a
-    sqrt(0) derivative in force/force-loss differentiation. Its switch is set
-    by floating-point precision, not a model or training hyperparameter.
+    The Taylor branch avoids a sqrt(0) derivative in force-loss differentiation.
     """
     squared = vector.square().sum(-1, keepdim=True)
     threshold = math.sqrt(torch.finfo(vector.dtype).eps)
     norm = squared.clamp_min(threshold).sqrt()
-    ratio = torch.asinh(norm) / norm
     small = squared.clamp_max(threshold)
-    series = 1. - small / 6. + 3. * small.square() / 40.
-    return vector * torch.where(squared < threshold, series, ratio)
+    series = 1.-small/6.+3.*small.square()/40.
+    return vector*torch.where(squared < threshold, series, torch.asinh(norm)/norm)
+
 
 def sample_spectrum(total, geometry):
-    """Samples of electron-referenced phi (V) and -grad(phi) (V/Angstrom).
+    """Gaussian receiver averages of phi (V) and -grad(phi) (V/A) at every atom.
 
-    phi is electron potential energy divided by positive elementary charge:
-    its values in V equal the legacy electron-energy values in eV. It has the
-    opposite sign to the potential of a positive test charge. The gradient is
-    a descriptor, not a nuclear force. Width zero gives an exact point sample
-    of the retained spectrum; positive widths give normalized local averages.
-    These are the upstream GTO scalar/vector projections expressed in physical
-    units. Each receiver width stays a separate channel. The same projection
-    samples the sum of Coulomb, completion and prescribed boundary potentials.
+    phi is the electron potential energy per elementary charge. Each receiver
+    width is a separate channel of the same Fourier projection.
     """
     cosine, sine, wave, _, _, _, receiver, *_ = geometry
-    re = total[..., 0, None] * receiver
-    im = total[..., 1, None] * receiver
-    re_k = (re[..., None] * wave[:, :, None]).flatten(-2)
-    im_k = (im[..., None] * wave[:, :, None]).flatten(-2)
-    # Two contractions share the phase transpose and its backward graph for
-    # scalar and vector observations. This is the same Fourier projection.
+    re = total[..., 0, None]*receiver
+    im = total[..., 1, None]*receiver
+    re_k = (re[..., None]*wave[:, :, None]).flatten(-2)
+    im_k = (im[..., None]*wave[:, :, None]).flatten(-2)
     sampled = (torch.bmm(cosine.transpose(1, 2), torch.cat((re, im_k), -1))
                + torch.bmm(sine.transpose(1, 2), torch.cat((-im, re_k), -1)))
     value, gradient = sampled.split((re.shape[-1], re_k.shape[-1]), -1)
     return value, gradient.reshape(*value.shape, 3)
 
 
-def sample_state_spectrum(total, state, geometry):
-    """Add the analytic molecular correction to every recurrent field sample."""
-    potential, field = sample_spectrum(total, geometry)
-    if len(geometry) > 14:
-        source, observer, counter = geometry[14:17]
-        moments = moment_sum(state, source)+counter
-        correction = torch.einsum('gnrom,gm->gnro', observer, moments)
-        potential, field = potential+correction[..., 0], field+correction[..., 1:]
-    return potential, field
-
-def charge_closure(reference_charge, levels, softness, target, mask):
-    """Exact local quadratic KKT solution with a neutral chemical reference.
-
-    min_q sum_i (q_i-q0_i)^2/(2*s_i) - eps_i*(q_i-q0_i), sum_i q_i=Q.
-    q0 is projected to neutrality, not independently fitted to the Fermi label.
-    This is a conditional response law, not a claim of total-energy stationarity.
-    """
-    count = mask.sum(-1).clamp_min(1.)
-    q0 = (reference_charge - (reference_charge * mask).sum(-1)[:, None] / count[:, None]) * mask
-    s = softness * mask
-    response = s.sum(-1)
-    # Positive softness and at least one atom make this denominator nonzero.
-    mu = ((s * levels).sum(-1) - target) / response
-    q = (q0 + s * (levels - mu[:, None])) * mask
-    # Remove only arithmetic roundoff, not a separate constitutive correction.
-    q = q + mask * ((target - q.sum(-1)) / count)[:, None]
-    return q, mu, s / response[:, None], response, q0
-
-class EmptyProjection(nn.Module):
-    """A zero-dimensional observation has no trainable parameters."""
-    bias = None
-    def __init__(self, input_size):
-        super().__init__()
-        self.register_buffer("weight", torch.empty((0,input_size)))
-    def forward(self,x):
-        return x[..., :0]
-
-class AtomicPotentialResponse(nn.Module):
+class CoupledResponse(nn.Module):
     """Shared density/potential response with positive local susceptibilities.
 
-    Charge softness is the bare susceptibility of the conditional charge law;
-    the fixed-Q projection and electrostatic coupling give its full response.
-    Dipole softness times density_width**2 is the dipole polarizability in
-    charge-number units. Only charges, dipoles and potential amplitudes recur.
-    The common chemical drive is one pooled readout, not an extra atomic state.
+    Charge softness is the bare susceptibility of the charge law; the fixed-Q
+    projection and electrostatic coupling give its full response. Chemical levels
+    and softness belong to the geometry, so the charge response to any field stays
+    positive: a field-dependent level could cancel it, an anti-screening that
+    drives the fixed point to instability. Dipole softness times density_width**2
+    is the dipole polarizability. The local potential amplitudes are Gaussians of
+    width sigma and 2 sigma, sigma being potential_amplitudes_smearing_width,
+    which is also the smoothing width of the smoothed potential observation.
+    Receivers average the field over the density width and the field feature widths.
     """
-    electrochemical_reference = True
+    coupled = True
 
-    def __init__(self, scalar_channels, vector_channels, num_elements,
-                 source_channels=2, field_channels=3, density_width=1.5, width=64,
-                 separate_chemical_level=True, include_local_energy=False):
+    def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
+                 field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
         super().__init__()
-        if min(scalar_channels,num_elements,field_channels,width)<1 or min(source_channels,vector_channels)<0:
-            raise ValueError('Invalid scalar/vector/radial response dimensions')
-        if not math.isfinite(density_width) or density_width<=0:
-            raise ValueError('density_width must be finite and positive')
-        # Record the current constitutive law in checkpoints, without GPU
-        # scalar branches inside the recurrent map. Older laws are not run.
-        for name in ('screened_reference_initialization', 'regular_field_coordinates',
-                     'geometry_softness', 'regular_geometry_coordinates',
-                     'coarse_density_energy', 'geometry_charge_is_level', 'linear_induced_dipoles'):
-            self.register_buffer(name, torch.tensor(True))
-        self.source_channels=int(source_channels)
-        self.charge_response = 'field'
-        self.field_channels=int(field_channels)
-        self.density_width=float(density_width)
-        self.vector_width=min(16,max(4,int(vector_channels)))
-        self.vector_basis_size=2*self.vector_width
-        self.chemical_scalar=nn.Linear(int(scalar_channels),width)
-        self.chemical_vector=(nn.Linear(int(vector_channels),self.vector_width,bias=False)
-                              if vector_channels else None)
-        self.shared=nn.Sequential(nn.Linear(width+2*self.vector_width,width),nn.SiLU(),
-                                  nn.Linear(width,width),nn.SiLU())
-        self.vector_out=nn.Linear(width,(1+source_channels)*self.vector_basis_size)
-        self.species_level=nn.Parameter(torch.zeros(num_elements))
-        self.scalar_out=nn.Linear(width,2+source_channels)
-        self.dipole_hardness=nn.Linear(width,1)
-        nn.init.zeros_(self.dipole_hardness.weight)
-        nn.init.zeros_(self.dipole_hardness.bias)
-        self.energy_readout=(nn.Sequential(nn.Linear(width+2*self.vector_width,128),nn.SiLU(),
-                                         nn.Linear(128,128),nn.SiLU(),nn.Linear(128,1,bias=False))
-                             if include_local_energy else None)
-        self.state_scalar=nn.Linear(field_channels,width,bias=False)
-        self.state_vector=nn.Linear(field_channels,self.vector_width,bias=False)
-        self.neighbor_scalar=nn.Linear(field_channels,width,bias=False)
-        self.neighbor_vector=nn.Linear(field_channels,self.vector_width,bias=False)
-        self.neighbor_divergence=nn.Linear(field_channels,width,bias=False)
-        self.neighbor_gradient=nn.Linear(field_channels,self.vector_width,bias=False)
+        irreps = o3.Irreps(node_feats_irreps)
+        if o3.Irreps(charges_irreps).dim != 4:
+            raise ValueError('CoupledResponse uses monopoles and dipoles (atomic_multipoles_max_l=1)')
+        sigma = float(potential_amplitudes_smearing_width)
+        sources = [sigma, 2*sigma]
+        receivers = [float(density_width)]+sorted(set(float(w) for w in field_widths)-{float(density_width)})
+        if any(not math.isfinite(w) or w <= 0 for w in sources+receivers) or sigma > density_width:
+            raise ValueError('Gaussian widths must be finite and positive, with potential_amplitudes_smearing_width '
+                             'at most atomic_multipoles_smearing_width')
+        self.scalar_slices = [(s.start, s.stop) for (_, ir), s in zip(irreps, irreps.slices()) if ir == o3.Irrep('0e')]
+        self.vector_slices = [(s.start, s.stop) for (_, ir), s in zip(irreps, irreps.slices()) if ir == o3.Irrep('1o')]
+        scalar_channels = sum(b-a for a, b in self.scalar_slices)
+        vector_channels = sum((b-a)//3 for a, b in self.vector_slices)
+        self.source_channels, self.field_channels = len(sources), len(receivers)
+        self.density_width = float(density_width)
+        self.potential_amplitudes_smearing_width = sigma
+        self.density_reference_width = max(receivers)
+        self.vector_width = min(16, max(4, vector_channels))
+        self.vector_basis_size = 2*self.vector_width
+        self.chemical_scalar = nn.Linear(scalar_channels, width)
+        self.chemical_vector = (nn.Linear(vector_channels, self.vector_width, bias=False)
+                                if vector_channels else None)
+        self.shared = nn.Sequential(nn.Linear(width+2*self.vector_width, width), nn.SiLU(),
+                                    nn.Linear(width, width), nn.SiLU())
+        self.vector_out = nn.Linear(width, (1+self.source_channels)*self.vector_basis_size)
+        self.species_level = nn.Parameter(torch.zeros(num_elements))
+        self.scalar_out = nn.Linear(width, 2+self.source_channels)
+        self.dipole_hardness = nn.Linear(width, 1)
+        self.state_scalar = nn.Linear(self.field_channels, width, bias=False)
+        self.state_vector = nn.Linear(self.field_channels, self.vector_width, bias=False)
+        self.neighbor_scalar = nn.Linear(self.field_channels, width, bias=False)
+        self.neighbor_vector = nn.Linear(self.field_channels, self.vector_width, bias=False)
+        self.neighbor_divergence = nn.Linear(self.field_channels, width, bias=False)
+        self.neighbor_gradient = nn.Linear(self.field_channels, self.vector_width, bias=False)
         # The uniform chemical level is a null direction of fixed-Q charge
-        # equilibration. Give that identifiable EF coordinate its own linear
-        # projection of the SAME geometry/total-field hidden representation.
-        # There is no extra field, vacuum head, detached feature or SCF state.
-        self.common_level = (nn.Linear(width, 1, bias=False)
-                             if separate_chemical_level else None)
-        if self.common_level is not None:
-            nn.init.zeros_(self.common_level.weight)
-        self.local_source_scalar=(nn.Linear(width,source_channels,bias=False) if source_channels else EmptyProjection(width))
-        self.local_source_vector=(nn.Linear(self.vector_width,source_channels,bias=False) if source_channels else EmptyProjection(self.vector_width))
-        self.species_source=nn.Parameter(torch.zeros(num_elements,source_channels))
-        self.register_buffer('shared_reference_readout',torch.tensor(True))
-        self.register_buffer('softness_scale',torch.tensor(.02))
-        self.register_buffer('scalar_field_scale',torch.ones(field_channels))
-        self.register_buffer('vector_field_scale',torch.ones(field_channels))
-        self.register_buffer('field_scales_initialized',torch.tensor(False))
-        self.register_buffer('geometry_scalar_unit',torch.ones(int(scalar_channels)))
-        self.register_buffer('geometry_vector_unit',torch.ones(int(vector_channels)))
-        self.register_buffer('geometry_units_initialized',torch.tensor(False))
-        zero_layers = [self.scalar_out,self.vector_out,self.local_source_scalar,self.local_source_vector,
-                       self.neighbor_scalar,self.neighbor_vector,self.neighbor_divergence,self.neighbor_gradient]
-        if self.energy_readout is not None:
-            zero_layers.append(self.energy_readout[-1])
-        for layer in zero_layers:
+        # equilibration. Its own projection of the same hidden features is the
+        # common level of the charging energy.
+        self.common_level = nn.Linear(width, 1, bias=False)
+        self.local_source_scalar = nn.Linear(width, self.source_channels, bias=False)
+        self.local_source_vector = nn.Linear(self.vector_width, self.source_channels, bias=False)
+        self.species_source = nn.Parameter(torch.zeros(num_elements, self.source_channels))
+        for layer in (self.scalar_out, self.vector_out, self.dipole_hardness, self.common_level,
+                      self.local_source_scalar, self.local_source_vector, self.neighbor_scalar,
+                      self.neighbor_vector, self.neighbor_divergence, self.neighbor_gradient):
             nn.init.zeros_(layer.weight)
-            if layer.bias is not None:nn.init.zeros_(layer.bias)
-        # Local moment deviations enter only the terminal energy functional.
-        # Zero weights reproduce the old energy/force predictor at construction,
-        # without consuming random draws or changing the electronic update map.
-        self.energy_charge_embedding = nn.Parameter(torch.zeros(width)) if include_local_energy else None
-        self.energy_dipole_embedding = nn.Parameter(torch.zeros(self.vector_width)) if include_local_energy else None
+            if layer.bias is not None:
+                nn.init.zeros_(layer.bias)
+        self.register_buffer('geometry_scalar_unit', torch.ones(scalar_channels))
+        self.register_buffer('geometry_vector_unit', torch.ones(vector_channels))
+        self.register_buffer('source_widths', torch.tensor(sources))
+        self.register_buffer('receiver_widths', torch.tensor(receivers))
+        # The neutral atoms of the reference calculations (potential.install_neutral_atoms).
+        self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
+        self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
+        self.register_buffer('deployment_steps', torch.tensor(50))
+        self.register_buffer('deployment_mixing', torch.tensor(.5))
 
+    def farfield_filter(self, k2):
+        """Extra smoothing of the density to the far-field reference width."""
+        return torch.exp(-.5*(self.density_reference_width**2-self.density_width**2)*k2)
 
-    def geometry_features(self,scalars,vectors):
-        if scalars.shape[-1]!=self.geometry_scalar_unit.numel() or vectors.shape[-2]!=self.geometry_vector_unit.numel():
-            raise ValueError('Geometry irreps and stored numerical units disagree')
-        chemical=self.chemical_scalar(torch.asinh(scalars)/self.geometry_scalar_unit)
-        scaled_vector = vectors/self.geometry_vector_unit[:,None]
-        scaled_vector = vector_asinh(scaled_vector)
-        vector=(vectors.new_zeros((*vectors.shape[:-2],self.vector_width,3)) if self.chemical_vector is None
-                else self.chemical_vector(scaled_vector.transpose(-1,-2)).transpose(-1,-2))
-        return chemical,vector
+    def geometry_features(self, scalars, vectors):
+        chemical = self.chemical_scalar(torch.asinh(scalars)/self.geometry_scalar_unit)
+        if self.chemical_vector is None:
+            return chemical, vectors.new_zeros((*vectors.shape[:-2], self.vector_width, 3))
+        scaled = vector_asinh(vectors/self.geometry_vector_unit[:, None])
+        return chemical, self.chemical_vector(scaled.transpose(-1, -2)).transpose(-1, -2)
 
-    def state_embedding(self,state,chemical,vector,v,e,neighborhood=None,prepared=None):
-        # State coefficients do NOT form an extra neural input. Their physical
-        # information enters solely through the common projected v and -grad(v).
-        if neighborhood is None or neighborhood.ndim!=4 or neighborhood.shape[-1]!=4:
-            raise ValueError('The common response requires its periodic local transport operator')
-        # The full receiver coordinates carry the electrochemical drive;
-        # local radial contrasts and angular/neighbor variation remain present.
-        # Scalar and vector channels use one linear transport and one adjoint.
-        if prepared is None:
-            scalar_message,vector_message=neighbor_messages(neighborhood,v,e)
-            scalar_weight=torch.cat((self.state_scalar.weight,self.neighbor_scalar.weight,
-                                     self.neighbor_divergence.weight),-1)
-            vector_weight=torch.cat((self.state_vector.weight,self.neighbor_vector.weight,
-                                     self.neighbor_gradient.weight),-1)
-        else:
-            scalar_weight,vector_weight,transport=prepared
-            # Row sums have already been subtracted from the diagonal. One
-            # contraction carries all radial/directional neighbor differences.
-            c=v.shape[-1]
-            messages=torch.bmm(transport,torch.cat((v,e.flatten(-2)),-1)).reshape(
-                v.shape[0],4,v.shape[1],4*c)
-            radial=messages[:,0]
-            directional=messages[:,1:]
-            divergence=directional[...,c:].reshape(v.shape[0],3,v.shape[1],c,3).diagonal(dim1=1,dim2=4).sum(-1)
-            scalar_message=torch.cat((radial[...,:c],divergence),-1)
-            vector_message=torch.cat((radial[...,c:].reshape_as(e),directional[...,:c].permute(0,2,3,1)),-2)
-        # Combine the same projections before their linear maps. This keeps
-        # every feature and parameter while reducing small recurrent kernels.
-        scalar=chemical+F.linear(torch.asinh(torch.cat((v,scalar_message),-1)),scalar_weight)
-        polar=vector_asinh(torch.cat((e,vector_message),-2))
-        embedded=vector+F.linear(polar.transpose(-1,-2),vector_weight).transpose(-1,-2)
-        return scalar,embedded
+    def state_embedding(self, chemical, vector, v, e, transport):
+        """Embed the sampled field and its l<=1 neighbor differences on the MACE graph.
 
-    def potential_coordinates(self, potential, mask, electronic_reference, target):
-        """Centered deformation-field inputs, including the fixed-Q response.
-
-        Center the sampled field plus a learned geometric chemical level and
-        add Q/sum(chi). This is the constrained quadratic charge law with its
-        multiplier eliminated, not a second Fermi observer. The chemical level
-        is environment-dependent; it is NOT the neutral proto-atomic potential.
-        A common field shift cancels. All reference derivatives remain live.
+        The state enters only through the field it creates. transport stacks the
+        four neighbor operators with their row sums removed from the diagonal.
         """
-        if electronic_reference.shape != (*mask.shape, 2):
-            raise ValueError('Missing geometry-only electronic reference [level, softness]')
-        chemical_level, softness = electronic_reference.unbind(-1)
-        soft = softness * mask
+        c = v.shape[-1]
+        messages = torch.bmm(transport, torch.cat((v, e.flatten(-2)), -1)).reshape(v.shape[0], 4, v.shape[1], 4*c)
+        radial, directional = messages[:, 0], messages[:, 1:]
+        divergence = directional[..., c:].reshape(v.shape[0], 3, v.shape[1], c, 3).diagonal(dim1=1, dim2=4).sum(-1)
+        scalar = torch.cat((v, radial[..., :c], divergence), -1)
+        polar = torch.cat((e, radial[..., c:].reshape_as(e), directional[..., :c].permute(0, 2, 3, 1)), -2)
+        scalar_weight = torch.cat((self.state_scalar.weight, self.neighbor_scalar.weight,
+                                   self.neighbor_divergence.weight), -1)
+        vector_weight = torch.cat((self.state_vector.weight, self.neighbor_vector.weight,
+                                   self.neighbor_gradient.weight), -1)
+        return (chemical+F.linear(torch.asinh(scalar), scalar_weight),
+                vector+F.linear(vector_asinh(polar).transpose(-1, -2), vector_weight).transpose(-1, -2))
+
+    def _invariants(self, chemical, vector, potential, field, mask, reference, target, transport):
+        """Centered levels chi+phi plus Q/sum(S): the charge law with its multiplier eliminated.
+
+        A common shift of the field cancels; all reference derivatives stay live.
+        """
+        chi, softness = reference.unbind(-1)
+        soft = softness*mask
         total = soft.sum(-1)
-        levels = chemical_level[..., None]+potential
+        levels = chi[..., None]+potential
         mean = (soft*levels[..., 0]).sum(-1)/total
-        return (levels-mean[:, None, None]+(target/total)[:, None, None])/self.scalar_field_scale
+        v = levels-mean[:, None, None]+(target/total)[:, None, None]
+        scalar, embedded = self.state_embedding(chemical, vector, v, field, transport)
+        return torch.cat((scalar, torch.asinh(embedded.square().sum(-1)),
+                          torch.asinh((vector*embedded).sum(-1))), -1), embedded
 
-    def _invariants(self,state,chemical,vector,potential,field,mask,neighborhood,
-                    electronic_reference,target,prepared=None):
-        v=self.potential_coordinates(potential,mask,electronic_reference,target)
-        e=field/self.vector_field_scale[:,None]
-        scalar,embedded=self.state_embedding(state,chemical,vector,v,e,neighborhood,prepared)
-        inv=torch.cat((scalar,torch.asinh(embedded.square().sum(-1)),
-                       torch.asinh((vector*embedded).sum(-1))),-1)
-        return inv,embedded
-
-    def energy_invariants(self, invariants, embedded, vector, state, reference_charge, p0):
-        """Equivariant local moment embedding for the nonvariational energy.
-
-        Charges and scaled dipoles are in elementary-charge units. The reference
-        has neutral geometry-predicted charges and the geometry-predicted dipole.
-        No inferred atomic state is used as a training label or detached here.
-        """
-        delta_q = state[..., 0] - reference_charge
-        delta_d = state[..., 1:4] - p0[..., 1:4] / self.density_width
-        scalar = (invariants[..., :self.energy_charge_embedding.numel()]
-                  + delta_q[..., None] * self.energy_charge_embedding)
-        polar = embedded + delta_d[..., None, :] * self.energy_dipole_embedding[:, None]
-        return torch.cat((scalar, torch.asinh(polar.square().sum(-1)),
-                          torch.asinh((vector * polar).sum(-1))), -1)
-
-    def _constitutive_outputs(self,invariants,vector,embedded,return_hidden=False,include_dipole=True):
+    def _constitutive_outputs(self, invariants, vector, embedded, include_dipole=True):
         hidden = self.shared(invariants)
-        scalars=self.scalar_out(hidden)
-        channels=self.source_channels+int(include_dipole)
-        if channels:
-            basis=torch.cat((vector,embedded),-2)
-            # The geometry dipole is prepared once in reference_offset. Only
-            # local-potential vector amplitudes use this readout in recurrence;
-            # density-only models therefore need no recurrent vector readout.
-            start=0 if include_dipole else self.vector_basis_size
-            gate=F.linear(hidden,self.vector_out.weight[start:],self.vector_out.bias[start:])
-            gate=gate.reshape(*hidden.shape[:-1],channels,self.vector_basis_size)
-            polar=torch.einsum('bnov,bnvc->bnoc',gate,basis)/math.sqrt(self.vector_basis_size)
-        else:
-            polar=hidden.new_zeros((*hidden.shape[:-1],0,3))
-        result = (scalars, polar)
-        if return_hidden:
-            result += (hidden,)
-        return result
+        # The geometry dipole is read once in prepare_reference; updates read only the amplitudes.
+        start = 0 if include_dipole else self.vector_basis_size
+        gate = F.linear(hidden, self.vector_out.weight[start:], self.vector_out.bias[start:])
+        gate = gate.reshape(*hidden.shape[:-1], self.source_channels+int(include_dipole), self.vector_basis_size)
+        polar = torch.einsum('bnov,bnvc->bnoc', gate, torch.cat((vector, embedded), -2))/math.sqrt(self.vector_basis_size)
+        return self.scalar_out(hidden), polar, hidden
 
     def geometry_reference_features(self, chemical, vector):
-        """The shared local electronic representation with no applied field.
-
-        This geometry-only hidden vector already defines the reference levels
-        and softness. Reusing it for scalar potential amplitudes avoids forcing
-        structural potential variation through the induced-response difference.
-        It is atom-local, has no label/graph pooling and adds no layer or weight.
-        """
+        """The shared hidden features at zero field, where both geometric invariants coincide."""
         norm = torch.asinh(vector.square().sum(-1))
         first = self.shared[0]
         width, channels = chemical.shape[-1], norm.shape[-1]
-        # At zero field both geometric invariants coincide. Fold their columns
-        # during evaluation, preserving stored parameters and resume gradients.
         weight = torch.cat((first.weight[:, :width],
                             first.weight[:, width:width+channels]+first.weight[:, width+channels:]), -1)
         hidden = F.linear(torch.cat((chemical, norm), -1), weight, first.bias)
         return self.shared[3](self.shared[2](self.shared[1](hidden)))
 
-    def dipole_softness(self, reference_offset):
-        """Physical dipole softness S in Angstrom^2/V, including width units.
+    def prepare_reference(self, chemical, vector, attrs, p0, mask, target, transport):
+        """Geometry-only coefficients, differentiable in positions and parameters.
 
-        The stored coefficient uses d/sigma as a numerical solve coordinate.
-        This exact conversion adds no learned output or physical state.
+        Returns the local amplitudes, the reference [state offsets, dipole softness,
+        chi, charge softness] and the species levels. At zero field the amplitudes
+        equal the local readout; the field response enters as their difference.
         """
-        return reference_offset[..., -3:-2]*self.density_width**2
-
-    def local_potential_coordinates(self, chemical, vector, attrs, mask, *, hidden=None):
-        hidden = self.geometry_reference_features(chemical, vector) if hidden is None else hidden
-        scalar = attrs @ self.species_source + self.local_source_scalar(hidden)
-        polar = self.local_source_vector(vector.transpose(-1, -2)).transpose(-1, -2)
-        return torch.cat((scalar, polar.flatten(-2)), -1) * mask[..., None]
-
-    def prepare_reference(self,state,chemical,vector,attrs,p0,mask,target,neighborhood):
-        # Geometry-only coefficients. Everything remains differentiable with
-        # respect to positions and parameters; no learned field is supplied here.
         hidden = self.geometry_reference_features(chemical, vector)
-        initial_scalar = self.scalar_out(hidden)
-        species_level = attrs @ self.species_level
-        chi0 = species_level + initial_scalar[...,0]
-        chi0 = chi0 + p0[..., 0]
-        softness0 = self.softness_scale*(F.softplus(initial_scalar[...,1]+math.log(math.expm1(1.)))+1.e-6)
-        electronic_reference = torch.stack((chi0,softness0),-1)
-        zeros=state.new_zeros((*state.shape[:2],self.field_channels))
-        inv,embedded=self._invariants(state,chemical,vector,zeros,
-            zeros[...,None].expand(-1,-1,-1,3),mask,neighborhood,electronic_reference,target)
-        scalar,polar=self._constitutive_outputs(inv,vector,embedded)
-        local=self.local_potential_coordinates(chemical,vector,attrs,mask,hidden=hidden)
-        raw=torch.cat((scalar[...,2:],polar[...,1:,:].flatten(-2)),-1)
-        offset=torch.cat((torch.zeros_like(state[...,:1]),polar[...,0,:],local-raw),-1)*mask[...,None]
-        dipole_soft=self.softness_scale*(F.softplus(self.dipole_hardness(hidden)+math.log(math.expm1(1.)))+1.e-6)
-        return local,torch.cat((offset,dipole_soft,electronic_reference),-1),species_level
+        initial = self.scalar_out(hidden)
+        species_level = attrs@self.species_level
+        reference = torch.stack((species_level+initial[..., 0]+p0[..., 0], _positive(initial[..., 1])), -1)
+        zeros = p0.new_zeros((*mask.shape, self.field_channels))
+        invariants, embedded = self._invariants(chemical, vector, zeros, zeros[..., None].expand(-1, -1, -1, 3),
+                                                mask, reference, target, transport)
+        scalar, polar, _ = self._constitutive_outputs(invariants, vector, embedded)
+        local = torch.cat((attrs@self.species_source+self.local_source_scalar(hidden),
+                           self.local_source_vector(vector.transpose(-1, -2)).transpose(-1, -2).flatten(-2)),
+                          -1)*mask[..., None]
+        raw = torch.cat((scalar[..., 2:], polar[..., 1:, :].flatten(-2)), -1)
+        offset = torch.cat((torch.zeros_like(p0[..., :1]), polar[..., 0, :], local-raw), -1)*mask[..., None]
+        return local, torch.cat((offset, _positive(self.dipole_hardness(hidden)), reference), -1), species_level
+
+    def forward(self, chemical, vector, potential, field, mask, target, reference, transport):
+        """Local potential amplitudes and hidden features at the sampled field."""
+        invariants, embedded = self._invariants(chemical, vector, potential, field, mask, reference[..., -2:],
+                                                target, transport)
+        scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded, include_dipole=False)
+        amplitudes = (torch.cat((scalars[..., 2:], polar.flatten(-2)), -1)+reference[..., 4:-3])*mask[..., None]
+        return amplitudes, hidden
 
 
-    def forward(self,state,chemical,vector,species_level,potential,field,p0,mask,target,
-                neighborhood=None,*,include_energy=True,reference_offset=None,
-                observe_chemical_level=True,prepared=None):
-        """Respond using geometry features and prepared per-atom scalar levels."""
-        extra=3
-        if reference_offset is None or reference_offset.shape!=(*state.shape[:-1],state.shape[-1]+extra):
-            raise ValueError('Missing/mismatched differentiable geometry/electrochemical reference')
-        offset,electronic_reference=reference_offset[...,:-extra],reference_offset[...,-2:]
-        inv,embedded=self._invariants(state,chemical,vector,potential,field,mask,neighborhood,
-                                     electronic_reference,target,prepared)
-        computed = self._constitutive_outputs(inv, vector, embedded, return_hidden=True,include_dipole=False)
-        scalars, polar = computed[:2]
-        # The geometry reference conditions the descriptors; it does not replace
-        # the constitutive response to the evolving field. These contrasts let
-        # density and force supervision train the same electronic representation
-        # as the potential and chemical level. Screening removes the analytic
-        # Coulomb block, while this learned response remains in the fixed point.
-        # Preserve the law of already fitted geometry-response checkpoints.
-        geometry_charge = self.source_channels and getattr(self, 'charge_response', 'geometry') == 'geometry'
-        chemical_level = (electronic_reference[...,0] if geometry_charge else
-                          species_level+scalars[...,0]+p0[...,0])
-        softness=electronic_reference[...,1]
-        reference_charge = torch.zeros_like(p0[..., 0])
-        # Align the common chemical drive once. Legacy exports observe the
-        # conditional multiplier; energy-derived models use this drive in the
-        # charging energy instead. It is a null coordinate of fixed-Q updates.
-        if observe_chemical_level and self.common_level is not None:
-            soft = softness*mask
-            f = soft/soft.sum(-1, keepdim=True)
-            common = self.common_level((f[...,None]*computed[-1]).sum(1)).squeeze(-1)
-            common = common+(f*species_level).sum(-1)
-            chemical_level = chemical_level+(common-(f*chemical_level).sum(-1))[:,None]
-        levels=chemical_level+potential[...,0]
-        q,mu,f,response,neutral=charge_closure(reference_charge,levels,softness,target,mask)
-        induced=-self.dipole_softness(reference_offset)*field[...,0,:]/self.density_width
-        proposal=torch.cat((q[...,None],p0[...,1:4]/self.density_width+induced,
-                            scalars[...,2:],polar.flatten(-2)),-1)*mask[...,None]
-        proposal=(proposal+offset)*mask[...,None]
-        if include_energy and self.energy_readout is not None:
-            zeros=torch.zeros_like(potential)
-            refinv,_=self._invariants(state,chemical,vector,zeros,torch.zeros_like(field),mask,neighborhood,
-                                      electronic_reference,target)
-            energy_inv = self.energy_invariants(inv, embedded, vector, state, neutral, p0)
-            energy=(self.energy_readout(energy_inv)-self.energy_readout(refinv)).squeeze(-1)*mask
-        else:energy=state.new_zeros(mask.shape)
-        return proposal,mu,f,response,levels,chemical_level,energy,neutral
+class CoupledGeometry:
+    """Per-forward Fourier operators on the support shared by response, observers and screening."""
 
-    def recurrent_coefficients(self,state,chemical,vector,species_level,potential,field,p0,
-                               mask,target,neighborhood,reference,prepared):
-        """Only the nonlinear levels/completion enter the screened update."""
-        inv,embedded=self._invariants(state,chemical,vector,potential,field,mask,neighborhood,
-                                     reference[...,-2:],target,prepared)
-        scalars,polar=self._constitutive_outputs(inv,vector,embedded,include_dipole=False)
-        geometry_charge=self.source_channels and getattr(self,'charge_response','geometry')=='geometry'
-        levels=reference[...,-2] if geometry_charge else species_level+scalars[...,0]+p0[...,0]
-        completion=(torch.cat((scalars[...,2:],polar.flatten(-2)),-1)+reference[...,4:-3])*mask[...,None]
-        return levels,completion
+    def __init__(self, model, data, positions):
+        r = self.response = model.field_dependent_charges_map
+        self.cell = data['cell'].reshape(-1, 3, 3)
+        self.volume = torch.linalg.det(self.cell).abs()
+        pbc = data['pbc'].reshape(-1, 3).bool()
+        if bool((pbc.sum(-1) < 2).any()):
+            raise NotImplementedError('MACE-VOLT supports periodic bulk and two-periodic slabs')
+        self.slab = pbc.sum(-1) == 2
+        self.axes = (~pbc).long().argmax(-1)
+        rows = torch.arange(len(self.cell), device=positions.device)
+        normal = torch.linalg.cross(self.cell[rows, (self.axes+1) % 3], self.cell[rows, (self.axes+2) % 3])
+        self.normal = normal/torch.linalg.vector_norm(normal, dim=-1, keepdim=True)
+        self.length = (self.cell[rows, self.axes]*self.normal).sum(-1)
+        self.wave, self.k2, self.mask, self.shape, self.modes = reciprocal_grid(self.cell, model.kspace_cutoff)
+        self.ngrid = math.prod(self.shape)
+        self.batch, ptr = data['batch'], data['ptr']
+        self.counts = (ptr[1:]-ptr[:-1]).detach().cpu().tolist()
+        self.size = max(self.counts)
+        self.slot = torch.arange(len(positions), device=positions.device)-ptr[:-1][self.batch]
+        self.present = positions.new_zeros((len(self.counts), self.size))
+        self.present[self.batch, self.slot] = 1.
+        self.width = r.density_width
+        active = self.mask & (self.k2 > 0)
+        self.coulomb = torch.where(active, FIELD_CONSTANT/self.k2.clamp_min(1.e-30), 0.)
+        self.slab_factor = FIELD_CONSTANT/self.volume*self.slab
+        self.external = data.get('external_field', positions.new_zeros((len(self.counts), 3))).reshape(-1, 3)
+        field = (self.external*self.normal).sum(-1)
+        if bool(((self.external-field[:, None]*self.normal).abs().amax(-1) > 1.e-10).any()
+                or ((field != 0) & ~self.slab).any()):
+            raise ValueError('A homogeneous field must be normal to a slab')
+        branch = data.get('dipole_correction_fraction', positions.new_full((len(self.counts),), .5)).reshape(-1)
+        self.branch = torch.where(torch.isfinite(branch), branch, .5).remainder(1.)
+        # Centre of the continuous slab branch: normal moments use the zero-mean
+        # sawtooth coordinate about it, the origin of the plug-in and of the ramp.
+        self.branch_center = (self.branch+.5).remainder(1.)*self.slab
+        self.origin = self.branch_center[:, None]*self.cell[rows, self.axes]*self.slab[:, None]
+        vacuum = data.get('vacuum_fraction', positions.new_full((len(self.counts),), .5)).reshape(-1)
+        self.zfrac = torch.where(torch.isfinite(vacuum), vacuum, .5).remainder(1.)
+        self.planar = (self.modes[None]*pbc[:, None]).abs().sum(-1) == 0
+        self.axial = self.planar & active & self.slab[:, None]
+        self.order = self.modes[None].expand(len(self.counts), -1, -1).gather(
+            -1, self.axes[:, None, None].expand(-1, len(self.modes), 1)).squeeze(-1)
+        self.attrs = self.pack(data['node_attrs'])
+        # The vacuum level in the zero-mean origin of periodic DFT, from the neutral atoms.
+        self.vacuum_reference = self.attrs.sum(1)@r.vacuum_reference_integrals/self.volume*self.slab
+        counter = CounterCharge(self, data, positions)
+        self.counter_density, self.counter_energy, self.counter_moment = counter.density, counter.energy, counter.moment
 
-def coefficient_kernels(geometry,density_width,source_volume,base_width):
-    """Geometry-only kernels prepared once; no K x atom x basis tensor."""
-    co,si,wave,br,bi,radial,receiver,proto,ramp,applied,zn,normal,poisson,ivol=geometry[:14]
-    scales=br.new_tensor([1.,density_width,density_width,density_width])
-    tail_re=br*poisson[...,None]*scales
-    tail_im=bi*poisson[...,None]*scales
-    shape_re=radial*source_volume
-    shape_im=(radial[...,None]*wave[:,:,None,:]*(base_width*source_volume)).flatten(-2)
-    real=torch.cat((tail_re,shape_re,torch.zeros_like(shape_im)),-1)*ivol[:,None,None]
-    imag=torch.cat((tail_im,torch.zeros_like(shape_re),shape_im),-1)*ivol[:,None,None]
-    return real,imag
+        phase = torch.einsum('gkc,gnc->gkn', self.wave, self.pack(positions))
+        co = phase.cos()*self.present[:, None, :]*active[..., None]
+        si = phase.sin()*self.present[:, None, :]*active[..., None]
+        gaussian = torch.exp(-.5*self.width**2*self.k2)*active
+        real = torch.cat((gaussian[..., None], torch.zeros_like(self.wave)), -1)
+        imag = torch.cat((torch.zeros_like(gaussian[..., None]), -gaussian[..., None]*self.wave), -1)
+        radial = torch.exp(-.5*self.k2[..., None]*r.source_widths.to(positions).square())*active[..., None]
+        receiver = torch.exp(-.5*self.k2[..., None]*r.receiver_widths.to(positions).square())*active[..., None]
+        zn = ((self.pack(positions)-self.origin[:, None])*self.normal[:, None]).sum(-1)*self.present
+        tensors = (co, si, self.wave, real, imag, radial, receiver, torch.view_as_real(self.ramp(-self.slab_factor)),
+                   torch.view_as_real(self.ramp(field)+counter.potential), zn, self.normal, -self.coulomb,
+                   self.volume.reciprocal())
+        # Pack the retained nonzero modes: padded FFT corners and k=0 never enter
+        # the moment operator or a field sample. Observers expand them back.
+        count = int(active.sum(-1).max())
+        if count == 0:
+            raise ValueError('The Fourier cutoff contains no nonzero cell modes')
+        indices = torch.arange(active.shape[1], device=positions.device).expand_as(active)
+        indices = indices.masked_fill(~active, active.shape[1]).sort(-1).values[:, :count]
+        self.selected_mask = indices < active.shape[1]
+        self.selected_indices = indices.clamp_max(active.shape[1]-1)
 
-def coefficient_contributions(state,geometry,kernels):
-    """The actual moment-carrier and regular contributions, without subtraction."""
-    co,si=geometry[:2]
-    kr,ki=kernels
-    if state.shape[-1]!=kr.shape[-1] or kr.shape!=ki.shape:
-        raise ValueError('Atomic potential coefficient/basis dimensions disagree')
-    cosine_coeff=torch.bmm(co,state)
-    sine_coeff=torch.bmm(si,state)
-    real=kr*cosine_coeff+ki*sine_coeff
-    imag=ki*cosine_coeff-kr*sine_coeff
-    carrier=torch.stack((real[...,:4].sum(-1),imag[...,:4].sum(-1)),-1)
-    shape=torch.stack((real[...,4:].sum(-1),imag[...,4:].sum(-1)),-1)
-    return carrier,shape
+        def selected(value):
+            mask = self.selected_mask.reshape(*self.selected_mask.shape, *([1]*(value.ndim-2)))
+            return value[rows[:, None], self.selected_indices]*mask
+        self.tensors = tuple(selected(value) if i < 9 or i == 11 else value for i, value in enumerate(tensors))
+        self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3,
+                                           r.potential_amplitudes_smearing_width)
 
-def evaluate_coefficients(state,geometry,kernels,density_width,include_carrier=False):
-    """Two node-to-Fourier matrix products replace six separate contractions.
+    def pack(self, values):
+        result = values.new_zeros((len(self.counts), self.size, *values.shape[1:]))
+        result[self.batch, self.slot] = values
+        return result
 
-    Returns the observer tuple, whose pieces are diagnostic contributions of
-    ONE basis. No carrier is reconstructed by subtracting a regular field from
-    the potential derived back from its density.
-    """
-    carrier,shape=coefficient_contributions(state,geometry,kernels)
-    proto,ramp,applied,zn,normal,poisson=geometry[7:13]
-    internal=carrier+shape
-    source=torch.where(poisson[...,None]!=0.,internal/torch.where(poisson[...,None]!=0.,poisson[...,None],1.),0.)
-    dipole_normal=(state[...,0]*zn+(state[...,1:4]*density_width*normal[:,None]).sum(-1)).sum(-1)
-    boundary=dipole_normal[:,None,None]*ramp
-    carrier_with_boundary=carrier+boundary+applied
-    total=carrier_with_boundary+shape+proto
-    result = (total,carrier_with_boundary,shape,source)
-    return (*result,carrier) if include_carrier else result
+    def unpack(self, values):
+        return values[self.batch, self.slot]
+
+    def ramp(self, field, width=None):
+        """Fourier coefficients of the centred sawtooth of a normal field, smoothed to width."""
+        safe = torch.where(self.axial, self.order, torch.ones_like(self.order))
+        phase = -2*math.pi*safe*self.branch[:, None]
+        amplitude = field[:, None]*self.length[:, None]/(2*math.pi*safe)
+        width = self.width if width is None else width
+        amplitude = amplitude*torch.exp(-.5*width**2*self.k2)*self.axial
+        return torch.complex(-amplitude*phase.sin(), amplitude*phase.cos())
+
+    def plane(self, spectrum):
+        """Plane average at the vacuum fraction."""
+        phase = 2*math.pi*self.order*self.zfrac[:, None]
+        return (spectrum*torch.complex(phase.cos(), phase.sin())*self.axial).real.sum(-1)
+
+    def ramp_plane(self, field):
+        """The exact sawtooth at the vacuum plane, midpoint at its jump, free of Fourier ringing."""
+        distance = (self.zfrac-self.branch).remainder(1.)
+        return field*self.length*torch.where(distance == 0, 0., distance-.5)*self.slab
+
+    def expand_spectrum(self, value):
+        """Restore the retained modes to the shared FFT grid."""
+        output = value.new_zeros((len(self.counts), self.k2.shape[1], value.shape[-1]))
+        return output.scatter_add(1, self.selected_indices[..., None].expand_as(value),
+                                  value*self.selected_mask[..., None])
 
 
-def total_spectrum(state, geometry, kernels, density_width):
-    """Recurrent field only; component observers are assembled once at the end."""
-    cosine, sine = (torch.bmm(value, state) for value in geometry[:2])
+def coefficient_kernels(geometry, width, source_volume, base_width):
+    """Fourier kernels of the state: Gaussian moment carriers and local potential amplitudes."""
+    _, _, wave, br, bi, radial, *_, poisson, ivol = geometry
+    scales = br.new_tensor([1., width, width, width])
+    shape_im = (radial[..., None]*wave[:, :, None, :]*(base_width*source_volume)).flatten(-2)
+    real = torch.cat((br*poisson[..., None]*scales, radial*source_volume, torch.zeros_like(shape_im)), -1)
+    imag = torch.cat((bi*poisson[..., None]*scales, torch.zeros_like(radial), shape_im), -1)
+    return real*ivol[:, None, None], imag*ivol[:, None, None]
+
+
+def coefficient_contributions(state, geometry, kernels):
+    """Moment-carrier and local-amplitude potentials on the retained modes, as (real, imag)."""
+    cosine, sine = torch.bmm(geometry[0], state), torch.bmm(geometry[1], state)
+    kr, ki = kernels
+    real = kr*cosine+ki*sine
+    imag = ki*cosine-kr*sine
+    return (torch.stack((real[..., :4].sum(-1), imag[..., :4].sum(-1)), -1),
+            torch.stack((real[..., 4:].sum(-1), imag[..., 4:].sum(-1)), -1))
+
+
+def total_spectrum(state, geometry, kernels, width):
+    """The recurrent field: state, normal-dipole boundary, applied field and counter charge."""
+    cosine, sine = torch.bmm(geometry[0], state), torch.bmm(geometry[1], state)
     real, imag = kernels
-    internal = torch.stack(((real*cosine+imag*sine).sum(-1),
-                            (imag*cosine-real*sine).sum(-1)), -1)
-    proto, ramp, applied, z, normal = geometry[7:12]
-    dipole = (state[..., 0]*z+(state[..., 1:4]*density_width*normal[:, None]).sum(-1)).sum(-1)
-    return internal+dipole[:, None, None]*ramp+applied+proto
+    internal = torch.stack(((real*cosine+imag*sine).sum(-1), (imag*cosine-real*sine).sum(-1)), -1)
+    ramp, fixed, z, normal = geometry[7:11]
+    dipole = (state[..., 0]*z+(state[..., 1:4]*width*normal[:, None]).sum(-1)).sum(-1)
+    return internal+dipole[:, None, None]*ramp+fixed
+
+
+class SCFNumericalError(RuntimeError):
+    """The trajectory became nonfinite or ran away; nothing was clipped or substituted."""
 
 
 def ensure_cuda_linalg(device):
-    """Select cuSOLVER before any CUDA solve, including backward solves.
+    """Select cuSOLVER for CUDA solves: PyTorch may pick MAGMA for large batches, which crashed."""
+    if torch.device(device).type == 'cuda' and torch.backends.cuda.preferred_linalg_library().name != 'Cusolver':
+        torch.backends.cuda.preferred_linalg_library('cusolver')
+        logging.info('SCF CUDA linear algebra: cuSOLVER selected (process-wide)')
 
-    PyTorch's default heuristics can choose MAGMA for large batched matrices.
-    The v365 failure reports include a fatal MAGMA pointer-array error. Select
-    the supported cuSOLVER/cuBLAS route explicitly and keep that process-wide
-    preference for later autograd/audit calls. Never retry after a CUDA fault.
-    CPU and other device backends are unchanged.
-    """
-    if torch.device(device).type != 'cuda':
-        return
-    preferred = torch.backends.cuda.preferred_linalg_library
-    if preferred().name != 'Cusolver':
-        preferred('cusolver')
-        logging.info('SCF CUDA linear algebra: cuSOLVER/cuBLAS selected '
-                     '(process-wide); exact cached matrix-solve derivatives; '
-                     'torch=%s CUDA=%s', torch.__version__, torch.version.cuda)
 
-def factor_linear_system(matrix):
-    """Return checked, non-differentiated workspace for a live square matrix."""
-    if matrix.ndim < 2 or matrix.shape[-1] != matrix.shape[-2] or matrix.shape[-1] == 0:
-        raise ValueError('Linear operator must contain nonempty square matrices')
-    ensure_cuda_linalg(matrix.device)
-    with torch.no_grad():
-        if not bool(torch.isfinite(matrix).all()):
-            raise SCFNumericalError('Nonfinite constrained linear operator before LU factorization')
-        lu, pivots, info = torch.linalg.lu_factor_ex(matrix)
-        n = matrix.shape[-1]
-        # Invalid pivots must never reach a native permutation/indexing kernel.
-        valid = ((info == 0).all() & torch.isfinite(lu).all()
-                 & (pivots >= 1).all() & (pivots <= n).all())
-        if not bool(valid):
-            raise SCFNumericalError('Constrained LU factorization failed its status/finite/pivot '
-                               'checks; no shift or fallback applied')
-    return lu, pivots
+def moment_softness(reference, mask):
+    """Charge and dipole softness of the four moment coordinates of every atom."""
+    return (torch.cat((reference[..., -1:], reference[..., -3:-2].expand(-1, -1, 3)), -1)*mask[..., None]).flatten(-2)
 
-class _CachedLinearSolve(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, matrix, lu, pivots, right, adjoint):
-        ensure_cuda_linalg(matrix.device)
-        solved = torch.linalg.lu_solve(lu, pivots, right, adjoint=adjoint)
-        operator = matrix.mH if adjoint else matrix
-        defect = operator @ solved - right
-        scale = operator.abs() @ solved.abs() + right.abs()
-        allowance = (64 * matrix.shape[-1] * torch.finfo(matrix.dtype).eps) * scale.clamp_min(1.)
-        if not bool(torch.isfinite(solved).all() & (defect.abs() <= allowance).all()):
-            raise SCFNumericalError('Constrained linear solve failed its finite/backward-error '
-                               'check; no diagonal shift or solver substitution applied')
-        ctx.adjoint = adjoint
-        # Saving the output (not a detached internal copy) makes second and
-        # higher derivatives include the solution's dependence on A and B.
-        ctx.save_for_backward(matrix, lu, pivots, solved)
-        return solved
-
-    @staticmethod
-    def backward(ctx, grad_solution):
-        matrix, lu, pivots, solved = ctx.saved_tensors
-        dual = _CachedLinearSolve.apply(matrix, lu, pivots, grad_solution, not ctx.adjoint)
-        grad_matrix = None
-        if ctx.needs_input_grad[0]:
-            grad_matrix = -(solved @ dual.mH if ctx.adjoint else dual @ solved.mH)
-        return grad_matrix, None, None, dual if ctx.needs_input_grad[3] else None, None
-
-def solve_factored_system(matrix, lu, pivots, right):
-    """Solve using factors from THIS matrix/evaluation; no batch broadcasting.
-
-    Keep matrix attached. Factors are reusable workspace and carry no independent
-    derivative; all operator dependence goes through the exact solve identity.
-    """
-    if (matrix.shape != lu.shape or pivots.shape != matrix.shape[:-1]
-            or right.ndim != matrix.ndim or right.shape[:-1] != matrix.shape[:-1]
-            or pivots.dtype != torch.int32):
-        raise ValueError('Incompatible matrix, LU, pivot or right-hand-side shapes/dtype')
-    if (matrix.device != lu.device or matrix.device != pivots.device or matrix.device != right.device
-            or matrix.dtype != lu.dtype or matrix.dtype != right.dtype):
-        raise ValueError('Linear solve inputs must share device and floating dtype')
-    return _CachedLinearSolve.apply(matrix, lu.detach(), pivots, right, False)
-
-def prepare_charge_factorization(softness, kernel, mask, constraint=None):
-    """Factor the constrained geometry-only charge operator once per forward.
-
-    The matrix and scaling retain parameter/coordinate derivatives. Numerical
-    LU workspace is detached; solve_factored_system supplies the exact matrix
-    derivative, including double backward. Nothing is cached across calls.
-    LU handles the existing generally nonsymmetric Fourier slab operator;
-    no symmetrization, diagonal shift, or alternate boundary convention is used.
-    The optional constraint selects charge coordinates in a joint moment solve;
-    dipoles then remain unconstrained. The default constrains every coordinate.
-    """
-    present = mask.bool()
-    if kernel.shape != (*mask.shape, mask.shape[-1]) or softness.shape != mask.shape:
-        raise ValueError('Charge kernel/softness dimensions disagree with node mask')
-    if not bool(torch.isfinite(kernel).all() & torch.isfinite(softness).all()) or bool((softness[present] <= 0).any()):
-        raise SCFNumericalError('Charge kernel/softness must be finite, with positive atomic softness')
-    s = softness * mask
-    total = s.sum(-1, keepdim=True)
-    root = torch.sqrt(torch.where(present, s/total, torch.ones_like(s))) * mask
-    n = mask.shape[-1]
-    matrix = (kernel * root[..., None] * root[:, None, :]) * total[..., None]
-    matrix = matrix + torch.eye(n, dtype=matrix.dtype, device=matrix.device)
-    constraint = mask if constraint is None else constraint
-    if constraint.shape != mask.shape or not bool(torch.isfinite(constraint).all()) or bool((constraint.square().sum(-1)==0).any()):
-        raise ValueError('Each graph needs a finite, nonzero constraint with the coordinate-mask shape')
-    border = root * constraint
-    upper = torch.cat((matrix, border[..., None]), -1)
-    lower = torch.cat((border, torch.zeros_like(root[:, :1])), -1)[:, None, :]
-    bordered = torch.cat((upper, lower), -2)
-    lu, pivots = factor_linear_system(bordered)
-    return bordered, root, lu, pivots
 
 def moment_kernels(geometry, kernels, mask, sigma):
-    """Linear moment and completion responses, shared by every SCF step."""
-    co,si,wave=geometry[:3]
-    kr,ki=kernels
-    source_re=(co[...,None]*kr[:,:,None,:]+si[...,None]*ki[:,:,None,:]).flatten(-2)
-    source_im=(co[...,None]*ki[:,:,None,:]-si[...,None]*kr[:,:,None,:]).flatten(-2)
-    receiver=geometry[6][...,0,None,None]
-    observer_re=torch.cat((co[...,None],-sigma*si[...,None]*wave[:,:,None,:]),-1)*receiver
-    observer_im=torch.cat((-si[...,None],-sigma*co[...,None]*wave[:,:,None,:]),-1)*receiver
-    matrix=-(observer_re.flatten(-2).transpose(1,2)@source_re
-             +observer_im.flatten(-2).transpose(1,2)@source_im)
-    matrix=matrix.reshape(*matrix.shape[:2],mask.shape[-1],kr.shape[-1])
-    completion=-matrix[...,4:].flatten(-2)
-    matrix=matrix[...,:4].flatten(-2)
-    unit_v,unit_e=sample_spectrum(geometry[8],geometry)
-    observed=torch.cat((unit_v[...,:1],-sigma*unit_e[...,0,:]),-1).flatten(-2)
-    dipole=torch.cat((geometry[10][...,None],sigma*geometry[11][:,None,:].expand(-1,mask.shape[1],-1)),-1).flatten(-2)
-    matrix=matrix-observed[...,None]*dipole[:,None,:]
-    if len(geometry) > 14:
-        source, observer = geometry[14:16]
-        sampled = torch.cat((observer[..., 0, :1, :], -sigma*observer[..., 0, 1:, :]), -2)
-        matrix = matrix-torch.bmm(sampled.flatten(1, 2), source.flatten(1, 2).transpose(1, 2))
-    present=mask[...,None].expand(-1,-1,4).flatten(-2)
-    return matrix*present[...,None]*present[:,None,:],completion
-
-def moment_coordinates(reference, mask):
-    # Last entries remain [dipole softness, chi0, charge softness].
-    softness=torch.cat((reference[...,-1:],reference[...,-3:-2].expand(-1,-1,3)),-1)
-    present=mask[...,None].expand_as(softness)
-    constraint=torch.cat((mask[...,None],torch.zeros_like(softness[...,1:])), -1)
-    return softness.flatten(-2),present.flatten(-2),constraint.flatten(-2)
-
-def factor_moments(reference, kernel, mask):
-    softness,present,constraint=moment_coordinates(reference,mask)
-    return prepare_charge_factorization(softness,kernel,present,constraint)
-
-def screen_moments(current, proposal, reference, mask, factors, *, materialized=False):
-    """Apply the already validated geometry's constrained moment solve."""
-    matrix, root, lu, pivots = factors
+    """Linear response of the sampled moment drive to moments and local amplitudes."""
+    co, si, wave = geometry[:3]
+    kr, ki = kernels
+    source_re = (co[..., None]*kr[:, :, None, :]+si[..., None]*ki[:, :, None, :]).flatten(-2)
+    source_im = (co[..., None]*ki[:, :, None, :]-si[..., None]*kr[:, :, None, :]).flatten(-2)
+    receiver = geometry[6][..., 0, None, None]
+    observer_re = torch.cat((co[..., None], -sigma*si[..., None]*wave[:, :, None, :]), -1)*receiver
+    observer_im = torch.cat((-si[..., None], -sigma*co[..., None]*wave[:, :, None, :]), -1)*receiver
+    matrix = -(observer_re.flatten(-2).transpose(1, 2)@source_re+observer_im.flatten(-2).transpose(1, 2)@source_im)
+    matrix = matrix.reshape(*matrix.shape[:2], mask.shape[-1], kr.shape[-1])
+    completion = -matrix[..., 4:].flatten(-2)
+    # The slab boundary field of the normal dipole is rank one.
+    unit_v, unit_e = sample_spectrum(geometry[7], geometry)
+    observed = torch.cat((unit_v[..., :1], -sigma*unit_e[..., 0, :]), -1).flatten(-2)
+    dipole = torch.cat((geometry[9][..., None], sigma*geometry[10][:, None, :].expand(-1, mask.shape[1], -1)),
+                       -1).flatten(-2)
+    matrix = matrix[..., :4].flatten(-2)-observed[..., None]*dipole[:, None, :]
     present = mask[..., None].expand(-1, -1, 4).flatten(-2)
-    old, raw = current[..., :4].flatten(-2), proposal[..., :4].flatten(-2)
-    residual = (raw-old)*present
-    rhs = residual/torch.where(present.bool(), root, torch.ones_like(root))
-    charge_residual = residual.reshape(*mask.shape, 4)[..., 0].sum(-1, keepdim=True)
-    right = torch.cat((rhs, charge_residual), -1)[..., None]
-    solved = matrix @ right if materialized else solve_factored_system(matrix, lu, pivots, right)
-    value = ((old+root*solved[:, :-1, 0])*present).reshape(*mask.shape, 4)
-    # Remove charge roundoff only; the raw law already enforces fixed Q.
-    charge = value[..., 0]+mask*((proposal[..., 0]-value[..., 0]).sum(-1)/mask.sum(-1))[:, None]
-    return torch.cat((charge[..., None], value[..., 1:4], proposal[..., 4:]), -1)
+    return matrix*present[..., None]*present[:, None, :], completion
 
 
-def screen_coupled(current, proposal, reference, completion, mask, factors, *, materialized=False):
-    """Solve the linear moment response to the NEW completion coefficients.
+def screen_factors(softness, kernel, mask):
+    """Inverse of the bordered screened moment operator at fixed total charge, and its scaling.
 
-    The nonlinear chemical levels and completion are evaluated once. Their
-    known linear completion-to-moment coupling belongs in the same bordered
-    solve as moment-to-moment screening. Leaving it one iteration behind is
-    a block-Jacobi split that can introduce an oscillatory unstable mode.
-    This block-triangular solve preserves the raw constitutive fixed points,
-    total charge, configured mixing, and all coordinate/parameter derivatives.
+    In coordinates scaled by root = sqrt(S/sum S) the operator is I + root K root sum S,
+    bordered by the total-charge constraint; dipoles are unconstrained. The live
+    inverse keeps every coordinate, softness and higher derivative.
     """
-    if current.shape[-1] > 4:
-        delta = (proposal[..., 4:]-current[..., 4:])*mask[..., None]
-        # One cached matrix action replaces repeated Fourier projection of
-        # the same linear response; its coordinate derivatives stay attached.
-        drive = (completion@delta.flatten(-2)[..., None])[..., 0].reshape(*mask.shape, 4)
-        soft = reference[..., -1]*mask
-        value = drive[..., 0]
-        charge = soft*(value-(soft*value).sum(-1, keepdim=True)/soft.sum(-1, keepdim=True))
-        dipole = reference[..., -3:-2]*drive[..., 1:4]
-        proposal = torch.cat((proposal[..., :1]+charge[..., None],
-                              proposal[..., 1:4]+dipole, proposal[..., 4:]), -1)
-    return screen_moments(current, proposal, reference, mask, factors,
-                          materialized=materialized)
+    present = mask[..., None].expand(-1, -1, 4).flatten(-2)
+    total = softness.sum(-1, keepdim=True)
+    root = torch.sqrt(torch.where(present.bool(), softness/total, torch.ones_like(softness)))*present
+    matrix = kernel*root[..., None]*root[:, None, :]*total[..., None]
+    matrix = matrix+torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device)
+    border = root*torch.cat((mask[..., None], torch.zeros_like(mask[..., None].expand(-1, -1, 3))), -1).flatten(-2)
+    bordered = torch.cat((torch.cat((matrix, border[..., None]), -1),
+                          torch.cat((border, torch.zeros_like(root[:, :1])), -1)[:, None, :]), -2)
+    ensure_cuda_linalg(bordered.device)
+    inverse, info = torch.linalg.inv_ex(bordered)
+    if not bool(torch.isfinite(inverse).all() & (info == 0).all()):
+        raise SCFNumericalError('Singular or nonfinite screened moment operator')
+    return inverse, root
 
 
 def prepare_screen_action(reference, completion, mask, factors, geometry, p0, target, sigma):
-    """Eliminate the affine moment block of the SAME screened update.
+    """The screened moment update as an affine map of the local amplitudes, built once per geometry.
 
-    In old + (I-L)^-1*(F(old)-old), the linear moment response L cancels
-    exactly. The remaining drive is the nonlinear chemical level and NEW
-    completion, plus the fixed external/geometry field. Keep every derivative
-    through this per-call composition, including inverse, softness and position.
+    In old+(I-L)^-1 (F(old)-old) the linear moment response L cancels exactly.
+    The chemical levels, the applied and counter-charge fields and the geometry
+    dipoles enter the offset; only the nonlinear amplitudes change between updates.
     """
-    inverse, root, _, _ = factors
-    present=mask[...,None].expand(-1,-1,4).flatten(-2)
-    divisor=torch.where(present.bool(),root,torch.ones_like(root))
-    action=root[...,None]*inverse[:,:-1,:-1]/divisor[:,None,:]
-    action=action*present[...,None]*present[:,None,:]
-    soft,_,_=moment_coordinates(reference,mask)
-    levels=action.reshape(action.shape[0],action.shape[1],mask.shape[1],4)[...,0]*reference[:,:,-1][:,None,:]
-    sources=action@(soft[...,None]*completion)
-    zero=p0.new_zeros((*mask.shape,completion.shape[-1]//mask.shape[1]+4))
-    values,field=sample_state_spectrum(geometry[7]+geometry[9],zero,geometry)
-    base=torch.cat(((reference[...,-1]*values[...,0])[...,None],
-                    p0[...,1:4]/sigma+reference[...,1:4]-reference[...,-3:-2]*sigma*field[...,0,:]),-1)
-    offset=(action@(base*mask[...,None]).flatten(1)[...,None]).squeeze(-1)
-    offset=offset+root*inverse[:,:-1,-1]*target[:,None]
-    return torch.cat((levels,sources),-1),offset
+    inverse, root = factors
+    present = mask[..., None].expand(-1, -1, 4).flatten(-2)
+    divisor = torch.where(present.bool(), root, torch.ones_like(root))
+    action = root[..., None]*inverse[:, :-1, :-1]/divisor[:, None, :]*present[..., None]*present[:, None, :]
+    values, field = sample_spectrum(geometry[8], geometry)
+    base = torch.cat(((reference[..., -1]*(reference[..., -2]+values[..., 0]))[..., None],
+                      p0[..., 1:4]/sigma+reference[..., 1:4]-reference[..., -3:-2]*sigma*field[..., 0, :]), -1)
+    offset = (action@(base*mask[..., None]).flatten(1)[..., None]).squeeze(-1)+root*inverse[:, :-1, -1]*target[:, None]
+    return action@(moment_softness(reference, mask)[..., None]*completion), offset
 
 
-def apply_screen_action(levels, completion, mask, target, action, offset):
-    right=torch.cat((levels,completion.flatten(1)),-1)
-    value=((action@right[...,None]).squeeze(-1)+offset).reshape(*mask.shape,4)*mask[...,None]
-    charge=value[...,0]+mask*((target-value[...,0].sum(-1))/mask.sum(-1))[:,None]
-    return torch.cat((charge[...,None],value[...,1:4],completion),-1)
-
-
-@dataclass(frozen=True)
-class RootOptions:
-    max_steps: int = 100
-    tolerance: float = 1.e-7
-    mixing: float = .5
-    history: int = 5
-    linear_tolerance: float = 1.e-9
-    linear_max_steps: int = 160
-    linear_restart: int = 24
-    fixed_steps: bool = False
-
-    def __post_init__(self):
-        if not isinstance(self.max_steps, int) or isinstance(self.max_steps, bool) or self.max_steps < 1:
-            raise ValueError("Coupled SCF step count must be a positive integer")
-        if not math.isfinite(self.tolerance) or self.tolerance <= 0 or not 0 < self.mixing <= 1:
-            raise ValueError("Invalid coupled fixed-point solver options")
-        if not isinstance(self.fixed_steps, bool):
-            raise TypeError("fixed_steps must be bool")
-        if min(self.linear_max_steps, self.linear_restart) < 1 or self.linear_tolerance <= 0:
-            raise ValueError("Invalid coupled adjoint solver options")
-
-class SCFConvergenceError(RuntimeError):
-    """A valid strict root iteration exhausted its convergence budget."""
-
-class SCFNumericalError(RuntimeError):
-    """The selected trajectory became nonfinite or catastrophically amplified.
-
-    This is an error, not a clipped state, accepted earlier iterate, skipped batch,
-    altered objective or solver-mode substitution.
-    """
-
-def _trajectory_scale(initial):
-    # A precision-scaled runaway budget in the defined state coordinates, not
-    # a physical bound or a theorem that smaller trajectories are stable. Large
-    # state amplification precedes high-degree energy/force-loss contractions.
-    # This fail-fast convention never changes an accepted finite trajectory.
-    x=initial.detach()
-    if not bool(torch.isfinite(x).all()):
-        raise SCFNumericalError('SCF initial state is not finite')
-    peak=x.abs().amax() if x.numel() else x.new_zeros(())
-    return peak.clamp_min(1.) / math.sqrt(torch.finfo(x.dtype).eps)
-
-def _check_trajectory(state,limit,step,kind):
-    with torch.no_grad():
-        peak=state.detach().abs().amax() if state.numel() else state.new_zeros(())
-        # A single scalar decision covers NaN/Inf and amplitude. Avoid separate
-        # device synchronizations for finiteness and magnitude on every step.
-        if bool((~torch.isfinite(peak)) | (peak>limit)):
-            flat=state.detach().abs().reshape(-1)
-            index=int(torch.nan_to_num(flat,nan=float('inf'),posinf=float('inf')).argmax()) if flat.numel() else 0
-            per_graph=state[0].numel() if state.ndim>=2 and len(state) else max(1,state.numel())
-            graph=index//per_graph if state.ndim>=2 else 0
-            detail = ""
-            if state.ndim == 3 and state.shape[-1] >= 4 and (state.shape[-1]-4) % 4 == 0:
-                c = (state.shape[-1]-4)//4
-                sample = state[graph].detach()
-                blocks = {"q": (0, 1), "d_scaled": (1, 4),
-                          "scalar_potential": (4, 4+c), "vector_potential": (4+c, state.shape[-1])}
-                peaks = {name: float(sample[:, a:b].abs().max()) for name, (a, b) in blocks.items() if b > a}
-                detail = f" Failing-graph block maxima={peaks}."
-            raise SCFNumericalError(f'{kind} SCF numerical runaway at step={step}, graph={graph}: '
-                f'max|state|={float(peak):.6e}, fixed initial-scale precision budget={float(limit):.6e}. '
-                'Finite-step unrolling is not a convergence solver. No state was clipped or substituted; '
-                'check the requested update count and the nonlinear response. Do not relax spectrum parity.' + detail)
-
-def _stopping_residual(function, state, args, proposal):
-    physical = getattr(function, "convergence_residual", None)
-    return proposal-state if physical is None else physical(state,*args)
+def apply_screen_action(amplitudes, mask, target, sources, offset):
+    value = ((sources@amplitudes.flatten(1)[..., None]).squeeze(-1)+offset).reshape(*mask.shape, 4)*mask[..., None]
+    charge = value[..., 0]+mask*((target-value[..., 0].sum(-1))/mask.sum(-1))[:, None]
+    return torch.cat((charge[..., None], value[..., 1:4], amplitudes), -1)
 
 
 def residual_mixing_weight(current, previous, old_weight, floor):
     """Residual-scaled regularization of the two-history least-squares fit.
 
-    Minimize ||r-w*(r-r_old)||^2 + (||r||^2+||r_old||^2)*w^2
-    + floor*(w-w_old)^2 on [0,1]. The Gram trace controls the conditioning
-    when consecutive residuals become parallel, even far from a root.
-    A machine-precision floor alone leaves almost coincident residuals with
-    arbitrarily sensitive history weights and hence spurious force spikes.
-    All residual derivatives remain attached, including double backward.
+    Minimize ||r-w(r-r_old)||^2+(||r||^2+||r_old||^2) w^2+floor (w-w_old)^2 on
+    [0,1]. The Gram trace conditions nearly parallel residuals, whose history
+    weights would otherwise give spurious force spikes.
     """
     axes = tuple(range(1, current.ndim))
     difference = current-previous
@@ -830,563 +490,70 @@ def residual_mixing_weight(current, previous, old_weight, floor):
 
 
 def secant_relaxation(displacement, residual_change, previous, mixing, floor):
-    """Retain the requested step for resolved, mild response slopes.
+    """Keep the requested step for mild response slopes and shorten stiff ones.
 
-    The dimensionless secant ratio is r=mixing**2*||dr||**2/||dx||**2.
-    A C2 positive-part transition leaves r<=1 untouched and approaches the
-    inverse secant norm for large r. This restores ordinary mixed proposals
-    where safe, rather than damping every finite electronic update. Retain
-    the previous step when the secant is unresolved at floating precision.
+    With r=mixing**2 ||dr||**2/||dx||**2, a C2 positive-part transition leaves
+    r<=1 untouched and approaches the inverse secant norm for large r.
     """
     axes = tuple(range(1, displacement.ndim))
     dx = displacement.square().sum(axes, keepdim=True)
     dr = mixing**2*residual_change.square().sum(axes, keepdim=True)
     excess = (dr-dx).clamp_min(0.)
     stabilizer = excess*(excess/(dr+floor)).square()
-    return torch.sqrt((mixing**2*dx+floor*previous.square()) /
-                      (dx+stabilizer+floor))
+    return torch.sqrt((mixing**2*dx+floor*previous.square())/(dx+stabilizer+floor))
 
 
-def unroll_steps(function, initial, args, steps, mixing, checkpointed=False):
-    """Differentiate the earlier two-history trajectory with a slope safeguard.
+def unroll_steps(update, initial, steps, mixing, checkpointed=False):
+    """Two-history residual mixing with a secant safeguard, differentiated through every step.
 
-    Preserve the original convex residual mixing and requested step for mild
-    local response. Reduce only an overly stiff mixed proposal using its
-    measured secant. Both history coefficients and the safeguard remain in
-    autograd, including force derivatives. Evaluate the physical map exactly
-    once per requested step; neither the charge law nor its fixed point changes.
+    Both history coefficients and the safeguard remain in autograd, including
+    force derivatives. checkpointed recomputes blocks of steps in backward.
     """
-    limit = _trajectory_scale(initial)
+    if not bool(torch.isfinite(initial).all()):
+        raise SCFNumericalError('SCF initial state is not finite')
+    # A precision-scaled runaway budget, not a physical bound.
+    limit = initial.detach().abs().amax().clamp_min(1.)/math.sqrt(torch.finfo(initial.dtype).eps)
     axes = tuple(range(1, initial.ndim))
-    # Ratios used by the history fit and secant safeguard must be conditioned
-    # for force derivatives as well as values. An eps-sized Gram floor can leave
-    # almost coincident iterates with accurate states but enormous forces.
-    # Retain the full derivative of the scale: it depends on the initial
-    # electronic state, and therefore can depend on atomic positions.
-    floor = torch.finfo(initial.dtype).eps**(1./3.) * initial.square().sum(axes, keepdim=True).clamp_min(1.)
-    proposal = function(initial, *args)
-    _check_trajectory(proposal, limit, 1, 'finite-step proposal')
+    # History ratios must be conditioned for forces as well as values.
+    floor = torch.finfo(initial.dtype).eps**(1./3.)*initial.square().sum(axes, keepdim=True).clamp_min(1.)
+
+    def check(peaks, first):
+        invalid = (~torch.isfinite(peaks)) | (peaks > limit)
+        if bool(invalid.any()):
+            step, graph = invalid.nonzero()[0].tolist()
+            raise SCFNumericalError(f'SCF runaway at step {first+step}, graph {graph}: max|state| '
+                                    f'{float(peaks[step, graph]):.6e} exceeds {float(limit):.6e}')
+
+    proposal = update(initial)
+    check(proposal.detach().abs().amax(axes)[None], 1)
     residual = proposal-initial
     state = initial+mixing*residual
     previous_state, previous_proposal = initial, state
     weight = torch.zeros_like(floor)
     relaxation = torch.full_like(floor, mixing)
-    block_size = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
-    for start in range(1, int(steps), block_size):
-        length = min(block_size, int(steps)-start)
+    block = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
+    for start in range(1, int(steps), block):
         def advance(value, old_state, old_proposal, old_residual, weight, relaxation,
-                    *fixed, count=length, offset=start):
+                    count=min(block, int(steps)-start), first=start+1):
             peaks = []
-            for iteration in range(count):
-                proposed = function(value, *fixed)
+            for _ in range(count):
+                proposed = update(value)
                 peaks.append(proposed.detach().abs().amax(axes))
                 current = proposed-value
-                relaxation = secant_relaxation(value-old_state, current-old_residual,
-                                               relaxation, mixing, floor)
+                relaxation = secant_relaxation(value-old_state, current-old_residual, relaxation, mixing, floor)
                 mixed = value+relaxation*current
                 weight = residual_mixing_weight(current, old_residual, weight, floor)
                 old_state = value
                 value = (1.-weight)*mixed+weight*old_proposal
                 old_proposal, old_residual = mixed, current
-            peaks = torch.stack(peaks)
-            invalid = (~torch.isfinite(peaks)) | (peaks > limit)
-            if bool(invalid.any()):
-                iteration, graph = invalid.nonzero()[0].tolist()
-                raise SCFNumericalError('finite-step proposal SCF numerical runaway '
-                    f'at step={offset+iteration+1}, graph={graph}: '
-                    f'max|state|={float(peaks[iteration,graph]):.6e}, '
-                    f'fixed initial-scale precision budget={float(limit):.6e}. '
-                    'No state was clipped or substituted.')
+            check(torch.stack(peaks), first)
             return value, old_state, old_proposal, old_residual, weight, relaxation
-        values = (state, previous_state, previous_proposal, residual, weight, relaxation, *args)
+        values = (state, previous_state, previous_proposal, residual, weight, relaxation)
         state, previous_state, previous_proposal, residual, weight, relaxation = (
             checkpoint(advance, *values, use_reentrant=False, preserve_rng_state=False)
             if checkpointed else advance(*values))
     return state
 
-
-def _norm(x):
-    return torch.linalg.vector_norm(x.reshape(-1))
-
-def solve_root(function: Callable, initial: torch.Tensor, args: Tuple[torch.Tensor, ...],
-               options: RootOptions):
-    """Safeguarded Anderson iteration.  The residual is F(x)-x, NOT a mixed step.
-
-    Call in no_grad for implicit solving.  This routine does not detach inputs
-    itself and is not used as a surrogate derivative for implicit force training.
-    Nonconvergence is an error, never a silent rollback to another physical state.
-    """
-    x = initial.clone()
-    limit = _trajectory_scale(initial)
-    xs, fs = [], []
-    previous_x = previous_f = None
-    previous_error = float("inf")
-    rejected = 0
-    for step in range(options.max_steps + 1):
-        _check_trajectory(x,limit,step,'strict-root iterate')
-        f = function(x, *args)
-        _check_trajectory(f,limit,step,'strict-root proposal')
-        residual = f - x
-        stopping = _stopping_residual(function, x, args, f)
-        error = float(stopping.detach().abs().max()) if x.numel() else 0.
-        if not torch.isfinite(residual).all() or not torch.isfinite(stopping).all():
-            raise RuntimeError(f"Coupled SCF produced a nonfinite state at step {step}")
-        if error <= options.tolerance:
-            return x, {"iterations": step, "residual": error, "rejected": rejected}
-        if step == options.max_steps:
-            break
-        # Reject an extrapolation that substantially worsens the fixed-point
-        # residual.  A fresh damped step uses the *same* map and charge law.
-        if previous_x is not None and error > 1.5 * previous_error and len(xs) > 1:
-            x = previous_x + options.mixing * (previous_f - previous_x)
-            xs, fs = [], []
-            previous_x = previous_f = None
-            rejected += 1
-            continue
-        previous_x, previous_f, previous_error = x, f, error
-        xs.append(x); fs.append(f)
-        if len(xs) > max(1, options.history):
-            xs.pop(0); fs.pop(0)
-        if len(xs) < 2 or options.history < 2:
-            x = x + options.mixing * residual
-            continue
-        X = torch.stack([z.reshape(-1) for z in xs])
-        F = torch.stack([z.reshape(-1) for z in fs])
-        R = F - X
-        gram = R @ R.T
-        scale = gram.diagonal().mean().clamp_min(torch.finfo(x.dtype).tiny)
-        gram = gram + (1.e-4 * scale) * torch.eye(len(xs), dtype=x.dtype, device=x.device)
-        weights = torch.linalg.solve(gram, torch.ones(len(xs), dtype=x.dtype, device=x.device))
-        denom = weights.sum()
-        if not torch.isfinite(weights).all() or denom.abs() <= torch.finfo(x.dtype).eps:
-            x = x + options.mixing * residual
-            xs, fs = [], []
-        else:
-            weights = weights / denom
-            x = ((1 - options.mixing) * (weights @ X) + options.mixing * (weights @ F)).reshape_as(x)
-    raise SCFConvergenceError(
-        f"Coupled SCF did not converge in {options.max_steps} steps: "
-        f"max |F(x)-x|={error:.3e}, tolerance={options.tolerance:.3e}. "
-        "Increase the SCF budget or reduce mixing; no state/backend was substituted.")
-
-def gmres(operator: Callable, rhs: torch.Tensor, options: RootOptions):
-    """Restarted matrix-free GMRES with a verified true residual.
-
-    The Krylov vectors are constants during an implicit solve.  Derivatives of
-    the solution are supplied by _LinearSolve, including its double backward.
-    """
-    shape = rhs.shape
-    b = rhs.reshape(-1)
-    x = torch.zeros_like(b)
-    bnorm = _norm(b)
-    if float(bnorm) == 0.:
-        return x.reshape(shape)
-    tol = max(options.linear_tolerance, 20. * torch.finfo(b.dtype).eps)
-    target = tol * bnorm
-    total = 0
-    def matvec(v):
-        return operator(v.reshape(shape)).reshape(-1)
-    while total < options.linear_max_steps:
-        r = b - matvec(x)
-        beta = _norm(r)
-        if beta <= target:
-            return x.reshape(shape)
-        length = min(options.linear_restart, options.linear_max_steps - total, b.numel())
-        vectors = [r / beta]
-        H = b.new_zeros((length + 1, length))
-        # Small least-squares problems use normal QR/lstsq, never normal equations.
-        for j in range(length):
-            v = matvec(vectors[j])
-            for _ in range(2):  # reorthogonalization matters near a solved root
-                for k in range(j + 1):
-                    coeff = torch.dot(vectors[k], v)
-                    H[k, j] += coeff
-                    v = v - coeff * vectors[k]
-            hnext = _norm(v)
-            H[j + 1, j] = hnext
-            total += 1
-            beta_e1 = b.new_zeros(j + 2); beta_e1[0] = beta
-            small = H[:j + 2, :j + 1]
-            # 'gels' is also supported on CUDA and Arnoldi columns have full rank
-            # until happy breakdown.  QR handles that breakdown without a zero
-            # trailing row being promoted to a column.
-            coeffs = torch.linalg.lstsq(small, beta_e1, driver="gels").solution
-            estimate = _norm(beta_e1 - small @ coeffs)
-            candidate = x + torch.stack(vectors[:j + 1], dim=1) @ coeffs
-            breakdown = float(hnext) <= 10. * torch.finfo(b.dtype).eps
-            if estimate <= target or breakdown or j == length - 1:
-                true_error = _norm(b - matvec(candidate))
-                if true_error <= target:
-                    return candidate.reshape(shape)
-                if breakdown or j == length - 1:
-                    x = candidate
-                    break
-            vectors.append(v / hnext)
-    relative = float(_norm(b - matvec(x)) / bnorm)
-    raise RuntimeError(f"Coupled SCF adjoint did not converge: relative residual={relative:.3e} "
-                       f"after {total} Krylov steps (required {tol:.3e})")
-
-def _linear_operator(function, transpose, state, args):
-    """A = I-dF/dx or its transpose at frozen state/inputs."""
-    with torch.enable_grad():
-        z = state.detach().requires_grad_(True)
-        f = function(z, *(a.detach() for a in args))
-        if not f.requires_grad:
-            return lambda v: v
-        if transpose:
-            def operator(v):
-                with torch.enable_grad():
-                    jt = torch.autograd.grad(f, z, v, retain_graph=True, allow_unused=True)[0]
-                return v if jt is None else v - jt
-        else:
-            # Reverse-over-reverse JVP works for operations without forward-AD
-            # kernels.  It does not materialize a Jacobian or a Hessian.
-            seed = torch.zeros_like(f, requires_grad=True)
-            jt_seed = torch.autograd.grad(f, z, seed, create_graph=True, retain_graph=True,
-                                          allow_unused=True)[0]
-            def operator(v):
-                if jt_seed is None or not jt_seed.requires_grad:
-                    return v
-                with torch.enable_grad():
-                    jv = torch.autograd.grad(jt_seed, seed, v, retain_graph=True,
-                                             allow_unused=True)[0]
-                return v if jv is None else v - jv
-    return operator
-
-def _proxies(values):
-    # An intermediate proxy makes the following autograd.grad a PARTIAL
-    # derivative, while preserving original-input dependence for double backward.
-    # Leaf constants also need a proxy for the local Jacobian, but no derivative
-    # is returned to a non-differentiable original input.
-    return [x + 0. if x.requires_grad else x.detach() for x in values]
-
-class _LinearSolve(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, function, options, transpose, rhs, state, *args):
-        solution = gmres(_linear_operator(function, transpose, state, args), rhs, options)
-        ctx.function, ctx.options, ctx.transpose = function, options, transpose
-        ctx.save_for_backward(solution, rhs, state, *args)
-        return solution
-
-    @staticmethod
-    def backward(ctx, grad_solution):
-        solution, rhs, state, *args = ctx.saved_tensors
-        higher = torch.is_grad_enabled()
-        with torch.enable_grad():
-            adjoint = _LinearSolve.apply(ctx.function, ctx.options, not ctx.transpose,
-                                        grad_solution, state, *args)
-            z, *xs = _proxies([state, *args])
-            f = ctx.function(z, *xs)
-            left, right = (solution, adjoint) if ctx.transpose else (adjoint, solution)
-            jt_left = (torch.autograd.grad(f, z, left, create_graph=True,
-                                         retain_graph=True, allow_unused=True)[0]
-                       if f.requires_grad and z.requires_grad else None)
-            if jt_left is None or not jt_left.requires_grad:
-                derivatives = [None] * (1 + len(args))
-            else:
-                variables = [z, *xs]
-                chosen = [i for i, value in enumerate(variables) if value.requires_grad]
-                calculated = torch.autograd.grad((jt_left * right).sum(),
-                    [variables[i] for i in chosen], create_graph=higher, allow_unused=True)
-                derivatives = [None] * len(variables)
-                for i, derivative in zip(chosen, calculated): derivatives[i] = derivative
-        derivatives = tuple(d if original.requires_grad else None
-                            for d, original in zip(derivatives, [state, *args]))
-        return (None, None, None, adjoint, *derivatives)
-
-class _ImplicitRoot(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, function, options, initial, *args):
-        if options.fixed_steps:
-            raise ValueError("implicit_root cannot differentiate an unconverged finite trajectory; "
-                             "use unroll_fixed_steps explicitly")
-        state, stats = solve_root(function, initial, args, options)
-        # The root belongs to the physical constitutive equation, not the
-        # nonlinear preconditioning path. Differentiate that equation directly.
-        # The forward solver has already checked its raw residual.
-        ctx.function, ctx.options = getattr(function, "raw", function), options
-        ctx.save_for_backward(state, *args)
-        # Statistics are not model inputs, never part of a training target.
-        info = initial.new_tensor([stats["iterations"], stats["residual"], stats["rejected"]])
-        ctx.mark_non_differentiable(info)
-        return state, info
-
-    @staticmethod
-    def backward(ctx, grad_state, grad_info):
-        state, *args = ctx.saved_tensors
-        higher = torch.is_grad_enabled()
-        with torch.enable_grad():
-            z, *xs = _proxies([state, *args])
-            f = ctx.function(z, *xs)
-            adjoint = _LinearSolve.apply(ctx.function, ctx.options, True, grad_state,
-                                        state, *args)
-            chosen = [i for i, value in enumerate(xs) if value.requires_grad]
-            calculated = (torch.autograd.grad(f, [xs[i] for i in chosen], adjoint,
-                                            create_graph=higher, allow_unused=True)
-                          if chosen and f.requires_grad else [None] * len(chosen))
-            derivatives = [None] * len(xs)
-            for i, derivative in zip(chosen, calculated): derivatives[i] = derivative
-        derivatives = tuple(d if a.requires_grad else None for d, a in zip(derivatives, args))
-        return (None, None, None, *derivatives)
-
-def implicit_root(function, initial, *args, options=None):
-    """Return a verified root and [iterations, residual, rejected extrapolations].
-
-    Every differentiable dependency MUST be passed in args. The starting guess
-    is not an implicit variable. A failed root or verified adjoint solve is an
-    error, not an approximate gradient, restored state, or backend substitution.
-    """
-    options = options or RootOptions()
-    if options.fixed_steps:
-        raise ValueError('implicit_root requires a converged root, not fixed_steps=True')
-    return _ImplicitRoot.apply(function, options, initial, *args)
-
-
-class CoupledResponse(AtomicPotentialResponse):
-    """Nonlinear latent response with a scalar energy and its charge derivative."""
-    coupled = True
-    spectral = True
-
-    def __init__(self, node_feats_irreps, charges_irreps, num_elements,
-                 potential_widths=None, density_width=1.5, field_widths=(1.5, 3.),
-                 potential_amplitudes_smearing_width=1.5,
-                 include_local_energy=False, include_point_receiver=False,
-                 source_basis='gaussian', **kwargs):
-        irreps = o3.Irreps(node_feats_irreps)
-        if o3.Irreps(charges_irreps).dim != 4:
-            raise ValueError("CoupledResponse uses monopoles and dipoles (atomic_multipoles_max_l=1)")
-        sigma_phi = float(potential_amplitudes_smearing_width)
-        if not math.isfinite(sigma_phi) or sigma_phi <= 0:
-            raise ValueError('potential_amplitudes_smearing_width must be positive')
-        # Source resolution and receiver averaging have different roles.
-        # Keep the established two-scale basis without a second widths list.
-        potential_widths = (sigma_phi, 2*sigma_phi) if potential_widths is None else potential_widths
-        source_widths = sorted(set(float(w) for w in potential_widths))
-        self.potential_amplitudes_smearing_width = sigma_phi
-        # The first channel supplies the density-width moment response. A point
-        # sample resolves the retained ESP spectrum without adding a density
-        # source, changing the Fourier cutoff or inverting a Gaussian.
-        if not isinstance(include_point_receiver, bool):
-            raise TypeError('include_point_receiver must be bool')
-        widths = [float(density_width)]+sorted(set(float(w) for w in field_widths)-{float(density_width)})
-        if any(not math.isfinite(w) or w <= 0 for w in source_widths+widths):
-            raise ValueError("Gaussian widths must be finite and positive")
-        if include_point_receiver:
-            widths.insert(1, 0.)
-        scalar_slices, vector_slices = [], []
-        for (mul, ir), sl in zip(irreps, irreps.slices()):
-            if ir == o3.Irrep('0e'):
-                scalar_slices.append((sl.start, sl.stop))
-            elif ir == o3.Irrep('1o'):
-                vector_slices.append((sl.start, sl.stop))
-        scalar_channels = sum(b-a for a,b in scalar_slices)
-        vector_channels = sum((b-a)//3 for a,b in vector_slices)
-        super().__init__(scalar_channels, vector_channels, num_elements,
-                         source_channels=len(source_widths), field_channels=len(widths),
-                         density_width=density_width, separate_chemical_level=bool(source_widths),
-                         include_local_energy=include_local_energy)
-        self.scalar_slices, self.vector_slices = scalar_slices, vector_slices
-        self.coarse_dim = 4
-        # A radial contrast has zero integral and separates shape variation
-        # from the common amplitude. Both bases span exactly the same fields;
-        # their coordinates impose different optimization/decay conditioning.
-        if source_basis not in ('gaussian', 'difference'):
-            raise ValueError('source_basis must be gaussian or difference')
-        self.source_basis = source_basis
-        self.potential_widths = ()
-        channels=len(source_widths)
-        self.state_irreps = o3.Irreps(f'0e+1o+{channels}x0e+{channels}x1o').simplify()
-        self.register_buffer('source_widths', torch.tensor(source_widths))
-        self.register_buffer('receiver_widths', torch.tensor(widths))
-        # Observation resolution is independent of response sampling. Older
-        # checkpoints recover exactly the same value from their saved widths.
-        self.density_reference_width = max(widths)
-        self.register_buffer('feature_norms', torch.ones(irreps.dim))
-        self.register_buffer('proto_coefficients', torch.zeros(num_elements, 64))
-        self.register_buffer('proto_fitted', torch.tensor(False))
-        self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
-        # Neutral-atom form factors f_s(q) = -rho_s(q)/q^2 for counter-charge
-        # energies, fixed physics of the DFT neutral atoms (fit_neutral_atoms).
-        from .potential import FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM
-        nq = int(round(FORM_FACTOR_MAXIMUM/FORM_FACTOR_SPACING))+1
-        self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, nq))
-        self.register_buffer('neutral_atom_fitted', torch.tensor(False))
-        # Scalar references also contribute charge-linear work to the energy.
-        self.register_buffer('scalar_reference', torch.zeros(2))
-        self.register_buffer('spectral_cutoff', torch.tensor(1.))
-        self.register_buffer('deployment_steps', torch.tensor(50))
-        self.register_buffer('deployment_mixing', torch.tensor(.5))
-        self.deployment_mode = 'unroll_scf'
-        # The neutral-atom potential belongs to the reference configuration.
-        # Learn its deformation response; retain the reference in observers.
-        # This is a formulation version, not an adjustable training parameter.
-        self.response_reference = 'neutral'
-        self.raw_vacuum_boundary = True
-        # Model definition, not an adjustable accuracy/MD setting. Legacy
-        # checkpoints retain their old semantics until explicitly retrained.
-        self.energy_derivatives = True
-        # One DFT energy supplies forces and EF by differentiation. The raw
-        # vacuum ESP then supplies WF; counter transfer has its own derivative.
-        self.energy_reference = 'dft'
-        # The scalar vacuum observer uses the complete learned deformation
-        # potential. 'multipole' (patch-1 checkpoints only) drops its
-        # short-range completion; it trained the dipole worse.
-        self.vacuum_observer = 'complete'
-
-    def get_extra_state(self):
-        return {'deployment_mode': self.deployment_mode,
-                'energy_derivatives': getattr(self, 'energy_derivatives', False),
-                'energy_reference': getattr(self, 'energy_reference', 'dft'),
-                'vacuum_observer': getattr(self, 'vacuum_observer', 'complete'),
-                'raw_vacuum_boundary': getattr(self, 'raw_vacuum_boundary', False),
-                'response_reference': getattr(self, 'response_reference', 'total'),
-                'charge_response': getattr(self, 'charge_response', 'geometry'),
-                'source_basis': getattr(self, 'source_basis', 'difference'),
-                'proto_smearing_width': getattr(self, 'proto_smearing_width', None),
-                'fixed_dft_observations': getattr(self, 'fixed_dft_observations', False),
-                'density_reference_width': self.farfield_width,
-                'potential_amplitudes_smearing_width': getattr(self, 'potential_amplitudes_smearing_width',
-                    float(self.source_widths[0]) if len(self.source_widths) else self.density_width)}
-
-    @property
-    def farfield_width(self):
-        width = getattr(self, 'density_reference_width', None)
-        return float(self.receiver_widths.max()) if width is None else float(width)
-
-    def farfield_filter(self, k2):
-        """Additional density smoothing; its square is the density-loss weight."""
-        variance = self.farfield_width**2-self.density_width**2
-        if variance < 0:
-            raise ValueError('Density reference width must be at least the density width')
-        return torch.exp(-.5*variance*k2)
-
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
-                              missing_keys, unexpected_keys, error_msgs):
-        from .desmearing import SpectralDecoder, FrozenSpectralDecoder
-        decoder_key = prefix+'raw_decoder.coefficients'
-        frozen_key = prefix+'raw_decoder.variances'
-        if frozen_key in state_dict and not isinstance(getattr(self, 'raw_decoder', None), FrozenSpectralDecoder):
-            self.raw_decoder = FrozenSpectralDecoder().to(self.source_widths)
-        elif decoder_key in state_dict and (getattr(self, 'raw_decoder', None) is None
-                                            or isinstance(self.raw_decoder, FrozenSpectralDecoder)):
-            self.raw_decoder = SpectralDecoder().to(self.source_widths)
-        elif decoder_key not in state_dict and frozen_key not in state_dict and getattr(self, 'raw_decoder', None) is not None:
-            self.raw_decoder = None
-        state_dict = dict(state_dict)
-        saved_widths = state_dict.get(prefix+'receiver_widths')
-        if saved_widths is not None and saved_widths.numel() != self.field_channels:
-            # Saved receivers are part of the trained architecture. In
-            # particular, retain the point channel in older checkpoints.
-            self.field_channels = saved_widths.numel()
-            for name in ('receiver_widths', 'scalar_field_scale', 'vector_field_scale'):
-                setattr(self, name, getattr(self, name).new_empty(self.field_channels))
-            for name in ('state_scalar', 'state_vector', 'neighbor_scalar',
-                         'neighbor_vector', 'neighbor_divergence', 'neighbor_gradient'):
-                layer = getattr(self, name)
-                layer.in_features = self.field_channels
-                layer.weight = nn.Parameter(layer.weight.new_empty(layer.out_features, self.field_channels),
-                                             requires_grad=layer.weight.requires_grad)
-        for name in ('vacuum_reference_integrals', 'scalar_reference', 'neutral_atom_form_factors',
-                     'neutral_atom_fitted'):
-            key = prefix+name
-            if key not in state_dict:
-                state_dict[key] = torch.zeros_like(getattr(self, name))
-        super()._load_from_state_dict(state_dict, prefix, local_metadata, strict,
-                                     missing_keys, unexpected_keys, error_msgs)
-
-    def set_extra_state(self, state):
-        self.energy_derivatives = bool(state.get('energy_derivatives', False))
-        self.energy_reference = state.get('energy_reference', 'dft')
-        self.vacuum_observer = state.get('vacuum_observer', 'complete')
-        if self.energy_reference not in ('dft', 'vacuum'):
-            raise ValueError('Unknown saved energy reference')
-        mode = state.get('deployment_mode', 'unroll_scf')
-        if mode not in ('unroll_scf', 'implicit'):
-            raise ValueError(f'Unknown saved solver mode {mode}')
-        self.deployment_mode = mode
-        self.raw_vacuum_boundary = bool(state.get('raw_vacuum_boundary', False))
-        reference = state.get('response_reference', 'total')
-        if reference not in ('neutral', 'total'):
-            raise ValueError(f'Unknown saved response reference {reference}')
-        self.response_reference = reference
-        charge = state.get('charge_response', 'geometry')
-        if charge not in ('field', 'geometry'):
-            raise ValueError(f'Unknown saved charge response {charge}')
-        self.charge_response = charge
-        self.source_basis = state.get('source_basis', 'difference')
-        self.proto_smearing_width = state.get('proto_smearing_width')
-        self.fixed_dft_observations = state.get('fixed_dft_observations', False)
-        if self.source_basis not in ('gaussian', 'difference'):
-            raise ValueError('Unknown saved potential basis')
-        width = float(state.get('density_reference_width', float(self.receiver_widths.max())))
-        if not math.isfinite(width) or width < self.density_width:
-            raise ValueError('Invalid saved density reference width')
-        self.density_reference_width = width
-        self.potential_amplitudes_smearing_width = float(state.get(
-            'potential_amplitudes_smearing_width', float(self.source_widths[0]) if len(self.source_widths) else self.density_width))
-
-class CoupledGeometry(SpectralGeometry):
-    """Same Fourier support for the response, observers and moment screening."""
-    def __init__(self, model, data, positions):
-        super().__init__(model, data, positions)
-        r = self.response
-        active = self.mask & (self.k2 > 0)
-        co, si = self.phase.real*active[..., None], -self.phase.imag*active[..., None]
-        basis = self.basis[..., [0, 3, 1, 2]]
-        widths = r.source_widths.to(positions)
-        gaussian = torch.exp(-.5*self.k2[..., None]*widths.square())
-        radial = gaussian
-        if len(widths) and getattr(r, 'source_basis', 'difference') == 'difference':
-            radial = torch.cat((gaussian[..., :1], gaussian[..., 1:]-gaussian[..., :1]), -1)
-        receiver = torch.exp(-.5*self.k2[..., None]*r.receiver_widths.to(positions).square())
-        proto = self.proto if len(widths) else torch.zeros_like(self.proto)
-        self.proto = proto
-        self.neutral_reference = getattr(r, 'response_reference', 'total') == 'neutral'
-        self.observer_proto = proto
-        if self.neutral_reference:
-            # A fixed neutral-atom field is not an extra applied perturbation.
-            # Its local chemistry is already an input through MACE geometry.
-            # Both learned long- and short-range fields still enter every step.
-            # The scalar vacuum observation is not a truncated-FFT plane.
-            # Use the same training-fitted atomic reference whether or not a
-            # band-limited proto spectrum is supplied. It is independent of
-            # the chosen vacuum plane and common to EF and vacuum.
-            self.vacuum_reference = (self.attrs.sum(1)@r.vacuum_reference_integrals)/self.volume*self.slab
-            proto = torch.zeros_like(proto)
-        ramp = self.ramp(-self.slab_factor)
-        # Zero-mean sawtooth coordinate: the same origin as the correction ramp.
-        zn = ((self.pack(positions)-self.origin[:, None])*self.normal[:, None]).sum(-1)*self.present
-        self.tensors = (co, si, self.wave, basis.real*active[..., None], basis.imag*active[..., None],
-                        radial*active[..., None], receiver*active[..., None], torch.view_as_real(proto),
-                        torch.view_as_real(ramp), torch.view_as_real(self.applied+self.counter),
-                        zn, self.normal, -self.coulomb, self.volume.reciprocal())
-        # Pack the physical spectral support. Padded FFT corners and k=0
-        # never enter the dense moment operator or any recurrent field sample.
-        # Observers expand back to the common FFT grid without changing modes.
-        count = int(active.sum(-1).max())
-        if count == 0:
-            raise ValueError('The Fourier cutoff contains no nonzero cell modes')
-        indices = torch.arange(active.shape[1],device=positions.device).expand_as(active)
-        indices = indices.masked_fill(~active,active.shape[1]).sort(-1).values[:,:count]
-        self.selected_mask = indices<active.shape[1]
-        self.selected_indices = indices.clamp_max(active.shape[1]-1)
-        rows = torch.arange(len(self.counts),device=positions.device)[:,None]
-        def selected(value):
-            mask = self.selected_mask.reshape(*self.selected_mask.shape,*([1]*(value.ndim-2)))
-            return value[rows,self.selected_indices]*mask
-        self.tensors = tuple(selected(value) if i<10 or i==12 else value
-                             for i,value in enumerate(self.tensors))
-        base_width = float(widths[0]) if len(widths) else self.width
-        self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3, base_width)
-        if self.molecular is not None:
-            self.tensors = (*self.tensors, self.molecular_source,
-                            self.molecular.sample_map(r.receiver_widths), self.molecular.counter)
-
-    def expand_spectrum(self, value):
-        """Restore only the retained physical modes to the shared FFT grid."""
-        output = value.new_zeros((len(self.counts),self.k2.shape[1],value.shape[-1]))
-        return output.scatter_add(1,self.selected_indices[...,None].expand_as(value),
-                                  value*self.selected_mask[...,None])
 
 def electrolyte_molecules(model, data, positions):
     """Packed indicator (graphs, size, K) of the molecules and ions of the electrolyte.
@@ -1401,8 +568,7 @@ def electrolyte_molecules(model, data, positions):
     x = positions.detach().cpu().double().numpy()
     batch = data['batch'].cpu().numpy()
     first, second = data['edge_index'].cpu().numpy()
-    shifts = (np.zeros((len(first), 3)) if data.get('shifts') is None
-              else data['shifts'].detach().cpu().double().numpy())
+    shifts = data['shifts'].detach().cpu().double().numpy()
     bonded = (np.linalg.norm(x[second]-x[first]+shifts, axis=-1)
               < 1.2*(covalent_radii[numbers[first]]+covalent_radii[numbers[second]]))
     cells = data['cell'].reshape(-1, 3, 3).detach().cpu().double().numpy()
@@ -1432,24 +598,22 @@ def electrolyte_molecules(model, data, positions):
     np.logical_or.at(electrode, batch, extended[label])
     molecules = [np.unique(label[ptr[g]:ptr[g+1]][~extended[label[ptr[g]:ptr[g+1]]]]) if electrode[g] else []
                  for g in range(graphs)]
-    members = np.zeros((graphs, int(max(ptr[1:]-ptr[:-1])), max([len(m) for m in molecules]+[0])))
+    members = np.zeros((graphs, int(max(ptr[1:]-ptr[:-1])), max([len(m) for m in molecules]+[1])))
     for g, ids in enumerate(molecules):
         for k, fragment in enumerate(ids):
             members[g, np.flatnonzero(label[ptr[g]:ptr[g+1]] == fragment), k] = 1.
     return positions.new_tensor(members)
 
 
-def molecular_projection(members, softness, factors, materialized):
-    """Maps from molecular charge excess to the state change that removes it.
+def molecular_projection(members, softness, factors):
+    """The screened state change that removes molecular charge excess, and the electrode charging.
 
-    Every molecule k of the electrolyte has its own multiplier nu_k in the charge
-    law, q_i = S_i (phi_i - lambda - nu_k), so that its net charge is held fixed
-    while the electrode takes the rest of Q. screened acts on the moments of the
-    screened update, raw on the charges of the unscreened law. Both keep Q.
-    charging is the screened moment response to a unit charge on the electrode.
+    Every molecule of the electrolyte has its own multiplier in the charge law,
+    so its net charge is held while the electrode takes the rest of Q. charging
+    is the screened moment response to a unit charge on the electrode.
     """
     graphs, size, count = members.shape
-    matrix, root, lu, pivots = factors
+    inverse, root = factors
     c4 = root.new_zeros((graphs, size, 4, count))
     c4[..., 0, :] = members
     c4 = c4.flatten(1, 2)
@@ -1458,541 +622,202 @@ def molecular_projection(members, softness, factors, materialized):
     unit[:, -1] = 1.
     right = torch.cat((torch.cat((softness[..., None]*c4/safe[..., None], root.new_zeros((graphs, 1, count))), 1),
                        unit), -1)
-    solved = matrix@right if materialized else solve_factored_system(matrix, lu, pivots, right)
-    response = root[..., None]*solved[:, :-1]
+    response = root[..., None]*(inverse@right)[:, :-1]
     shifts, charging = response[..., :count], response[..., count:]
     empty = torch.diag_embed((members.sum(1) == 0).to(response.dtype))
     screened = shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
     charging = charging-screened@(c4.transpose(1, 2)@charging)
-    s = softness.reshape(graphs, size, 4)[..., :1]
-    raw = s*members-s*(s*members).sum(1, keepdim=True)/s.sum(1, keepdim=True)
-    return screened, raw@torch.linalg.inv(members.transpose(1, 2)@raw+empty), charging[..., 0].reshape(graphs, size, 4)
+    return screened, charging[..., 0].reshape(graphs, size, 4)
 
 
-def prepare_coupled(model, data, local, constant_charge=True, geometry=None, functional=False, molecules=None,
-                    start=None):
-    """Prepare one live geometry/linear factorization, reused by every update."""
+def prepare_coupled(model, data, local, molecules=None, start=None):
+    """One live geometry, inverse and screened update map, reused by every step.
+
+    Without molecules this is the free solve from the geometry seed.
+    With molecules (indicator, charges) every electrolyte molecule keeps its
+    charge and the state starts from start plus Q times the electrode charging.
+    """
     r = model.field_dependent_charges_map
-    g = CoupledGeometry(model, data, local.positions) if geometry is None else geometry
+    g = CoupledGeometry(model, data, local.positions)
     features = g.pack(local.all_layer_feats)
-    scalar = torch.cat([features[..., a:b] for a,b in r.scalar_slices], -1)
-    vector = (torch.cat([features[..., a:b].reshape(*features.shape[:2], -1, 3)
-                        for a,b in r.vector_slices], -2) if r.vector_slices else
-              features.new_zeros((*features.shape[:2], 0, 3)))
+    scalar = torch.cat([features[..., a:b] for a, b in r.scalar_slices], -1)
+    vector = (torch.cat([features[..., a:b].reshape(*features.shape[:2], -1, 3) for a, b in r.vector_slices], -2)
+              if r.vector_slices else features.new_zeros((*features.shape[:2], 0, 3)))
     p0 = g.pack(local.field_independent_charge_density)
     if not hasattr(model, 'foundation_element_map'):
-        vector = vector[..., [2, 0, 1]]
-        p0 = p0[..., [0, 3, 1, 2]]
+        vector, p0 = vector[..., [2, 0, 1]], p0[..., [0, 3, 1, 2]]
     chemical, vector = r.geometry_features(scalar, vector)
-    mask = g.present
-    target = data['total_charge'].reshape(-1).to(p0)
-    state = p0.new_zeros((*p0.shape[:2], 4+4*r.source_channels))
-    state = torch.cat(((target/mask.sum(-1))[:, None, None]*mask[..., None],
-                       p0[..., 1:4]/r.density_width, state[..., 4:]), -1)
-    transport = angular_transport(local.positions, data['edge_index'], data.get('shifts'),
-        g.batch, g.slot, len(g.counts), g.size, float(model.r_max),
-        float(getattr(r, 'neighbor_width', r.receiver_widths.max())))
-    source, reference, species_level = r.prepare_reference(state, chemical, vector, g.attrs, p0, mask, target, transport)
-    state = torch.cat((state[..., :1], state[..., 1:4]+reference[..., 1:4], source), -1)
+    mask, target = g.present, data['total_charge'].reshape(-1).to(p0)
+    operator = angular_transport(local.positions, data['edge_index'], data['shifts'], g.batch, g.slot,
+                                 len(g.counts), g.size, float(model.r_max),
+                                 float(r.receiver_widths.max())).permute(0, 3, 1, 2)
+    transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
+    source, reference, species_level = r.prepare_reference(chemical, vector, g.attrs, p0, mask, target, transport)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
-    factors = factor_moments(reference, kernel, mask)
-    if not functional:
-        # The same constrained matrix acts at EVERY finite update. Materialize
-        # its action once, with the checked LU and exact inverse derivative.
-        # This aggregates operator gradients before the expensive solve rather
-        # than repeating LU solves/checks in every force-loss backward branch.
-        # All coordinate, softness and higher derivatives remain attached.
-        matrix, root, lu, pivots = factors
-        identity = torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device).expand_as(matrix)
-        inverse = solve_factored_system(matrix, lu, pivots, identity)
-        factors = (inverse, root, lu, pivots)
-    prepared=()
-    if not functional:
-        radial=transport.permute(0,3,1,2)
-        difference=radial-torch.diag_embed(radial.sum(-1))
-        prepared=(*prepare_screen_action(reference,completion,mask,factors,g.tensors,p0,target,r.density_width),
-                  torch.cat((r.state_scalar.weight,r.neighbor_scalar.weight,r.neighbor_divergence.weight),-1),
-                  torch.cat((r.state_vector.weight,r.neighbor_vector.weight,r.neighbor_gradient.weight),-1),
-                  difference.flatten(1,2))
-    parameters = tuple(r.parameters())
-    names = tuple(name for name,_ in r.named_parameters())
-    # All geometry, reference and parameter dependencies are explicit for the
-    # converged-root adjoint, including the live linear operator behind LU.
-    # Species offsets are selected once by the geometric node maps. The
-    # recurrent neural features contain geometry, fields and messages only.
-    # Keep this scalar attached to autograd for training and implicit response.
-    # Electrode charging: each molecule of the electrolyte keeps a fixed charge.
-    confined = charging = ()
-    if molecules is not None:
-        soft, present_moments, _ = moment_coordinates(reference, mask)
-        *confined, charging = molecular_projection(molecules[0], soft*present_moments, factors, not functional)
-        confined = (*molecules, *confined)
-    fixed = (chemical, vector, species_level, p0, mask, target, transport, reference,
-             completion, *factors, *g.tensors, *g.kernels, *prepared, *confined)
-    count = len(fixed)
-    geometry_end = 13+len(g.tensors)
-
-    def evaluate(z, *args, screened=True, include_energy=False, observe=True):
-        chem, vec, level, initial, present, charge, neighbors, ref, coupling = args[:9]
-
-        def confine(proposal, screened):
-            if not confined:
-                return proposal
-            members, targets, projector = args[count-4], args[count-3], args[count-2 if screened else count-1]
-            excess = (members*proposal[..., :1]).sum(1)-targets
-            change = (projector@excess[..., None])[..., 0].reshape(*proposal.shape[:2], -1)
-            change = torch.cat((change, torch.zeros_like(proposal[..., change.shape[-1]:4])), -1)
-            return torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
-        factor = args[9:13]
-        geometry, kernels = args[13:geometry_end], args[geometry_end:geometry_end+2]
-        spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
-                    if observe else (total_spectrum(z*present[..., None], geometry, kernels, r.density_width),))
-        potential, field = sample_state_spectrum(spectral[0], z*present[..., None], geometry)
-        if screened and not observe and not functional:
-            levels,source=r.recurrent_coefficients(z,chem,vec,level,potential,field,initial,present,
-                charge,neighbors,ref,args[geometry_end+4:geometry_end+7])
-            proposal=confine(apply_screen_action(levels,source,present,charge,*args[geometry_end+2:geometry_end+4]),
-                             True)
-            return (proposal,), (*spectral,potential,field)
-        inputs = (z, chem, vec, level, potential, field, initial, present, charge, neighbors)
-        options = {'include_energy': include_energy, 'reference_offset': ref,
-                   'observe_chemical_level': observe}
-        if not functional:
-            options['prepared']=args[geometry_end+4:geometry_end+7]
-        result = (functional_call(r, dict(zip(names, args[count:])), inputs, options, strict=False)
-                  if functional else r(*inputs, **options))
-        proposal = result[0]
-        if screened:
-            proposal=confine(screen_coupled(z,proposal,ref,coupling,present,factor,materialized=not functional),
-                             True)
-        else:
-            proposal=confine(proposal,False)
-        return (proposal, *result[1:]), (*spectral, potential, field)
-
-    def update(z, *args):
-        return evaluate(z, *args, observe=False)[0][0]
-
-    update.raw = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]
-    update.convergence_residual = lambda z, *args: evaluate(z, *args, screened=False, observe=False)[0][0]-z
-    # Exact screened geometry-reference seed. The nonlinear response
-    # then updates density AND potential; this is not an inference-time fit.
-    spectra = evaluate_coefficients(state, g.tensors, g.kernels, r.density_width)
-    values, gradient = sample_state_spectrum(spectra[0], state, g.tensors)
-    chi, soft = reference[..., -2:].unbind(-1)
-    q = charge_closure(torch.zeros_like(p0[..., 0]), chi+values[..., 0], soft, target, mask)[0]
-    dipole = state[..., 1:4]-reference[..., -3:-2]*r.density_width*gradient[..., 0, :]
-    proposal = torch.cat((q[..., None], dipole, state[..., 4:]), -1)
-    state = screen_moments(state, proposal, reference, mask, factors, materialized=not functional)
-    if start is not None:
-        # The charged state starts from the neutral one with Q on the electrode.
+    softness = moment_softness(reference, mask)
+    factors = screen_factors(softness, kernel, mask)
+    action = prepare_screen_action(reference, completion, mask, factors, g.tensors, p0, target, r.density_width)
+    if molecules is None:
+        # The geometry seed: the exact affine solution at the reference amplitudes.
+        state = apply_screen_action(source, mask, target, *action)
+    else:
+        members, charges = molecules
+        projector, charging = molecular_projection(members, softness, factors)
         state = torch.cat((start[..., :4]+target[:, None, None]*charging, start[..., 4:]), -1)
-    return g, state, (*fixed, *parameters), update, evaluate
 
-def reference_predictions(model, data, g, fixed, state, response, spectral, output,
-                          materialized=True, condition_density=True):
-    """Complementary constitutive observations; never a deployment trajectory.
+    def update(z, observe=False):
+        potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, r.density_width), g.tensors)
+        amplitudes, hidden = r(chemical, vector, potential, field, mask, target, reference, transport)
+        proposal = apply_screen_action(amplitudes, mask, target, *action)
+        if molecules is not None:
+            excess = (members*proposal[..., :1]).sum(1)-charges
+            change = (projector@excess[..., None])[..., 0].reshape(*mask.shape, 4)
+            proposal = torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
+        if not observe:
+            return proposal
+        # The common chemical level of the charging energy, from the final hidden features.
+        f = reference[..., -1]*mask
+        f = f/f.sum(-1, keepdim=True)
+        common = r.common_level((f[..., None]*hidden).sum(1)).squeeze(-1)+(f*species_level).sum(-1)
+        return proposal, potential, (reference[..., -1]*mask).sum(-1), common
+    return g, state, update
 
-    At measured mu, solve the charge/dipole response exactly while keeping the
-    current nonlinear coefficients fixed. At measured total potential, evaluate
-    the same chemical-level map in its saved field reference. No Poisson inversion of
-    the measured density is used. The ordinary fixed-Q prediction is untouched.
+
+def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, compute_stress=False,
+                     mode='unroll_scf', mixing=None):
+    """One electronic trajectory, one scalar energy and its derivatives.
+
+    The energy is the DFT free energy at fixed total charge Q, counter charge
+    Q_cc and external field. Forces are -dE/dR, EF = -dE/dQ at fixed Q_cc and
+    the cell voltage dE/dQ - dE/dQ_cc is the derivative along Q_cc = -Q.
+    WF = vacuum potential - EF. The neutral interface fixes the charge of every
+    electrolyte molecule; the same number of updates then charges the electrode.
     """
     r = model.field_dependent_charges_map
-    chemical, vector, species_level, p0, mask, target, neighbors, reference = fixed[:8]
-    factors = fixed[9:13]
-    observed = (data['fermi_level_weight'].reshape(-1)>0) & (data['weight'].reshape(-1)>0)
-    if not bool(observed.any()):
-        return None
-    if bool((observed & ~torch.isfinite(data['fermi_level'].reshape(-1))).any()):
-        raise FloatingPointError('Nonfinite observed Fermi level for reference conditioning')
-    result = {key:value for key,value in output.items()
-              if key.endswith('_dft') or key.endswith('_dft_mask') or
-              key in ('energy','k_vectors','k_vectors_mask','k_vectors_grid_shape',
-                      'density_smearing_width','potential_smearing_width')}
-    masks = {}
-    if condition_density:
-        potential, field = spectral[-2:]
-        # With the nonlinear chemical levels/sources fixed, this is an affine
-        # response. One existing constrained solve gives its exact fixed-Q state.
-        seed = torch.cat((state[..., :4],response[0][..., 4:]),-1)
-        seed_v, seed_e = sample_state_spectrum(total_spectrum(seed,g.tensors,g.kernels,r.density_width),seed,g.tensors)
-        delta_v = seed_v[..., 0]-potential[..., 0]
-        softness = reference[..., -1]*mask
-        charge = response[0][..., 0]+softness*(delta_v-(response[2]*delta_v).sum(-1,keepdim=True))
-        dipole = response[0][..., 1:4]-reference[..., -3:-2]*r.density_width*(seed_e[..., 0,:]-field[..., 0,:])
-        raw = torch.cat((charge[..., None],dipole,response[0][..., 4:]),-1)
-        solved = screen_moments(seed,raw,reference,mask,factors,materialized=materialized)
-        solved_v, _ = sample_state_spectrum(total_spectrum(solved,g.tensors,g.kernels,r.density_width),solved,g.tensors)
-        mu = response[1]+(response[2]*(solved_v[..., 0]-potential[..., 0])).sum(-1)+model.fermi_level_offset+g.vacuum_reference
-        # The last bordered-inverse column is dq/dQ. Its last entry, divided by
-        # sum(s), is dmu/dQ for this frozen-coefficient response. Use the exact
-        # change of ensemble, retaining every operator/parameter derivative.
-        matrix, root, lu, pivots = factors
-        if materialized:
-            column = matrix[..., -1]
-        else:
-            right = matrix.new_zeros((*matrix.shape[:-1],1)); right[:, -1,0] = 1.
-            column = solve_factored_system(matrix,lu,pivots,right)[..., 0]
-        s, present, _ = moment_coordinates(reference,mask)
-        stiffness = column[:, -1]/(s*present).sum(-1)
-        if bool((observed & (~torch.isfinite(stiffness) | (stiffness.abs()<=torch.finfo(stiffness.dtype).tiny))).any()):
-            raise RuntimeError('Reference-conditioned chemical-potential response is singular')
-        scalar_reference = getattr(r, 'scalar_reference', mu.new_zeros(2))
-        label = torch.where(observed,data['fermi_level'].reshape(-1)-scalar_reference[0],mu)
-        delta_charge = (label-mu)/torch.where(observed,stiffness,torch.ones_like(stiffness))
-        direction = (root*column[:, :-1]).reshape(*mask.shape,4)
-        solved = torch.cat((solved[..., :4]+direction*delta_charge[:, None,None],solved[..., 4:]),-1)
-        total, carrier, regular, _, bare = evaluate_coefficients(solved,g.tensors,g.kernels,r.density_width,include_carrier=True)
-        total, carrier, regular, bare = (g.expand_spectrum(x) for x in (total,carrier,regular,bare))
-        if g.molecular is not None:
-            correction = torch.view_as_real(g.molecular.spectrum(
-                moment_sum(solved, g.molecular_source)+g.molecular.counter))
-            total, carrier = total+correction, carrier+correction
-        net_charge = solved[..., 0].sum(-1)
-        density = bare/torch.where(g.coulomb>0,-g.coulomb,1.)[..., None]
-        density = density+torch.stack(((g.k2==0)*(net_charge/g.volume)[:, None],torch.zeros_like(g.k2)),-1)
-        smoothing = r.farfield_filter(g.k2)
-        vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
-        potential_reference = g.vacuum_reference
-        if g.neutral_reference:
-            total = total+torch.view_as_real(g.observer_proto)
-            potential_reference = potential_reference-g.plane(g.observer_proto)
-        result.update(fourier_density=density*g.ngrid,
-                      fourier_farfield_density=density*smoothing[..., None]*g.ngrid,
-                      fourier_potential=(carrier+regular)*g.ngrid,
-                      fourier_carrier_potential=bare*g.ngrid,
-                      fourier_local_potential=regular*g.ngrid,
-                      fourier_total_potential=total*g.ngrid,
-                      vacuum_potential=vacuum, potential_reference=potential_reference,
-                      total_charge=net_charge, reference_charge_error=net_charge-target,
-                      reference_charge_stiffness=stiffness)
-        if getattr(r, 'fixed_dft_observations', False):
-            from .desmearing import observe_smoothed_fields
-            result = observe_smoothed_fields(g, solved, result)
-        if getattr(r, 'raw_decoder', None) is not None:
-            result = r.raw_decoder(g, solved, result)
-        masks = {key:observed for key in ('fourier_density','fourier_potential','vacuum_potential')}
-    # Only complete retained DFT fields are valid inputs. A missing spectrum
-    # is not a measured zero field; those graphs receive no conditional EF loss.
-    field_key = 'fourier_potential' if g.neutral_reference else 'fourier_total_potential'
-    if field_key+'_dft' in output:
-        complete = (~g.mask | (g.k2==0) | output[field_key+'_dft_mask']).all(-1)
-        use = observed & complete & (data['fourier_potential_weight']>0)
-        if not g.neutral_reference:
-            use &= data['fourier_proto_potential_weight']>0
-        measured = output[field_key+'_dft']/g.ngrid
-        if (getattr(r, 'fixed_dft_observations', False) or
-                (getattr(r, 'raw_decoder', None) is not None and bool(r.raw_decoder.enabled[1]))):
-            measured = measured*torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)[..., None]
-        rows = torch.arange(len(g.counts),device=state.device)[:, None]
-        selected = measured[rows,g.selected_indices]*g.selected_mask[..., None]
-        selected = torch.where(use[:, None,None],selected,spectral[0])
-        values, gradients = sample_spectrum(selected,g.tensors)
-        conditional = r(state,chemical,vector,species_level,values,gradients,p0,mask,target,neighbors,
-                        include_energy=False,reference_offset=reference)
-        result['fermi_level'] = conditional[1]+model.fermi_level_offset+g.vacuum_reference
-        masks['fermi_level'] = use
-    result['reference_masks'] = masks
-    return result
-
-
-def counter_source_energy(g, coarse, regular, normal_dipole):
-    """Coulomb energy of the prescribed Gaussian source with the whole system.
-
-    -Q_cc <U>_g over the learned deformation field (coarse multipoles plus
-    its short-range completion, on the model grid), the slab-dipole cross
-    term, and the exact source terms of CounterCharge: self energy, its own
-    boundary term, the applied-field work and the point-nucleus neutral-atom
-    reference. d/dQ_cc of this energy is minus the potential at the source.
-    """
-    rho = g.counter_density
-    deformation = g.volume*(rho.conj()*(g.coulomb*coarse-regular)).real.sum(-1)
-    return deformation+g.slab_factor*normal_dipole*g.counter_moment+g.counter_energy
-
-
-def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
-                     constant_charge=True, compute_stress=False, mode=None, mixing=None,
-                     tolerance=1.e-7, reference_conditioning=False):
-    """One electronic trajectory and one scalar energy, including all response.
-
-    For electronic free-energy labels, ``energy`` represents that free energy.
-    Forces are its negative total position derivative, including the electronic
-    response, at fixed charge, cell and prescribed external controls.
-    The single energy target is the supplied DFT electronic free energy.
-    EF=-partial_Q E at fixed counter charge C; WF=ESP_vac-EF. On the MD path
-    C=-Q, the conjugate transfer voltage is partial_Q E-partial_C E. These
-    voltages differ by ESP_vac+partial_C E, which is not generally constant.
-    No stationary-state/envelope approximation or charge integration is used.
-    """
-    if reference_conditioning not in (False, True, 'none', 'fermi_level', 'electronic'):
-        raise ValueError('Unknown reference-conditioning observation')
-    energy_derivatives = getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
-    if getattr(model.field_dependent_charges_map, 'energy_reference', 'dft') != 'dft':
-        raise ValueError('This export learned a different energy target. Retrain with the DFT-energy '
-                         'definition; changing its saved energy_reference is not a conversion.')
-    outer_grad = torch.is_grad_enabled()
-    if energy_derivatives and reference_conditioning not in (False, 'none'):
-        raise ValueError('Energy-derived Fermi levels require reference_conditioning: none')
-    with torch.set_grad_enabled(energy_derivatives or training or compute_force or compute_stress or outer_grad):
-        r = model.field_dependent_charges_map
-        mode = r.deployment_mode if mode is None else mode
-        mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
-        if mode not in ('unroll_scf', 'shortcut_scf', 'implicit') or int(steps) < 1 or not 0 < mixing <= 1:
-            raise ValueError('Invalid coupled SCF mode, iteration budget or mixing')
-        if not constant_charge:
-            raise NotImplementedError('CoupledResponse uses fixed total charge; voltage MD evolves that charge. Native and variational updates retain constant-Fermi evaluation.')
+    mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
+    if mode not in ('unroll_scf', 'shortcut_scf') or int(steps) < 1 or not 0 < mixing <= 1:
+        raise ValueError('Invalid coupled SCF mode, step count or mixing')
+    checkpointed, outer_grad = training and mode == 'shortcut_scf', torch.is_grad_enabled()
+    with torch.enable_grad():
         data = dict(data)
-        if energy_derivatives:
-            # Sibling graph nodes give partial derivatives at fixed other
-            # charge, even when the caller supplied counter_charge=-Q.
-            charge_input = data['total_charge'].clone().requires_grad_(True)
-            counter_input = data.get('counter_charge', torch.zeros_like(charge_input)).clone().requires_grad_(True)
-            data['total_charge'], data['counter_charge'] = charge_input, counter_input
+        # Leaf copies give partial derivatives at fixed other charge, even when Q_cc = -Q.
+        charge = data['total_charge'].clone().requires_grad_(True)
+        counter = data.get('counter_charge', torch.zeros_like(charge)).clone().requires_grad_(True)
+        data['total_charge'], data['counter_charge'] = charge, counter
         positions = data['positions']
         if compute_force:
             positions.requires_grad_(True)
         strain = None
         if compute_stress:
-            if bool(molecular_enabled(data, data['total_charge'].reshape(-1)).any()):
-                raise NotImplementedError('The cubic molecular correction supports fixed-cell energies and forces; general strain/stress is not implemented')
             strain = positions.new_zeros((len(data['ptr'])-1, 3, 3), requires_grad=True)
-            symmetric = .5*(strain+strain.transpose(-1,-2))
+            symmetric = .5*(strain+strain.transpose(-1, -2))
             data['positions'] = positions+torch.einsum('ni,nij->nj', positions, symmetric[data['batch']])
-            cell = data['cell'].reshape(-1,3,3)
+            cell = data['cell'].reshape(-1, 3, 3)
             data['cell'] = cell+cell@symmetric
             edge_batch = data['batch'][data['edge_index'][0]]
-            data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj',data['shifts'],symmetric[edge_batch])
+            data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj', data['shifts'], symmetric[edge_batch])
         local = model.local_part(data, compute_force=compute_force)
+        zero = torch.zeros_like(charge).detach()
+        _, initial, update = prepare_coupled(model, dict(data, total_charge=zero, counter_charge=zero), local)
+        neutral = unroll_steps(update, initial, steps, mixing, checkpointed)
+        members = electrolyte_molecules(model, data, local.positions)
+        g, initial, update = prepare_coupled(model, data, local, (members, (members*neutral[..., :1]).sum(1)),
+                                             neutral)
+        state = unroll_steps(update, initial, steps, mixing, checkpointed)
+        proposal, potential, softness, common = update(state, observe=True)
+        residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
 
-        def solve(update, initial, args, steps):
-            if mode == 'implicit':
-                return implicit_root(update, initial, *args,
-                    options=RootOptions(max_steps=int(steps), mixing=mixing, tolerance=tolerance,
-                                        linear_tolerance=min(1.e-9,tolerance*.01)))
-            state = unroll_steps(update, initial, args, int(steps), mixing,
-                                 checkpointed=training and mode == 'shortcut_scf')
-            return state, state.new_tensor([steps, 0., 0.])
-
-        # Electrode charging. The neutral interface fixes the charge of every
-        # electrolyte molecule; the same number of updates then charges it with
-        # those charges held, so the electrode takes all of Q.
-        members = (electrolyte_molecules(model, data, local.positions)
-                   if getattr(r, 'confined_charging', False) else None)
-        molecules = None
-        if members is not None and members.shape[-1]:
-            zero = torch.zeros_like(data['total_charge']).detach()
-            neutral = dict(data, total_charge=zero, counter_charge=zero)
-            _, initial, args, update, _ = prepare_coupled(model, neutral, local, functional=mode == 'implicit')
-            neutral_state, _ = solve(update, initial, args, steps)
-            molecules = (members, (members*neutral_state[..., :1]).sum(1))
-        g, initial, args, update, evaluate = prepare_coupled(model, data, local, functional=mode == 'implicit',
-                                                             molecules=molecules, start=molecules and neutral_state)
-        if molecules is None:
-            state, info = solve(update, initial, args, steps)
-        else:
-            state, info = solve(update, initial, args, steps)
-            info = info+info.new_tensor([steps, 0., 0.])
-        response, spectral = evaluate(state, *args, screened=False, include_energy=True)
-        proposal, mu = response[:2]
-        total, lr, sr, effective = (g.expand_spectrum(value) for value in spectral[:4])
-        if g.molecular is not None:
-            correction = torch.view_as_real(g.molecular.spectrum(
-                moment_sum(state, g.molecular_source)+g.molecular.counter))
-            total, lr = total+correction, lr+correction
-        potential, field = spectral[-2:]
-        residual = ((proposal-state)*g.present[..., None]).abs().amax((1,2))
-        if not bool(torch.isfinite(state).all() & torch.isfinite(residual).all()):
-            raise SCFNumericalError('Nonfinite coupled electronic state')
-        state = state*g.present[..., None]
         moments = torch.cat((state[..., :1], state[..., 1:4]*r.density_width), -1)
         density_coefficients = g.unpack(moments)[..., [0, 2, 3, 1]]
-        # Reuse the terminal observation's carrier; do not repeat the two
-        # source-to-Fourier products or recover it by subtracting large fields.
-        carrier, regular = g.expand_spectrum(spectral[4]), sr
-        safe = torch.where(g.coulomb>0, -g.coulomb, 1.)
-        coarse = carrier/safe[..., None]
-        charge = state[..., 0].sum(-1)
-        zero = g.k2 == 0
-        coarse = coarse+torch.stack((zero*(charge/g.volume)[:,None], torch.zeros_like(g.k2)), -1)
+        carrier, regular = (g.expand_spectrum(x) for x in coefficient_contributions(state, g.tensors, g.kernels))
+        total_charge = state[..., 0].sum(-1)
+        coarse = carrier/torch.where(g.coulomb > 0, -g.coulomb, 1.)[..., None]
+        coarse = coarse+torch.stack(((g.k2 == 0)*(total_charge/g.volume)[:, None], torch.zeros_like(g.k2)), -1)
         dipole = (moments[..., :1]*(g.pack(local.positions)-g.origin[:, None])+moments[..., 1:4]).sum(1)
         normal_dipole = (dipole*g.normal).sum(-1)
-        periodic_energy = .5*g.volume*(coarse.square().sum(-1)*g.coulomb).sum(-1)
-        boundary_energy = .5*g.slab_factor*normal_dipole.square()
-        if g.molecular is not None:
-            molecular_moments = moment_sum(state, g.molecular_source)
-            boundary_energy = boundary_energy+g.molecular.energy(
-                molecular_moments+g.molecular.counter)
-            dipole = torch.where(g.molecular.active[:, None], molecular_moments[:, 1:4], dipole)
-        counter_energy = counter_source_energy(g, torch.view_as_complex(coarse.contiguous()),
-                                               torch.view_as_complex(regular.contiguous()), normal_dipole)
-        electronic = periodic_energy+boundary_energy-(dipole*g.external).sum(-1)+counter_energy
-        electronic = electronic-model.fermi_level_offset*charge
-        if not getattr(model.coulomb_energy, 'include_self_interaction', True):
-            self_terms = model.coulomb_energy.self_interaction_terms(density_coefficients)
-            electronic = electronic-.5*g.pack((density_coefficients*self_terms).sum(-1)).sum(-1)
-        local_electronic = response[6].sum(-1)
-        if energy_derivatives:
-            target = charge_input.reshape(-1)
-            counter = counter_input.reshape(-1)
-            # The former common-level observer now parameterizes chemical
-            # charging work. Its complete Q/R dependence is differentiated;
-            # the conditional charge-closure multiplier is not a Fermi level.
-            common = (response[2]*response[5]).sum(-1)
-            local_electronic = local_electronic+.5*target.square()/response[3]-target*common
-            reference = r.scalar_reference
-            # Electrons are exchanged at the DFT Fermi-level gauge (the fitted
-            # vacuum reference and scalar EF offset). The counter charge needs
-            # no gauge term: its energy uses the zero-mean potential of point
-            # nuclei and electrons, as the plug-in does. Hence dE/dQ on the
-            # neutral path is <U>_cc - mu, the DFT plug-in identity.
-            electronic = electronic-g.vacuum_reference*target-reference[0]*target
-        energy = local.energies.sum(-1)+electronic+local_electronic
+        # The counter charge in the learned deformation field, the slab cross term and its own terms.
+        deformation = g.coulomb*torch.view_as_complex(coarse.contiguous())-torch.view_as_complex(regular.contiguous())
+        counter_energy = (g.volume*(g.counter_density.conj()*deformation).real.sum(-1)
+                          + g.slab_factor*normal_dipole*g.counter_moment+g.counter_energy)
+        q = charge.reshape(-1)
+        electrostatic = (.5*g.volume*(coarse.square().sum(-1)*g.coulomb).sum(-1)+.5*g.slab_factor*normal_dipole.square()
+                         - (dipole*g.external).sum(-1)+counter_energy-model.fermi_level_offset*total_charge
+                         - g.vacuum_reference*q)
+        # Charging work of the charge law at the common chemical level.
+        electron = .5*q.square()/softness-q*common
+        energy = local.energies.sum(-1)+electrostatic+electron
+        inputs = [charge, counter]+([positions] if compute_force else [])+([strain] if compute_stress else [])
+        derivatives = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True,
+                                          retain_graph=training or (outer_grad and not compute_force))
+        charge_potential = derivatives[0].reshape(-1)
+        counter_potential = (torch.zeros_like(counter) if derivatives[1] is None else derivatives[1]).reshape(-1)
         forces = stress = None
-        charge_potential = counter_potential = None
-        if compute_force or compute_stress or energy_derivatives:
-            inputs = ([charge_input, counter_input] if energy_derivatives else [])+([positions] if compute_force else [])+([strain] if compute_stress else [])
-            deriv = torch.autograd.grad(energy.sum(), inputs, create_graph=training,
-                retain_graph=training or (outer_grad and not compute_force), allow_unused=True)
-            if energy_derivatives:
-                charge_potential = deriv[0].reshape(-1)
-                counter_potential = (deriv[1] if deriv[1] is not None else torch.zeros_like(counter_input)).reshape(-1)
-            if compute_force:
-                value = deriv[2 if energy_derivatives else 0]
-                forces = -value if value is not None else torch.zeros_like(positions)
-            if compute_stress:
-                stress = deriv[-1]/g.volume[:,None,None] if deriv[-1] is not None else torch.zeros_like(strain)
-        mu = -charge_potential if energy_derivatives else mu+model.fermi_level_offset+g.vacuum_reference
-        vacuum = g.plane(torch.view_as_complex(total.contiguous()))+g.vacuum_reference
-        potential_reference = g.vacuum_reference
-        if g.neutral_reference:
-            # Restore the full band-limited field for spatial observations.
-            # Its finite-grid neutral-atom tail is replaced by the fitted
-            # atomic reference in the scalar observer, not fed back into SCF.
-            total = total+torch.view_as_real(g.observer_proto)
-            potential_reference = potential_reference-g.plane(g.observer_proto)
-        smoothing = r.farfield_filter(g.k2)
-        output = {'energy':energy, 'forces':forces, 'stress':stress,
-            'virials': -stress*g.volume[:,None,None] if stress is not None else None,
-            'density_coefficients':density_coefficients, 'dipole':dipole, 'total_charge':charge,
-            'fermi_level':mu, 'vacuum_potential':vacuum,
-            'potential_reference':potential_reference,
-            'fourier_density':coarse*g.ngrid, 'fourier_farfield_density':coarse*smoothing[...,None]*g.ngrid,
-            'fourier_effective_density':effective*g.ngrid,
-            'fourier_potential':(lr+sr)*g.ngrid, 'fourier_total_potential':total*g.ngrid,
-            'fourier_local_potential':regular*g.ngrid, 'fourier_carrier_potential':carrier*g.ngrid,
-            'k_vectors_mask':g.mask, 'k_vectors':g.wave, 'planar_mode_mask':g.axial,
-            'k_vectors_grid_shape':torch.tensor(g.shape, device=positions.device),
-            'scf_residual':residual, 'scf_steps':positions.new_full((len(mu),),float(info[0])),
-            'electrostatic_energy':electronic, 'electron_energy':local_electronic,
-            'external_field':g.external, 'esps':None, 'esps_dft':None,
-            'charges_history':density_coefficients[...,None],
-            'potential_coefficients':g.unpack(state[...,4:]),
-            'electrostatic_features':g.unpack(potential),
-            'chemical_level':g.unpack(response[5]), 'node_field':g.unpack(field)}
-        if energy_derivatives:
-            # cell_voltage = dE/dQ on the neutral transfer path Q_cc = -Q:
-            # the electrode Fermi level measured from the potential at the
-            # counter charge, the conjugate of Q in NVT-Phi dynamics. It is a
-            # derivative of the trained energy, never a training label.
-            output.update(charge_potential=charge_potential,
-                          counter_charge_potential=counter_potential,
-                          cell_voltage=charge_potential-counter_potential)
-        attach_observations(data, g, output)
-        if 'fourier_density_dft' in output:
-            output['fourier_farfield_density_dft'] = output['fourier_density_dft']*smoothing[...,None]
-            output['fourier_farfield_density_dft_mask'] = output['fourier_density_dft_mask']
-        if reference_conditioning not in (False, 'none'):
-            with torch.set_grad_enabled(training):
-                reference = reference_predictions(model,data,g,args,state,response,spectral,output,
-                                                  materialized=mode!='implicit',
-                                                  condition_density=reference_conditioning!='fermi_level')
-            if reference is not None:
-                output['reference_response'] = reference
-        decoder = getattr(r, 'raw_decoder', None)
-        if getattr(r, 'fixed_dft_observations', False):
-            from .desmearing import observe_smoothed_fields
-            output = observe_smoothed_fields(g, state, output)
-        if decoder is not None:
-            output = decoder(g, state, output)
-        if getattr(r, 'vacuum_observer', 'complete') == 'multipole':
-            for key in ('', 'smooth_'):
-                if key+'vacuum_potential' in output and key+'fourier_local_potential' in output:
-                    local = torch.view_as_complex(output[key+'fourier_local_potential'].contiguous())/g.ngrid
-                    output[key+'vacuum_potential'] = output[key+'vacuum_potential']-g.plane(local)
-        output = apply_scalar_reference(output, r)
-        # WF uses the final raw ESP observer and EF = -dE/dQ at fixed Q_cc.
-        output['work_function'] = output['vacuum_potential']-output['fermi_level']
-        if energy_derivatives:
-            # WF - e*V = potential step from the counter charge to the outer
-            # vacuum. It contains no Fermi level; it aligns V with the SHE scale.
-            output['she_offset'] = output['work_function']-output['cell_voltage']
-        # A finite iterate does not imply finite derivatives of its trajectory.
-        # Reject invalid observables before loss/Adam, metrics or MD consume them.
-        checked = {key: output[key] for key in ('energy', 'forces', 'stress',
-                                               'fermi_level', 'vacuum_potential', 'cell_voltage')
-                   if output.get(key) is not None}
-        with torch.no_grad():
-            finite = torch.stack([torch.isfinite(value).all() for value in checked.values()])
-            if not bool(finite.all()):
-                invalid = [key for key, valid in zip(checked, finite.tolist()) if not valid]
-                raise SCFNumericalError(f'Nonfinite coupled SCF observations: {invalid}. '
-                                        'No value was clipped or substituted; check the SCF trajectory and mixing.')
-        return output
+        if compute_force:
+            forces = torch.zeros_like(positions) if derivatives[2] is None else -derivatives[2]
+        if compute_stress:
+            stress = torch.zeros_like(strain) if derivatives[-1] is None else derivatives[-1]/g.volume[:, None, None]
 
-
-def apply_scalar_reference(output, response):
-    """Map scalar observations to their saved training-label references.
-
-    Spatial Fourier quantities retain their zero-mean convention. A calibrated
-    vacuum observation equals the model plane plus its scalar reference; the
-    latter is not a deformation-field coefficient. No force/energy or SCF state
-    changes for legacy models. For energy-derived models the EF reference has
-    already entered the energy; adding it again here would double count it.
-    """
-    reference = getattr(response, 'scalar_reference', None)
-    if reference is not None:
-        for index, key in enumerate(('fermi_level', 'vacuum_potential')):
-            if key in output and not (index == 0 and getattr(response, 'energy_derivatives', False)):
-                output[key] = output[key]+reference[index]
-        if 'potential_reference' in output:
-            output['potential_reference'] = output['potential_reference']+reference[1]
-        if 'smooth_vacuum_potential' in output:
-            output['smooth_vacuum_potential'] = output['smooth_vacuum_potential']+reference[1]
-        if 'reference_response' in output:
-            apply_scalar_reference(output['reference_response'], response)
+    # The raw potential undoes the Gaussian smoothing sigma of the learned field,
+    # smooth = raw exp(-sigma^2 k^2/2); the prescribed sawtooth enters the vacuum
+    # level exactly. Labels are attached at the resolution of each prediction.
+    smoothing = torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)
+    learned = torch.view_as_complex((carrier+regular).contiguous())
+    boundary = (g.external*g.normal).sum(-1)-g.slab_factor*(normal_dipole+g.counter_moment)
+    raw = learned/torch.where(g.mask, smoothing, 1.)-g.coulomb*g.counter_density
+    prescribed = g.ramp(boundary, width=0.)-g.coulomb*g.counter_density
+    fermi_level = -charge_potential
+    vacuum = g.plane(raw)+g.ramp_plane(boundary)+g.vacuum_reference
+    farfield = r.farfield_filter(g.k2)[..., None]
+    output = {'energy': energy, 'forces': forces, 'stress': stress,
+              'virials': -stress*g.volume[:, None, None] if stress is not None else None,
+              'density_coefficients': density_coefficients, 'dipole': dipole, 'total_charge': total_charge,
+              'fermi_level': fermi_level, 'vacuum_potential': vacuum, 'work_function': vacuum-fermi_level,
+              'potential_reference': g.vacuum_reference, 'charge_potential': charge_potential,
+              'counter_charge_potential': counter_potential, 'cell_voltage': charge_potential-counter_potential,
+              'fourier_density': coarse*g.ngrid, 'fourier_farfield_density': coarse*farfield*g.ngrid,
+              'fourier_potential': torch.view_as_real(raw+g.ramp(boundary, width=0.))*g.ngrid,
+              'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smoothing)*g.ngrid,
+              'k_vectors': g.wave, 'k_vectors_mask': g.mask,
+              'k_vectors_grid_shape': torch.tensor(g.shape, device=positions.device),
+              'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), 2.*int(steps)),
+              'electrostatic_energy': electrostatic, 'electron_energy': electron, 'external_field': g.external,
+              'esps': None, 'esps_dft': None, 'charges_history': density_coefficients[..., None],
+              'electrostatic_features': g.unpack(potential)}
+    # WF - eV is the potential step from the counter charge to the outer vacuum.
+    output['she_offset'] = output['work_function']-output['cell_voltage']
+    attach_labels(data, g, output)
+    if 'fourier_density_dft' in output:
+        output['fourier_density_dft'] = output['fourier_density_dft']*torch.exp(-.5*r.density_width**2*g.k2)[..., None]
+        output['fourier_farfield_density_dft'] = output['fourier_density_dft']*farfield
+    if 'fourier_potential_dft' in output:
+        output['smooth_fourier_potential_dft'] = output['fourier_potential_dft']*smoothing[..., None]
+    with torch.no_grad():
+        invalid = [key for key in ('energy', 'forces', 'stress', 'fermi_level', 'vacuum_potential', 'cell_voltage')
+                   if output[key] is not None and not bool(torch.isfinite(output[key]).all())]
+    if invalid:
+        raise SCFNumericalError(f'Nonfinite coupled SCF observations: {invalid}')
     return output
 
+
 @torch.no_grad()
-def initialize_coupled(model, loader, device, options=None, loss_config=None):
-    """Training-only proto/feature conditioning; never a validation correction."""
+def initialize_coupled(model, loader, device):
+    """Numerical units of the geometry descriptors, from the training set only."""
     from mace_scf.utils.foundation import calibration_loader
-    from .desmearing import configure_desmearing
-    configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    # The neutral atoms of load_data (fit_neutral_atoms) place the vacuum and
-    # serve counter charges; nothing here is fitted to vacuum labels.
-    initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=False)
     r = model.field_dependent_charges_map
-    ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
+    scalar, vector, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
     for batch in calibration_loader(loader):
         data = batch.to(device).to_dict()
         features = model.local_part(data, compute_force=False).all_layer_feats
-        scalars = torch.cat([features[:,a:b] for a,b in r.scalar_slices], -1)
-        vectors = torch.cat([features[:,a:b].reshape(len(features),-1,3) for a,b in r.vector_slices], -2)
         counts = (data['ptr'][1:]-data['ptr'][:-1]).to(features)
         weights = data['weight'].reshape(-1).to(features)
-        atom_weight = (weights/counts)[data['batch']]
-        ss += (torch.asinh(scalars).square()*atom_weight[:,None]).sum(0)
-        vv += (vectors.square().mean(-1)*atom_weight[:,None]).sum(0)
+        atom_weight = (weights/counts)[data['batch']][:, None]
+        scalar += (torch.asinh(torch.cat([features[:, a:b] for a, b in r.scalar_slices], -1)).square()
+                   * atom_weight).sum(0)
+        if r.vector_slices:
+            vector += (torch.cat([features[:, a:b].reshape(len(features), -1, 3) for a, b in r.vector_slices],
+                                 -2).square().mean(-1)*atom_weight).sum(0)
         count += float(weights.sum())
-    r.geometry_scalar_unit.copy_((1.+ss/max(count,1.e-30)).sqrt())
-    r.geometry_vector_unit.copy_((1.+vv/max(count,1.e-30)).sqrt())
-    r.geometry_units_initialized.fill_(True)
-    # Physical field units: 1 V and 1 V/Angstrom. The bounded, invertible
-    # asinh coordinates already handle large descriptors; no fitted field scale.
-    r.scalar_field_scale.fill_(1.)
-    r.vector_field_scale.fill_(1.)
-    r.field_scales_initialized.fill_(True)
-    logging.info('Coupled response: %s reference, screened moment seed, %d local potential channels, Gaussian receiver widths %s; fixed Q is enforced without measured EF',
-                 r.response_reference, r.source_channels, r.receiver_widths.tolist())
-    logging.debug('Constitutive charge response: %s; stored in checkpoint metadata',
-                  getattr(r, 'charge_response', 'geometry'))
+    r.geometry_scalar_unit.copy_((1.+scalar/max(count, 1.e-30)).sqrt())
+    r.geometry_vector_unit.copy_((1.+vector/max(count, 1.e-30)).sqrt())
+    logging.info('Coupled response: %d local potential channels, Gaussian receiver widths %s',
+                 r.source_channels, r.receiver_widths.tolist())

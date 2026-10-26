@@ -233,40 +233,24 @@ def calibration_loader(loader, maximum=64):
 
 @torch.no_grad()
 def condition_energy(model, loader, device):
-    """Initialize composition-only energy zeros for the transferred foundation.
+    """Composition-only energy zeros of the transferred foundation, from the training panel.
 
-    New energy-derived models do not perform a second EF-offset fit here.
-    The once-fitted elemental energy zeros do not change forces or charge work.
+    They change neither forces nor the charging work.
     """
-    from mace_scf.electrostatics.potential import evaluate_electronic
-    features, residuals, weights, mu_errors, mu_weights, charges = [], [], [], [], [], []
+    from mace_scf.electrostatics.coupled import evaluate_coupled
+    features, residuals, weights = [], [], []
     states = [p.requires_grad for p in model.parameters()]
-    fit_mu = not getattr(model.field_dependent_charges_map, 'energy_derivatives', False)
     try:
         model.requires_grad_(False)
         for batch in calibration_loader(loader):
             batch = batch.to(device)
-            with torch.no_grad():
-                output = evaluate_electronic(model, batch.to_dict(), steps=50, compute_force=False)
+            output = evaluate_coupled(model, batch.to_dict(), steps=50, compute_force=False)
             counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)
             n = counts.sum(-1)
             features.append(counts/n[:, None])
             residuals.append((batch.energy-output["energy"])/n)
             weights.append(batch.weight*batch.energy_weight)
-            if fit_mu:
-                mu_errors.append(batch.fermi_level-output["fermi_level"])
-                mu_weights.append(batch.weight*batch.fermi_level_weight)
-                charges.append(output["total_charge"]/n)
         a, b, w = torch.cat(features).double(), torch.cat(residuals).double(), torch.cat(weights).double()
-        me = torch.cat(mu_errors).double() if fit_mu else b.new_empty(0)
-        mw = torch.cat(mu_weights).double() if fit_mu else b.new_empty(0)
-        valid_mu = (mw>0)&torch.isfinite(me)
-        if bool(valid_mu.any()):
-            shift = (me[valid_mu]*mw[valid_mu]).sum()/mw[valid_mu].sum()
-            with torch.no_grad():
-                model.fermi_level_offset.add_(shift.to(model.fermi_level_offset))
-            b = b+shift*torch.cat(charges).double()
-            logging.debug("Training-only EF reference initialization: offset correction %.6g eV", float(shift))
         use = (w>0)&torch.isfinite(b)
         if bool(use.any()):
             a, b, w = a[use], b[use], w[use].sqrt()

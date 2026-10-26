@@ -1365,7 +1365,5 @@ class ManyBodyChargesFieldReadout(PostScfReadout):
         return energy.squeeze(-1)
 
 
-# Optional common energy/charge/potential response.
-from .potential import VariationalResponse
-
+# The MACE-VOLT density/potential response.
 from .coupled import CoupledResponse

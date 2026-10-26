@@ -24,7 +24,7 @@ def export_frame(atoms, directory):
     source = counter_charge_data(atoms.info, atoms.pbc)
     if float(source['counter_charge_width']) == 0.:
         raise ValueError('The frame has no specified counter-charge profile')
-    keys = (*COUNTER_CHARGE_KEYS, 'total_charge', 'external_field', 'dipole_correction_center',
+    keys = (*COUNTER_CHARGE_KEYS, 'total_charge', 'external_field',
             *[f'{prefix}_{axis}frac' for prefix in ('vacuum', 'dipole_correction') for axis in 'xyz'])
     controls = {key: np.asarray(atoms.info[key]).tolist() for key in keys if key in atoms.info}
     if 'total_charge' not in controls or not np.isfinite(controls['total_charge']):

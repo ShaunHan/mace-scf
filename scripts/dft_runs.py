@@ -182,8 +182,6 @@ def force_and_stress(constants, additions):
 def configuration(atoms):
     """Preserve the snapshot's charge, field and physical reference planes."""
     info = atoms.info
-    if info.get("dipole_correction_center") is not None:
-        raise NotImplementedError("This DFT runner is for slabs/bulk. Molecular reference data require native IDIPOL=4, LDIPOL=True and DIPOL in fractional coordinates.")
     open_axes = np.flatnonzero(~atoms.pbc)
     slab = info.get("config_type", "slab" if len(open_axes) == 1 else "bulk") == "slab"
     axis = next((j for j, a in enumerate("xyz")

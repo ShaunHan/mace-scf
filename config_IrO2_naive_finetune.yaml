@@ -11,6 +11,8 @@ heads:
       fermi_level: vasp_efermi
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
+      # The neutral atoms of the DFT runs, written by scripts/collect_vasp_data.py.
+      fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
       vacuum_potential: vacuum_potential
@@ -67,9 +69,6 @@ foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 log_dir: logs
 results_dir: results
 model_dir: models
-refit_fermi_readout: false
-# Counter charges use the neutral-atom form factors stored in the data
-# (neutral_atom_* keys written by scripts/collect_vasp_data.py).
 train_schedule:
   0:
     name: heads
@@ -83,10 +82,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-        desmearing: true
       fourier_potential:
         weight: 100
-        desmearing: true
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
@@ -99,7 +96,6 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-      reference_conditioning: none
     freeze_foundation_backbone: true
     checkpoint_metric: rmse_wf_abs
   1:
@@ -114,10 +110,8 @@ train_schedule:
       fourier_density:
         weight: 10
         reference: farfield
-        desmearing: true
       fourier_potential:
         weight: 100
-        desmearing: true
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
@@ -130,7 +124,6 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-      reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
   2:
     name: stage2
@@ -144,10 +137,8 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
       fourier_potential:
         weight: 100
-        desmearing: true
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
@@ -160,7 +151,6 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-      reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
   3:
     name: stage3
@@ -174,10 +164,8 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
       fourier_potential:
         weight: 100
-        desmearing: true
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
@@ -190,7 +178,6 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-      reference_conditioning: none
     checkpoint_metric: rmse_wf_abs
   4:
     name: stage4
@@ -204,10 +191,8 @@ train_schedule:
       fourier_density:
         weight: 100
         reference: farfield
-        desmearing: true
       fourier_potential:
         weight: 100
-        desmearing: true
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
@@ -220,5 +205,4 @@ train_schedule:
         initial_density: local_guess
         initial_fermi_level: zero
         use_autograd_forces: true
-      reference_conditioning: none
     checkpoint_metric: rmse_wf_abs

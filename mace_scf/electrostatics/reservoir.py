@@ -63,14 +63,9 @@ def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
             'counter_charge_zfrac': float((cut+sheet/length) % 1.), 'counter_charge_width': float(sheet_width)}
 
 
-def evaluate_cell(model, data, *, steps, mixing, tolerance):
+def evaluate_cell(model, data, *, steps, mixing):
     """E, F, cell voltage, WF and the SHE offset from ONE electronic trajectory."""
     from .coupled import evaluate_coupled
-    response = model.field_dependent_charges_map
-    if (not getattr(response, 'energy_derivatives', False)
-            or getattr(response, 'energy_reference', 'dft') != 'dft'):
-        raise ValueError('Constant-potential MD requires a model trained with the DFT energy '
-                         'and derivative-based Fermi levels (energy_derivatives=True)')
     charge = data['total_charge'].reshape(-1)
     counter = data.get('counter_charge', torch.zeros_like(charge)).reshape(-1)
     if not torch.allclose(counter, -charge, atol=1.e-10, rtol=0):
@@ -79,7 +74,6 @@ def evaluate_cell(model, data, *, steps, mixing, tolerance):
     if bool((width <= 0).any()):
         raise ValueError('Constant-potential evaluation needs an explicit Gaussian counter-charge '
                          'profile (width and sheet fraction or centre), also at Q = 0')
-    output = evaluate_coupled(model, data, steps=steps, mixing=mixing,
-                              tolerance=tolerance, compute_force=True)
+    output = evaluate_coupled(model, data, steps=steps, mixing=mixing, compute_force=True)
     output['electrode_potential_she'] = output['work_function']-SHE_ABSOLUTE_V
     return output

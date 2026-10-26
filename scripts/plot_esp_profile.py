@@ -4,7 +4,8 @@
 Raw total DFT: locpots/LOCPOT_<index> (LOCPOT<index> also accepted), from LVHAR.
 Raw protoatomic reference: locpots/LOCPOT_proto_<index> (required).
 Raw deformation is the direct grid difference, never an inverse-smoothed FFT.
-DFT is used for comparison only; the model must contain a fitted baseline.
+The model total adds the reference neutral atoms (LOCPOT_proto) to the model
+deformation ESP, at the level of the model's own vacuum potential and Fermi level.
 Edit the settings below; one PNG/PDF/SVG/CSV set is saved per selected index.
 """
 import os
@@ -28,22 +29,15 @@ ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v387.model'
 FRAME_INDEXES = list(range(10, 20))
 DEVICE, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', True, 50
-SIGMA_PHI = 1.5  # Å; display smoothing applied to both DFT profiles.
-MODEL_TARGET_SIGMA = 1.5  # Legacy checkpoint fallback; decoded fields and new proto fits are detected automatically.
+SIGMA_PHI = 1.5  # Å; display smoothing applied to every profile.
 LOCPOT_DIR, OUTPUT_DIR, DPI = Path('locpots'), Path('esp_profiles'), 300
 
 
 class ProfileCalculator(MACEFixedPointSCF):
     def _build_results(self, output, diagnostics):
         results = super()._build_results(output, diagnostics)
-        for key in ('fourier_potential', 'fourier_total_potential', 'k_vectors_grid_shape', 'k_vectors_mask'):
+        for key in ('fourier_potential', 'k_vectors_grid_shape', 'k_vectors_mask'):
             results[key] = output[key].detach().cpu().numpy()
-        results['proto_fitted'] = bool(self.model.field_dependent_charges_map.proto_fitted)
-        response = self.model.field_dependent_charges_map
-        decoder = getattr(response, 'raw_decoder', None)
-        results['model_target_sigma'] = 0. if decoder is not None and bool(decoder.enabled[1]) else MODEL_TARGET_SIGMA
-        width = getattr(response, 'proto_smearing_width', None)
-        results['proto_target_sigma'] = MODEL_TARGET_SIGMA if width is None else width
         return results
 
 
@@ -96,41 +90,34 @@ def read_locpot(path, atoms):
 
 
 def profiles(atoms, results, raw_total, raw_proto):
-    """Compare actual grid profiles with the independently predicted spectrum."""
-    if not results['proto_fitted']:
-        raise ValueError('Total ESP requires a model with a fitted protoatomic baseline')
-    potential_sigma = results.get('model_target_sigma', MODEL_TARGET_SIGMA)
-    proto_sigma = results.get('proto_target_sigma', MODEL_TARGET_SIGMA)
-    if SIGMA_PHI < max(potential_sigma, proto_sigma):
-        raise ValueError('A plot cannot undo checkpoint target smoothing; lower MODEL_TARGET_SIGMA only for a raw-trained model')
+    """Smoothed model and DFT profiles; the model total is its deformation plus the reference atoms."""
     length = float(atoms.cell[2, 2])
     shape = tuple(np.asarray(results['k_vectors_grid_shape'], dtype=int).ravel())
     modes = np.rint(np.fft.fftfreq(shape[2])*shape[2]).astype(int)
-    mask = np.asarray(results['k_vectors_mask'], dtype=bool).reshape(shape)[0, 0]
+    mask = np.asarray(results['k_vectors_mask'], dtype=bool).reshape(shape)[0, 0] & (modes != 0)
     wave = 2*np.pi*modes[mask]/length
-    model_filter = np.exp(-.5*(SIGMA_PHI**2-potential_sigma**2)*wave**2)
-    proto_filter = np.exp(-.5*(SIGMA_PHI**2-proto_sigma**2)*wave**2)
-    predicted = []
-    for key in ('fourier_potential', 'fourier_total_potential'):
-        a = np.asarray(results[key]).reshape(*shape, 2)
-        predicted.append((a[0, 0, mask, 0]+1j*a[0, 0, mask, 1])/np.prod(shape))
-    model_delta = predicted[0]*model_filter
-    model_total = model_delta+(predicted[1]-predicted[0])*proto_filter
-    model_delta = model_delta*(modes[mask] != 0)
-    fermi_key = 'fermi_level' if 'fermi_level' in atoms.info else 'vasp_efermi'
-    fermi = scalar(atoms.info[fermi_key])
-    reference = scalar(results['potential_reference'])-scalar(results['fermi_level'])
+    a = np.asarray(results['fourier_potential']).reshape(*shape, 2)
+    model = (a[0, 0, mask, 0]+1j*a[0, 0, mask, 1])/np.prod(shape)*np.exp(-.5*SIGMA_PHI**2*wave**2)
     z = np.linspace(-length/2, length/2, max(1201, len(raw_total)+1))
-    phase = np.exp(1j*np.outer(wave, z))
-    def interpolate(values):
-        return np.interp(z % length, np.arange(len(values))*length/len(values), values, period=length)
-    deformation = raw_total-resample(raw_proto, len(raw_total))
-    deformation -= deformation.mean()
+
+    def model_at(points):
+        return (model@np.exp(1j*np.outer(wave, points))).real
+
+    def interpolate(values, points=z):
+        return np.interp(points % length, np.arange(len(values))*length/len(values), values, period=length)
     grid_wave = 2*np.pi*np.fft.fftfreq(len(raw_total), d=length/len(raw_total))
+
     def smooth(values):
         return np.fft.ifft(np.fft.fft(values)*np.exp(-.5*SIGMA_PHI**2*grid_wave**2)).real
-    curves = dict(z_A=z, model_total_V=(model_total@phase).real+reference,
-                  model_deformation_V=(model_delta@phase).real,
+    proto = smooth(resample(raw_proto, len(raw_total)))
+    deformation = raw_total-resample(raw_proto, len(raw_total))
+    deformation -= deformation.mean()
+    # The flat vacuum fixes the model level: its predicted vacuum potential at the vacuum plane.
+    plane = np.array([float(atoms.info.get('vacuum_zfrac', .5))*length])
+    level = scalar(results['vacuum_potential'])-interpolate(proto, plane)[0]-model_at(plane)[0]
+    fermi = scalar(atoms.info['fermi_level' if 'fermi_level' in atoms.info else 'vasp_efermi'])
+    curves = dict(z_A=z, model_total_V=interpolate(proto)+model_at(z)+level-scalar(results['fermi_level']),
+                  model_deformation_V=model_at(z),
                   dft_total_raw_V=interpolate(raw_total)-fermi,
                   dft_total_smoothed_V=interpolate(smooth(raw_total))-fermi,
                   dft_deformation_raw_V=interpolate(deformation),
@@ -218,11 +205,8 @@ def main():
         external_field_key='external_field', total_charge_key='total_charge', ignore_nonconverged=True,
         scf_options=dict(num_scf_steps=SCF_STEPS, constant_charge=True, use_autograd_forces=True,
                          initial_density='local_guess', initial_fermi_level='zero'))
-    if not bool(calc.model.field_dependent_charges_map.proto_fitted):
-        raise ValueError('Use the v387 export containing the fitted protoatomic baseline')
     if ENABLE_CUEQ:
         accelerate_backbone(calc.model, DEVICE)
-    calc.model.field_dependent_charges_map.deployment_mode = 'unroll_scf'
     calc.model.eval().requires_grad_(False)
     frames = read(ATOMS_FILE, index=':')
     for index in FRAME_INDEXES:

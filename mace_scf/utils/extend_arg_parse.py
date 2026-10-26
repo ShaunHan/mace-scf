@@ -40,10 +40,6 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser._optionals.conflict_handler = "resolve"
     # Preserve single-head behavior unless replay is explicitly requested.
     parser.set_defaults(multiheads_finetuning=False)
-    parser.add_argument('--refit_fermi_readout', type=strict_str2bool, default=False,
-                        help='Retired option; must remain false. Train energy, forces and EF jointly.')
-    parser.add_argument('--neutral_atom_potcar', type=str, default=None,
-                        help='Retired option; must remain unset. Counter charges use the DFT neutral atoms.')
     parser.add_argument("--amsgrad", type=strict_str2bool, nargs="?", const=True,
                         default=True, help="Use the AMSGrad optimizer variant")
     for action in parser._actions:
@@ -82,7 +78,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--atomic_multipoles_max_l", type=int, default=1)
     parser.add_argument("--atomic_multipoles_smearing_width", type=float, default=1.5)
     parser.add_argument("--potential_amplitudes_smearing_width", type=float, default=1.5,
-                        help="Local potential basis width in Å; also sets optional Fourier-loss smoothing.")
+                        help="Width in Å of the local potential amplitudes and of the smoothed potential observation.")
     parser.add_argument("--kspace_cutoff_factor", type=float, default=1.0)
     parser.add_argument("--atomic_formal_charges", type=str, default="{}")
     parser.add_argument(

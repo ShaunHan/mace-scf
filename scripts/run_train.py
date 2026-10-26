@@ -94,26 +94,16 @@ def _resume_training(args, tag, state, ema, device):
             tag=tag+"_"+stage["name"], keep=args.keep_checkpoints)
         epoch = handler.load_latest(state=state, swa=False, device=device)
         if epoch is not None:
-            _check_energy_definition(state.model)
             return epoch+1
     return 0
-
-
-def _check_energy_definition(model):
-    response = getattr(model, 'field_dependent_charges_map', None)
-    if getattr(response, 'coupled', False) and (not getattr(response, 'energy_derivatives', False)
-            or getattr(response, 'energy_reference', 'dft') != 'dft'):
-        raise ValueError('This checkpoint does not use the DFT energy with derivative-based EF. '
-                         'It cannot resume with this EF/energy relationship. Start a new training run '
-                         'with restart_latest: false; retain the original foundation model.')
 
 
 def set_stage_learning_rates(optimizer, stage, resumed=False):
     """Apply edited stage rates after loading Adam, without resetting moments.
 
-    Remember the requested rate separately from scheduler/numerical-recovery
-    reductions. An unchanged restart preserves those reductions; an edited
-    recipe (or an older checkpoint without this record) uses the YAML rates.
+    Remember the requested rate separately from scheduler reductions. An
+    unchanged restart preserves those reductions; an edited recipe uses the
+    YAML rates.
     """
     for group in optimizer.param_groups:
         requested = stage.get(group['name']+'_lr', stage['lr'])
@@ -182,13 +172,6 @@ def main() -> None:
         info_keys=head_dict.get("info_keys", {}),
         arrays_keys=head_dict.get("arrays_keys", {}),
     )
-    # Counter charges use neutral atoms fitted from every frame's proto modes and PSCENC.
-    from mace_scf.electrostatics.potential import NEUTRAL_ATOM_KEYS
-    args.key_specification.update(info_keys={
-        key: args.key_specification.info_keys.get(key, key) for key in NEUTRAL_ATOM_KEYS})
-    if getattr(args, 'neutral_atom_potcar', None):
-        raise ValueError('neutral_atom_potcar is retired: counter charges use neutral atoms fitted from '
-                         'vasp_proto_phi_fftn_shifted and PSCENC. Delete it from the configuration.')
     logging.info("Using the key specifications to parse data:")
     logging.info(args.key_specification)
 
@@ -278,10 +261,6 @@ def main() -> None:
         atomic_charges=atomic_charges,
         train_loader=train_loader,
     ).to(device)
-    _check_energy_definition(model)
-    if args.refit_fermi_readout:
-        raise ValueError('EF refitting has been removed. Keep refit_fermi_readout: false; '
-                         'train energy, forces and EF jointly.')
 
     if hasattr(model, "kspace_cutoff"):
         logging.info(
@@ -429,7 +408,6 @@ def main() -> None:
                 device=device,
             )
             if latest_checkpoint_epoch is not None:
-                _check_energy_definition(model)
                 start_epoch = latest_checkpoint_epoch+1
 
         set_stage_learning_rates(optimizer, train_stage,

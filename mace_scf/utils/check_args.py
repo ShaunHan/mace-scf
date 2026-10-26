@@ -70,7 +70,6 @@ def check_and_fix_heads(args: argparse.Namespace):
         for axis in "xyz":
             key = f"{prefix}_{axis}frac"
             thedict["info_keys"].setdefault(key, key)
-    thedict["info_keys"].setdefault("dipole_correction_center", "dipole_correction_center")
 
     # patch for annoying stuff:
     if "stress" not in thedict["info_keys"]:
@@ -213,21 +212,9 @@ def fill_fixed_point_update_config(args):
         if not isinstance(args.fixed_point_update_config, dict) or 'type' not in args.fixed_point_update_config:
             raise ValueError('fixed_point_update_config must be a mapping containing type')
 
-    if isinstance(args.fixed_point_update_config.get("potential_widths"), str):
-        args.fixed_point_update_config["potential_widths"] = ast.literal_eval(args.fixed_point_update_config["potential_widths"])
-
     if args.fixed_point_update_config['type'] == 'CoupledResponse':
         args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
                                                   getattr(args, 'potential_amplitudes_smearing_width', 1.5))
-        from mace_scf.electrostatics.desmearing import desmearing_enabled
-        modes = {tuple(key in stage['loss'] and desmearing_enabled(
-                    stage['loss'][key], density=key == 'fourier_density')
-                    for key in ('fourier_density', 'fourier_potential'))
-                 for stage in args.train_schedule}
-        if len(modes) > 1:
-            raise ValueError('Keep each field decoder enabled or disabled across all stages; '
-                             'its frozen DFT map is initialized once. '
-                             'Use zero loss weight to postpone supervision.')
 
     cls_variables = [
         "type",

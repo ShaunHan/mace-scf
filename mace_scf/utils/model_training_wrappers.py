@@ -94,8 +94,6 @@ class FixedPointWrapper:
             raise ValueError(
                 f"mode must be one of {self.MODES}, got {training_options.mode}"
             )
-        if training_options.reference_conditioning not in ('none', 'fermi_level', 'electronic'):
-            raise ValueError('reference_conditioning must be none, fermi_level or electronic')
 
         self.training_options = training_options
         self.mode = training_options.mode
@@ -132,37 +130,22 @@ class FixedPointWrapper:
             else nullcontext()
         )
         with param_context:
-            if self.training_options.reference_conditioning != 'none' and not getattr(model.field_dependent_charges_map,'coupled',False):
-                raise ValueError('reference_conditioning requires CoupledResponse')
-            if getattr(model.field_dependent_charges_map, "spectral", False):
-                from mace_scf.electrostatics.potential import evaluate_electronic
-                if self.mode not in ("unroll_scf", "shortcut_scf", "implicit"):
-                    raise ValueError("Spectral response supports unroll_scf, shortcut_scf and implicit")
-                # The exported model records its forward solver. Checkpointed
-                # training deploys the identical ordinary finite trajectory.
-                response = model.field_dependent_charges_map
-                response.deployment_mode = "unroll_scf" if self.mode == "shortcut_scf" else self.mode
-                if getattr(response, 'coupled', False):
-                    response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
-                reference = self.training_options.reference_conditioning
-                if not getattr(self, '_logged_spectral_policy', False):
-                    logging.info('%s mode=%s: %d training steps; %d validation/deployment steps',
-                                 type(response).__name__, self.mode, self.scf_options.num_scf_steps,
-                                 int(response.deployment_steps))
-                    self._logged_spectral_policy = True
-                    if reference != 'none':
-                        logging.info('Reference-conditioned auxiliary %s training enabled; '
-                                     'validation, forces and deployment use the ordinary reference-free trajectory',reference)
-                steps = (self.scf_options.num_scf_steps if training else
-                         int(model.field_dependent_charges_map.deployment_steps))
-                return evaluate_electronic(model, batch_dict, steps=steps,
+            response = model.field_dependent_charges_map
+            if getattr(response, "coupled", False):
+                from mace_scf.electrostatics.coupled import evaluate_coupled
+                if self.mode not in ("unroll_scf", "shortcut_scf") or not self.scf_options.constant_charge:
+                    raise ValueError("CoupledResponse trains with unroll_scf or shortcut_scf at constant charge")
+                # Validation and deployment run the exported finite trajectory.
+                response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
+                if not getattr(self, "_logged_coupled", False):
+                    logging.info("CoupledResponse mode=%s: %d training steps, %d validation/deployment steps",
+                                 self.mode, self.scf_options.num_scf_steps, int(response.deployment_steps))
+                    self._logged_coupled = True
+                return evaluate_coupled(model, batch_dict,
+                    steps=self.scf_options.num_scf_steps if training else int(response.deployment_steps),
                     training=training, compute_force=self.output_args.get("forces", False),
-                    constant_charge=self.scf_options.constant_charge,
                     compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
-                    tolerance=self.scf_options.scf_tolerance,
-                    mode=self.mode if training else response.deployment_mode,
-                    **({'reference_conditioning':reference if training and reference != 'none' else False}
-                       if getattr(response,'coupled',False) else {}))
+                    mode=self.mode)
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)
             elif self.mode == "unroll_scf":

@@ -636,14 +636,12 @@ def create_scf_convergence_summary(
     if not is_fixed_point_model(module):
         return "SCF convergence summary skipped: model is not FixedPoint/FixedPointCore."
 
-    if getattr(module.field_dependent_charges_map, 'spectral', False):
-        from mace_scf.electrostatics.potential import evaluate_electronic
-        from mace_scf.electrostatics.coupled import SCFConvergenceError, SCFNumericalError
+    if getattr(module.field_dependent_charges_map, 'coupled', False):
+        from mace_scf.electrostatics.coupled import SCFNumericalError, evaluate_coupled
         import json
         module.eval()
         module.requires_grad_(False)
         report = {}
-        mode = getattr(module.field_dependent_charges_map, 'deployment_mode', 'implicit')
         for name, loader in all_data_loaders.items():
             values = []
             for batch in _panel(loader, 16):
@@ -651,21 +649,18 @@ def create_scf_convergence_summary(
                 outputs, row = {}, {}
                 for steps in (50, 100):
                     try:
-                        output = evaluate_electronic(module, data, steps=steps, compute_force=True, mode=mode)
-                    except RuntimeError as exc:
-                        if not isinstance(exc,(SCFConvergenceError,SCFNumericalError)) and 'Electronic linear solve did not converge' not in str(exc):
-                            raise
+                        outputs[steps] = evaluate_coupled(module, data, steps=steps, compute_force=True)
+                    except SCFNumericalError as exc:
                         row[f'failure_{steps}'] = str(exc)
                     else:
-                        outputs[steps] = output
-                        row[f'residual_{steps}'] = float(output['scf_residual'].detach().max())
+                        row[f'residual_{steps}'] = float(outputs[steps]['scf_residual'].detach().max())
                 if len(outputs) == 2:
                     for key in ('vacuum_potential', 'fermi_level'):
                         row[key+'_50_minus_100_eV'] = float((outputs[50][key]-outputs[100][key]).detach().abs().max())
                     row['F_50_minus_100_max_eV_A'] = float((outputs[50]['forces']-outputs[100]['forces']).detach().abs().max())
                 values.append(row)
             report[name] = values
-        return f'Electronic convergence panels, mode={mode} (50 versus 100 steps): '+json.dumps(report)
+        return 'Electronic convergence panels (50 versus 100 steps): '+json.dumps(report)
 
     for param in module.parameters():
         param.requires_grad_(False)

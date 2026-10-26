@@ -13,7 +13,6 @@ from mace.tools import (
     AtomicNumberTable,
     atomic_numbers_to_indices,
     to_one_hot,
-    torch_geometric,
     voigt_to_matrix,
 )
 
@@ -39,9 +38,6 @@ def counter_charge_data(properties, pbc=None):
     Exactly one x/y/zfrac selects a sheet at that fractional cell coordinate.
     Zero width is an internal marker for an absent source, never a user width.
     """
-    if properties.get("vacuum_reservoir"):
-        raise ValueError("vacuum_reservoir is obsolete: keep the counter charge's Gaussian position "
-                         "and width; the source is always explicit")
     charge = float(properties.get("counter_charge") or 0.)
     center = properties.get("counter_charge_center")
     planes = [(i, properties[f"counter_charge_{a}frac"]) for i, a in enumerate("xyz")
@@ -75,21 +71,6 @@ def counter_charge_data(properties, pbc=None):
         "counter_charge_axis": torch.tensor(axis, dtype=torch.long)}
 
 
-def dipole_correction_data(properties, pbc):
-    """A Cartesian reference center explicitly selects a molecule in a box."""
-    center = properties.get("dipole_correction_center")
-    enabled = center is not None
-    if enabled:
-        if not np.asarray(pbc, dtype=bool).all():
-            raise ValueError("dipole_correction_center requires a periodic molecular supercell (pbc=True)")
-        if any(properties.get(f"dipole_correction_{a}frac") is not None for a in "xyz"):
-            raise ValueError("Specify a molecular dipole_correction_center or a slab correction plane")
-    center = np.zeros(3) if center is None else np.asarray(center, dtype=float)
-    if center.shape != (3,) or not np.isfinite(center).all():
-        raise ValueError("dipole_correction_center must contain three finite Cartesian coordinates in Angstrom")
-    return {"dipole_correction_center": torch.as_tensor(center[None], dtype=torch.get_default_dtype()),
-            "molecular_correction": torch.tensor(enabled)}
-
 def plane_fraction(properties, prefix, pbc):
     """Read one fractional cell-axis plane, consistent with slab periodicity."""
     specified = [(i, properties[f"{prefix}_{axis}frac"]) for i, axis in enumerate("xyz")
@@ -114,15 +95,9 @@ def slab_positions(config):
     VASP wraps coordinates even along the direction that becomes nonperiodic.
     Rejoin that slab before constructing neighbors or electronic moments.
     Integer lattice translations leave every Fourier observation unchanged.
-    A molecular center defines the middle of the image along all three axes.
     Structures without an explicit reference are untouched.
     """
     pbc = np.asarray(config.pbc, dtype=bool)
-    center = config.properties.get("dipole_correction_center")
-    if center is not None:
-        dipole_correction_data(config.properties, pbc)
-        fractional = (config.positions - np.asarray(center)) @ np.linalg.inv(config.cell)
-        return config.positions - np.floor(fractional + .5) @ config.cell
     if pbc.sum() != 2 or not any(config.properties.get(
             f"dipole_correction_{axis}frac") is not None for axis in "xyz"):
         return config.positions
@@ -148,11 +123,8 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "polarizability_key",
         "fourier_density_key",
         "fourier_potential_key",
-        "fourier_proto_potential_key",
         "vacuum_potential_key",
-        "dipole_correction_center_key",
         *[f"{prefix}_{axis}frac_key" for prefix in ("vacuum", "dipole_correction") for axis in "xyz"],
-        "potcar_match_key",
         "vacuum_potential_weight_key",
         *[f"{key}_key" for key in COUNTER_CHARGE_KEYS],
     ]
@@ -163,8 +135,7 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
         "hardness_key",
         "atomic_multipoles_key",
     ]
-    info_keys = {key: keyspec.info_keys.get(key, key)
-                 for key in (*COUNTER_CHARGE_KEYS, "dipole_correction_center")}
+    info_keys = {key: keyspec.info_keys.get(key, key) for key in COUNTER_CHARGE_KEYS}
     arrays_keys = {}
     for key in infos:
         if key in keydict:
@@ -194,43 +165,20 @@ class ExtAtomicData(AtomicData):
     fourier_potential: torch.Tensor
     fourier_potential_shape: torch.Tensor
     fourier_potential_weight: torch.Tensor
-    fourier_proto_potential: torch.Tensor
-    fourier_proto_potential_shape: torch.Tensor
-    fourier_proto_potential_weight: torch.Tensor
     vacuum_potential: torch.Tensor
     vacuum_potential_weight: torch.Tensor
     vacuum_fraction: torch.Tensor
     dipole_correction_fraction: torch.Tensor
-    potcar_match: torch.Tensor
     counter_charge: torch.Tensor
     counter_charge_center: torch.Tensor
     counter_charge_width: torch.Tensor
     counter_charge_axis: torch.Tensor
     counter_charge_fraction: torch.Tensor
-    dipole_correction_center: torch.Tensor
-    molecular_correction: torch.Tensor
 
     def __init__(
         self,
         **kwargs,
     ):
-        # ``mace.tools.torch_geometric.Batch.get_example`` reconstructs a
-        # single graph by calling the original data class with no arguments
-        # and then assigning the sliced attributes.  Upstream ``AtomicData``
-        # intentionally has a strict, fully required constructor because MACE
-        # never de-batches its training batches.  MACE-VOLT's bounded-memory
-        # force path does de-batch a logical optimizer batch, so the subclass
-        # must support the standard PyG empty-construction protocol.
-        #
-        # Bypass only the strict AtomicData validation for this empty
-        # reconstruction placeholder.  Normal user/data-loader construction
-        # still follows the complete AtomicData constructor and all shape
-        # checks below.  Calling Data.__init__ directly is robust across MACE
-        # versions whose AtomicData required-argument list differs.
-        if not kwargs:
-            torch_geometric.data.Data.__init__(self)
-            return
-
         # new bits
         density_coefficients = kwargs.pop("density_coefficients", None)
         density_coefficients_weight = kwargs.pop(
@@ -259,16 +207,11 @@ class ExtAtomicData(AtomicData):
         fourier_potential = kwargs.pop("fourier_potential", None)
         fourier_potential_shape = kwargs.pop("fourier_potential_shape", None)
         fourier_potential_weight = kwargs.pop("fourier_potential_weight", None)
-        fourier_proto_potential = kwargs.pop("fourier_proto_potential", None)
-        fourier_proto_potential_shape = kwargs.pop("fourier_proto_potential_shape", None)
-        fourier_proto_potential_weight = kwargs.pop("fourier_proto_potential_weight", None)
         vacuum_potential = kwargs.pop("vacuum_potential", None)
         vacuum_potential_weight = kwargs.pop("vacuum_potential_weight", None)
         vacuum_fraction = kwargs.pop("vacuum_fraction", None)
         dipole_correction_fraction = kwargs.pop("dipole_correction_fraction", None)
-        potcar_match = kwargs.pop("potcar_match", None)
-        counter = {key: kwargs.pop(key, None) for key in
-                   (*COUNTER_CHARGE_FIELDS, "dipole_correction_center", "molecular_correction")}
+        counter = {key: kwargs.pop(key, None) for key in COUNTER_CHARGE_FIELDS}
         # MACE-develop added required, optional-valued magnetic targets.
         for key in ("magforces_weight", "magmom", "magforces"):
             if key in _ATOMIC_DATA_PARAMETERS:
@@ -296,7 +239,6 @@ class ExtAtomicData(AtomicData):
         assert vacuum_potential_weight is None or vacuum_potential_weight.ndim == 0
         assert vacuum_fraction is None or vacuum_fraction.ndim == 0
         assert dipole_correction_fraction is None or dipole_correction_fraction.ndim == 0
-        assert potcar_match is None or potcar_match.ndim == 0
 
         # Aggregate data
         data = {
@@ -323,14 +265,10 @@ class ExtAtomicData(AtomicData):
             "fourier_potential": fourier_potential,
             "fourier_potential_shape": fourier_potential_shape,
             "fourier_potential_weight": fourier_potential_weight,
-            "fourier_proto_potential": fourier_proto_potential,
-            "fourier_proto_potential_shape": fourier_proto_potential_shape,
-            "fourier_proto_potential_weight": fourier_proto_potential_weight,
             "vacuum_potential": vacuum_potential,
             "vacuum_potential_weight": vacuum_potential_weight,
             "vacuum_fraction": vacuum_fraction,
             "dipole_correction_fraction": dipole_correction_fraction,
-            "potcar_match": potcar_match,
             **counter,
         }
         for key, value in data.items():
@@ -523,11 +461,6 @@ class ExtAtomicData(AtomicData):
         fourier_potential, fourier_potential_shape, has_fourier_potential = read_fft(
             "fourier_potential"
         )
-        (
-            fourier_proto_potential,
-            fourier_proto_potential_shape,
-            has_fourier_proto_potential,
-        ) = read_fft("fourier_proto_potential")
         fourier_density_weight = torch.tensor(
             config.property_weights.get(
                 "fourier_density", 1.0 if has_fourier_density else 0.0
@@ -537,13 +470,6 @@ class ExtAtomicData(AtomicData):
         fourier_potential_weight = torch.tensor(
             config.property_weights.get(
                 "fourier_potential", 1.0 if has_fourier_potential else 0.0
-            ),
-            dtype=torch.get_default_dtype(),
-        )
-        fourier_proto_potential_weight = torch.tensor(
-            config.property_weights.get(
-                "fourier_proto_potential",
-                1.0 if has_fourier_proto_potential else 0.0,
             ),
             dtype=torch.get_default_dtype(),
         )
@@ -567,16 +493,10 @@ class ExtAtomicData(AtomicData):
             plane_fraction(config.properties, "vacuum", pbc), dtype=torch.get_default_dtype())
         dipole_correction_fraction = torch.tensor(
             plane_fraction(config.properties, "dipole_correction", pbc), dtype=torch.get_default_dtype())
-        potcar_match_value = config.properties.get("potcar_match")
-        potcar_match = torch.tensor(
-            -1.0 if potcar_match_value is None else potcar_match_value,
-            dtype=torch.get_default_dtype(),
-        )
         for name, property_weight in (
             ("fermi_level", fermi_level_weight),
             ("fourier_density", fourier_density_weight),
             ("fourier_potential", fourier_potential_weight),
-            ("fourier_proto_potential", fourier_proto_potential_weight),
             ("vacuum_potential", vacuum_potential_weight),
         ):
             if not torch.isfinite(property_weight) or property_weight.item() < 0.0:
@@ -651,14 +571,9 @@ class ExtAtomicData(AtomicData):
             fourier_potential=fourier_potential,
             fourier_potential_shape=fourier_potential_shape,
             fourier_potential_weight=fourier_potential_weight,
-            fourier_proto_potential=fourier_proto_potential,
-            fourier_proto_potential_shape=fourier_proto_potential_shape,
-            fourier_proto_potential_weight=fourier_proto_potential_weight,
             vacuum_potential=vacuum_potential,
             vacuum_potential_weight=vacuum_potential_weight,
             vacuum_fraction=vacuum_fraction,
             dipole_correction_fraction=dipole_correction_fraction,
-            potcar_match=potcar_match,
             **counter_charge_data(config.properties, pbc),
-            **dipole_correction_data(config.properties, pbc),
         )

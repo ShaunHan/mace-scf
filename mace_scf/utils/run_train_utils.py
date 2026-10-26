@@ -218,60 +218,26 @@ def build_model(
     if foundation is not None:
         install_foundation(model, foundation)
     response = getattr(model, "field_dependent_charges_map", None)
-    if getattr(response, "spectral", False):
-        from mace_scf.electrostatics.potential import initialize_response
-        options = args.train_schedule[0]["fixed_point_training_options"]
-        response.deployment_mode = "unroll_scf" if options.mode == "shortcut_scf" else options.mode
-        if getattr(response, "coupled", False):
-            from mace_scf.electrostatics.coupled import initialize_coupled
-            response.deployment_mixing.fill_(options.scf.mixing_parameter)
-            # A fresh electronic response starts at the foundation local E/F.
-            # Its moment readouts remain trainable, in the correct species basis.
-            with torch.no_grad():
-                for block in model.lr_source_maps:
-                    output = getattr(block,'linear_2',getattr(block,'linear',None))
-                    if output is None:
-                        raise TypeError('Cannot identify the terminal density readout')
-                    for parameter in output.parameters():
-                        parameter.zero_()
-            initialize = initialize_coupled
-        else:
-            model.lr_source_maps = torch.nn.ModuleList([torch.nn.Identity() for _ in model.interactions])
-            initialize = initialize_response
+    if getattr(response, "coupled", False):
+        from mace_scf.electrostatics.coupled import initialize_coupled
+        from mace_scf.electrostatics.potential import install_neutral_atoms
+        from mace_scf.utils.foundation import condition_readouts
+        response.deployment_mixing.fill_(args.train_schedule[0]["fixed_point_training_options"].scf.mixing_parameter)
+        # A fresh electronic response starts at the foundation local E/F.
+        # Its moment readouts remain trainable, in the correct species basis.
+        with torch.no_grad():
+            for block in model.lr_source_maps:
+                output = getattr(block, 'linear_2', getattr(block, 'linear', None))
+                if output is None:
+                    raise TypeError('Cannot identify the terminal density readout')
+                for parameter in output.parameters():
+                    parameter.zero_()
         model.local_electron_energy = torch.nn.Identity()
         model = model.to(args.device)
-        if getattr(response, 'coupled', False):
-            from mace_scf.utils.foundation import condition_readouts
-            # Added charge stays on the electrode; electrolyte molecules only polarize.
-            response.confined_charging = True
-            # The neutral atoms of the reference calculations, fitted in load_data.
-            from mace_scf.electrostatics.potential import install_neutral_atoms
-            install_neutral_atoms(response, model.atomic_numbers.tolist(), *(getattr(args, 'neutral_atoms', None) or ({}, {})))
-            if getattr(args, 'restart_latest', False):
-                # Initialization needs the frozen observer, but must not refit
-                # an already saved map before the main checkpoint load.
-                from .train import CheckpointHandler
-                from mace_scf.electrostatics.desmearing import configure_desmearing, restore_desmearing
-                configure_desmearing(response, args.train_schedule[0]['loss'])
-                tag = mace.tools.get_tag(name=args.name, seed=args.seed)
-                for stage in reversed(args.train_schedule):
-                    handler = CheckpointHandler(directory=args.checkpoints_dir,
-                        tag=tag+'_'+stage['name'], keep=args.keep_checkpoints)
-                    path = handler.progress_path if handler.progress_path.exists() else handler.io._get_latest_checkpoint_path(swa=False)
-                    if path is not None:
-                        saved = torch.load(path, map_location='cpu', weights_only=False)
-                        restore_desmearing(response, saved['model'])
-                        break
-            condition_readouts(model, train_loader, args.device)
-            initialize(model, train_loader, args.device, options, args.train_schedule[0]['loss'])
-        else:
-            potential_options = args.train_schedule[0]['loss'].get('fourier_potential', {})
-            from mace_scf.electrostatics.desmearing import target_smearing_enabled
-            apply_smearing = target_smearing_enabled(potential_options)
-            initialize(model, train_loader, args.device, apply_potential_smearing=apply_smearing)
-            from mace_scf.electrostatics.potential import initialize_vacuum_reference
-            initialize_vacuum_reference(model, train_loader, args.device,
-                apply_potential_smearing=apply_smearing)
+        # The neutral atoms of the reference calculations, fitted in load_data.
+        install_neutral_atoms(response, model.atomic_numbers.tolist(), *(getattr(args, 'neutral_atoms', None) or ({}, {})))
+        condition_readouts(model, train_loader, args.device)
+        initialize_coupled(model, train_loader, args.device)
         condition_energy(model, train_loader, args.device)
     if getattr(args, 'enable_cueq', False) and not native_cueq:
         from .foundation import accelerate_backbone

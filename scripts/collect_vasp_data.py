@@ -14,10 +14,10 @@ CHUNK_SIZE = 5
 N_PROCS = 64
 REUSE_HDF = False
 K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
-FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
-DENSITY_SIGMAS = [1.5]
-POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
-PROTO_K_CUTOFF = None  # XYZ bandwidth of vasp_proto_phi (1/A); None keeps that of vasp_phi.
+XYZ_K_CUTOFF = 2.3084  # XYZ bandwidth (1/A): 1.25 times the model k-space cutoff at a 1.5 A density width.
+COLLECT_DENSITY, COLLECT_POTENTIAL = True, True
+PROTO_K_CUTOFF = None  # XYZ bandwidth of vasp_proto_phi (1/A); None keeps XYZ_K_CUTOFF. Raise it to
+# 3.5/width for counter-charge sheets narrower than 3.5/XYZ_K_CUTOFF.
 FMAX_TOL = 6.0
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
@@ -129,8 +129,8 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
     """Cache unsmoothed Fourier grids; widths and vacuum sampling remain editable."""
-    names = ["fourier_density"] if DENSITY_SIGMAS else []
-    if POTENTIAL_SIGMAS:
+    names = ["fourier_density"] if COLLECT_DENSITY else []
+    if COLLECT_POTENTIAL:
         names += ["fourier_potential", "fourier_proto_potential"]
         if axis is not None:
             names += ["planar_potential"]
@@ -147,7 +147,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     data = {}
-    if DENSITY_SIGMAS:
+    if COLLECT_DENSITY:
         density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
         final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
         if density.shape != final_density.shape:
@@ -163,7 +163,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         # Only plugin runs need this extra grid, to recover their physical dipole.
         data["planar_electron_density"] = read_grid(outdir / "CHGCAR", atoms, Chgcar).mean(
             axis=tuple(i for i in range(3) if i != axis)) / atoms.get_volume()
-    if POTENTIAL_SIGMAS:
+    if COLLECT_POTENTIAL:
         if not parameters["lvhar"]:
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
         potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
@@ -178,11 +178,12 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         proto = read_grid(proto_path, atoms, Locpot)
         if potential.shape != proto.shape:
             raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
-        # The neutral atoms that counter charges overlap, the same for every charge state.
+        # The neutral atoms: the vacuum origin and the potential a counter charge overlaps.
         data["fourier_proto_potential"] = truncate_fft(np.fft.fftn(proto), shape)
         if axis is not None:
             data["planar_potential"] = potential.mean(axis=tuple(i for i in range(3) if i != axis))
-        potential -= proto  # No mean subtraction; retain the potential zero mode.
+        # Neither potential is shifted: VASP writes both with zero mean, the origin of vacuum_potential.
+        potential -= proto
         data["fourier_potential"] = truncate_fft(np.fft.fftn(potential), shape)
     temporary = path.with_suffix(".tmp")
     with h5py.File(temporary, "w") as handle:
@@ -201,15 +202,9 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
     return data
 
 
-def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None, cutoff=None):
+def add_fourier_targets(atoms, coefficients, prefix, charge=None, cutoff=None):
     """Compact, unsmoothed XYZ targets; higher-frequency data stay in the HDF."""
-    if not sigmas:
-        return
-    # Original bandwidth recipe; widths do NOT apply a Gaussian filter.
-    sigma = float(min(sigmas))
-    if not np.isfinite(sigma) or sigma <= 0:
-        raise ValueError("Fourier widths must be positive and finite")
-    cutoff = cutoff or FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / sigma
+    cutoff = cutoff or XYZ_K_CUTOFF
     shape = 2 * np.ceil(cutoff * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     if cutoff > K_CUTOFF or np.any(shape > coefficients.shape):
         raise ValueError("XYZ Fourier bandwidth exceeds the HDF/VASP grid; increase its resolution")
@@ -261,9 +256,6 @@ def collect_job(outdir):
         raise ValueError(f"Nonfinite charge/Fermi level: {outdir}")
     text = (outdir / "OUTCAR").read_text(errors="replace")
     converged = "EDIFF is reached" in text.rsplit("Iteration", 1)[-1]
-    pscenc = text.rsplit("PSCENC =", 1)
-    if len(pscenc) != 2:
-        raise ValueError(f"No alpha Z (PSCENC) in OUTCAR: {outdir}")
 
     plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
     path = outdir / "dft_metadata.json"
@@ -309,10 +301,7 @@ def collect_job(outdir):
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
         "config_fermi_level_weight": float(slab),
-        "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
-        # alpha Z = sum_i alpha_i * sum_i Z_i / V: the cores of the neutral atoms.
-        "vasp_pscenc": float(pscenc[1].split()[0]),
-        "vasp_nelect": float(parameters["nelect"]),
+        "config_vacuum_potential_weight": float(slab and COLLECT_POTENTIAL),
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
@@ -337,35 +326,17 @@ def collect_job(outdir):
         valences = [outcar.zval_dict[s] for s in atoms.get_chemical_symbols()]
         moment = np.dot(valences, ion_z) - atoms.get_volume() * np.mean(planar * z)
         atoms.info["vasp_dipole"] = float(moment) * normal
-    if DENSITY_SIGMAS:
-        add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
-    if POTENTIAL_SIGMAS:
+    if COLLECT_DENSITY:
+        add_fourier_targets(atoms, data["fourier_density"], "vasp_rho", charge)
+    if COLLECT_POTENTIAL:
         if slab:
             add_vacuum_target(atoms, data["planar_potential"], axis, correction)
-        add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
+        add_fourier_targets(atoms, data["fourier_potential"], "vasp_phi")
         # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
-        add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi",
+        add_fourier_targets(atoms, data["fourier_proto_potential"], "vasp_proto_phi",
                             cutoff=PROTO_K_CUTOFF)
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
-
-
-def add_neutral_atom_alpha(configs):
-    """neutral_atom_alpha: VASP's alpha_Z of each element from all PSCENC values, so one frame can run MD."""
-    elements = sorted({int(z) for atoms in configs for z in atoms.numbers})
-    rows = np.asarray([[np.count_nonzero(atoms.numbers == z) for z in elements] for atoms in configs], float)
-    values = np.asarray([atoms.info["vasp_pscenc"] * atoms.get_volume()
-                         / (atoms.info["vasp_nelect"] + atoms.info["total_charge"]) for atoms in configs])
-    if np.linalg.matrix_rank(rows) < len(elements):
-        print(f"PSCENC cannot separate alpha_Z of {elements} in these frames; neutral_atom_alpha not written")
-        return
-    alpha = np.linalg.lstsq(rows, values, rcond=None)[0]
-    error = np.abs(rows @ alpha - values).max() / np.abs(values).max()
-    print(f"alpha_Z of {elements}: {np.round(alpha, 4).tolist()} eV A^3 (relative misfit {error:.1e})")
-    for atoms in configs:
-        present = sorted({int(z) for z in atoms.numbers})
-        atoms.info["neutral_atom_numbers"] = np.asarray(present)
-        atoms.info["neutral_atom_alpha"] = np.asarray([alpha[elements.index(z)] for z in present])
 
 
 def split_configs(records):
@@ -401,7 +372,6 @@ def collect():
     records = [record for record in records if record is not None]
     if not records:
         raise SystemExit("No configurations collected")
-    add_neutral_atom_alpha([atoms for atoms, _ in records])
     train, valid = split_configs(records)
     for path, configs in ((OUT_XYZ, [a for a, _ in records]),
                           (OUT_TRAIN_XYZ, train), (OUT_VALID_XYZ, valid)):
