@@ -21,7 +21,8 @@ from the counter charge to the outer vacuum (no Fermi level). With V* fixed,
 <WF> = e V* + <Delta>. To run at a target U*, V* = 4.44 V + U* - <Delta>/e:
 <Delta> is averaged online during an alignment period (exponential average,
 time constant alignment_constant), after which V* is frozen and the sampled
-ensemble is fixed.
+ensemble is fixed. With frozen = True the charge stays fixed while the average
+still runs, for a relaxation at Q = 0 before the potentiostat starts.
 """
 from __future__ import annotations
 
@@ -80,6 +81,7 @@ class NVTPhiMixin:
         self.aligned = cell_voltage is not None or she_offset is not None or alignment_time == 0.0
         self.mean_offset = None if she_offset is None else float(she_offset)
         self.alignment_elapsed = 0.0
+        self.frozen = False
 
     def _init_potentiostat_state(self, communicator, rng) -> None:
         self._phi_comm = DummyMPI() if communicator is None else communicator
@@ -151,6 +153,8 @@ class NVTPhiMixin:
             self.alignment_elapsed += self.dt
             if self.alignment_elapsed >= self.alignment_time:
                 self.aligned = True
+        if self.frozen:
+            return
         decay = np.exp(-self.dt / self.time_constant)
         charge = self.electrode_charge
         charge -= self.capacitance * (voltage - self.target_cell_voltage) * (1.0 - decay)

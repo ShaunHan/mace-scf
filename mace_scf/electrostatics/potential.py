@@ -148,9 +148,18 @@ FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM, TAIL = .01, 40., 36.
 # PSCENC = sum_i alpha_i * sum_i Z_i / V. For sheets of width >= 0.7 A this core
 # term is a contact, so the sheet sees A_Z(k) = P_Z(k) - alpha_Z. Rows hold
 # f_Z = A_Z/K = [n_Z(k) - Z]/k^2 on the uniform grid (electron potential energy).
-NEUTRAL_ATOM_KEYS = ('proto_fourier_potential', 'vasp_pscenc', 'vasp_nelect', 'neutral_atom_numbers',
-                     'neutral_atom_alpha')
+# P_Z(0), the volume integral of an atom's potential, needs no alpha_Z: minus its
+# sum over the atoms per volume is the vacuum level in VASP's zero-mean origin.
+# Frames carry the proto modes as vasp_proto_phi_fftn_shifted (proto_fourier_potential).
+NEUTRAL_ATOM_KEYS = ('vasp_proto_phi_fftn_shifted', 'proto_fourier_potential', 'vasp_pscenc', 'vasp_nelect',
+                     'neutral_atom_numbers', 'neutral_atom_alpha')
 FORM_FACTOR_GRID = np.arange(0., FORM_FACTOR_MAXIMUM+.5*FORM_FACTOR_SPACING, FORM_FACTOR_SPACING)
+
+
+def proto_modes(info):
+    """The LOCPOT_proto modes a frame carries, or None."""
+    modes = info.get('vasp_proto_phi_fftn_shifted')
+    return info.get('proto_fourier_potential') if modes is None else modes
 
 
 def neutral_atom_alpha(frames):
@@ -173,35 +182,35 @@ def neutral_atom_alpha(frames):
     return alpha
 
 
-def fit_neutral_atoms(frames, knots=64, max_frames=32):
-    """{Z: row} of the neutral atoms the DFT counter charge sees, and a report.
+def fit_neutral_atoms(frames, alpha=None, knots=64, max_frames=32):
+    """The neutral atoms of the reference calculations, from their proto potentials.
 
-    frames are (cell, positions, numbers, info). info holds proto_fourier_potential,
-    the unsmoothed LOCPOT_proto modes of scripts/collect_vasp_data.py on their
-    truncated grid, and vasp_pscenc with vasp_nelect, or neutral_atom_alpha. One
-    linear fit gives P_Z(k) on hats in k^2 up to the common bandwidth of the
-    spectra; beyond it A_Z falls as 1/k^2, where sheets of width >= 3.5/bandwidth
-    no longer reach.
+    frames are (cell, positions, numbers, info); info holds the unsmoothed
+    LOCPOT_proto modes on their truncated grid (proto_modes). One linear fit gives
+    each element's spherical potential P_Z(k) on hats in k^2 up to the common
+    bandwidth of the spectra. Returns ({Z: P_Z(0)}, {Z: row}, report): the volume
+    integral of each atom's potential, which places the vacuum of a slab in the
+    origin of the reference calculations, and the form factors
+    f_Z = [P_Z(k) - alpha_Z]/K that a DFT counter charge sees, for the elements
+    whose alpha_Z is known (vasp_pscenc with vasp_nelect, neutral_atom_alpha, or
+    alpha). Beyond the bandwidth f_Z falls as 1/k^2, where sheets of width
+    >= 3.5/bandwidth no longer reach.
     """
-    alpha, chosen, seen = neutral_atom_alpha(frames), [], {}
+    alpha, chosen, seen = {**neutral_atom_alpha(frames), **(alpha or {})}, [], {}
     for cell, positions, numbers, info in frames:
         numbers = np.asarray(numbers, int)
-        if info.get('proto_fourier_potential') is None:
+        if proto_modes(info) is None:
             continue
         if len(chosen) < max_frames or any(seen.get(int(z), 0) < 4 for z in numbers):
-            proto = np.asarray(info['proto_fourier_potential'], float)
+            proto = np.asarray(proto_modes(info), float)
             if proto.ndim != 4 or proto.shape[0] != 2:
-                raise ValueError(f'proto_fourier_potential must have shape [2, nx, ny, nz], got {proto.shape}')
+                raise ValueError(f'The proto modes must have shape [2, nx, ny, nz], got {proto.shape}')
             chosen.append((np.asarray(cell, float), np.asarray(positions, float), numbers, proto))
             for z in set(numbers.tolist()):
                 seen[z] = seen.get(z, 0)+1
     if not chosen:
-        return {}, 'No frame carries proto_fourier_potential: no neutral atoms fitted'
+        return {}, {}, 'No frame carries proto modes (vasp_proto_phi_fftn_shifted): no neutral atoms fitted'
     elements = sorted(seen)
-    missing = sorted(set(elements)-set(alpha))
-    if missing:
-        raise ValueError(f'alpha_Z of elements {missing} is unknown: give frames whose PSCENC spans enough '
-                         'compositions, or their neutral_atom_alpha from scripts/collect_vasp_data.py')
     # The largest sphere inside every stored grid: |m_i| <= (n_i-1)/2 holds for |G| <= pi (n_i-1)/|a_i|.
     bandwidth = min(np.pi*(n-1)/np.linalg.norm(a) for cell, *_, proto in chosen for n, a in zip(proto.shape[1:], cell))
     size = len(elements)*knots
@@ -226,33 +235,43 @@ def fit_neutral_atoms(frames, knots=64, max_frames=32):
     solution = np.linalg.solve(gram+weight**2*np.kron(np.eye(len(elements)), curvature.T@curvature), rhs)
     residual = float(np.sqrt(max(square-2*solution@rhs+solution@gram@solution, 0.)/square))
     if residual > 1.e-2:
-        raise ValueError(f'proto_fourier_potential does not match the atoms of its frames (relative residual '
-                         f'{residual:.2g}); it must come with the geometry VASP computed it for')
+        raise ValueError(f'The proto modes do not match the atoms of their frames (relative residual '
+                         f'{residual:.2g}); they must come with the geometry VASP computed them for')
     inside = FORM_FACTOR_GRID <= bandwidth
     radial = radial_basis(torch.as_tensor(FORM_FACTOR_GRID[inside]**2), bandwidth, knots).numpy()
-    edge, rows = FORM_FACTOR_GRID[inside][-1], {}
+    edge, integrals, rows = FORM_FACTOR_GRID[inside][-1], {}, {}
     for row, z in enumerate(elements):
-        atom = radial@solution[row*knots:(row+1)*knots]-alpha[z]
-        tail = atom[-1]*(edge/FORM_FACTOR_GRID[~inside])**2
-        rows[z] = np.concatenate([atom, tail])/FIELD_CONSTANT
-    return rows, (f'Neutral atoms of {elements} from {len(chosen)} proto spectra to {bandwidth:.2f}/A '
-                  f'(relative residual {residual:.1e}); alpha_Z {[round(alpha[z], 3) for z in elements]} eV A^3')
+        atom = radial@solution[row*knots:(row+1)*knots]
+        integrals[z] = float(atom[0])
+        if z in alpha:
+            atom = atom-alpha[z]
+            rows[z] = np.concatenate([atom, atom[-1]*(edge/FORM_FACTOR_GRID[~inside])**2])/FIELD_CONSTANT
+    report = (f'Neutral atoms of {elements} from {len(chosen)} proto spectra to {bandwidth:.2f}/A (relative '
+              f'residual {residual:.1e}); potential integrals {[round(integrals[z], 2) for z in elements]} eV A^3')
+    if rows:
+        report += f'; counter-charge form factors with alpha_Z {[round(alpha[z], 3) for z in sorted(rows)]} eV A^3'
+    if set(elements)-set(rows):
+        report += f'; no counter-charge form factors for {sorted(set(elements)-set(rows))}: alpha_Z unknown'
+    return integrals, rows, report
 
 
-def install_neutral_atoms(response, atomic_numbers, rows):
-    """Store {Z: row} of fit_neutral_atoms for a model's elements; the others keep zero rows.
+def install_neutral_atoms(response, atomic_numbers, integrals, rows):
+    """Store the fitted neutral atoms of a model's elements.
 
-    They are fixed physics without parameters and enter only counter-charge
-    energies, so neutral predictions are unchanged. A placed counter charge
-    refuses frames with an element that has no row.
+    I_Z = -P_Z(0) places the vacuum of slabs (vacuum_reference_integrals); the
+    form factors serve placed counter charges, which refuse frames with an element
+    that has none. Both are fixed physics without parameters.
     """
     table = np.zeros((len(atomic_numbers), len(FORM_FACTOR_GRID)))
+    origin = np.zeros(len(atomic_numbers))
     for i, z in enumerate(atomic_numbers):
         if int(z) in rows:
             table[i] = rows[int(z)]
+        origin[i] = -integrals.get(int(z), 0.)
     table = torch.as_tensor(table).to(response.source_widths)
     installed = torch.tensor(bool((table[:, 0] != 0).any()), device=table.device)
-    for name, value in (('neutral_atom_form_factors', table), ('neutral_atom_fitted', installed)):
+    for name, value in (('neutral_atom_form_factors', table), ('neutral_atom_fitted', installed),
+                        ('vacuum_reference_integrals', torch.as_tensor(origin).to(table))):
         response._buffers[name] = value
     return response
 
@@ -285,6 +304,11 @@ class CounterCharge:
     plus the atomic densities of LOCPOT_proto for the VASP-Python plug-in). These
     terms are summed to full bandwidth. density and potential are the model-grid
     source and its field (periodic part plus slab boundary term).
+
+    Constant-potential MD leaves the overlap term out (response attribute
+    counter_charge_overlap False). There the sheet stands for solvated counter
+    ions, which never enter molecules. A negative DFT sheet instead pulls atoms
+    into its interior, which in MD feeds back on the electrode charge.
     """
 
     def __init__(self, g, data, positions):
@@ -317,25 +341,29 @@ class CounterCharge:
         self.moment = self.charge*unit*(g.slab & present)
         species, energy = data['node_attrs'].argmax(-1), zero.clone()
         table = getattr(g.response, 'neutral_atom_form_factors', None)
+        overlap = getattr(g.response, 'counter_charge_overlap', True)
         # Every placed source, also at Q_cc = 0: the linear term gives dE/dQ_cc.
         for i in torch.nonzero(present).flatten().tolist():
-            if table is None or not bool(getattr(g.response, 'neutral_atom_fitted', False)):
+            if overlap and (table is None or not bool(getattr(g.response, 'neutral_atom_fitted', False))):
                 raise ValueError('A placed counter charge needs the neutral atoms of the DFT data: train on frames '
-                                 'with proto_fourier_potential, run scripts/install_neutral_atoms.py, or give '
+                                 'with vasp_proto_phi_fftn_shifted, run scripts/install_neutral_atoms.py, or give '
                                  'MACEFixedPointSCF such frames (neutral_atoms or atoms.info)')
             sigma = float(width[i])
             atoms = data['batch'] == i
-            rows = table[species[atoms].unique()]
-            covered = FORM_FACTOR_SPACING*(rows.shape[-1]-1-(rows != 0).flip(-1).int().argmax(-1))
-            if bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any()):
-                raise ValueError('The neutral atoms miss an element of this frame (fit them from frames that '
-                                 'contain it) or end below '
-                                 f'the {math.sqrt(2*TAIL)/sigma:.3g} 1/Angstrom that a {sigma:.3g} Angstrom '
-                                 'counter charge needs')
+            if overlap:
+                rows = table[species[atoms].unique()]
+                covered = FORM_FACTOR_SPACING*(rows.shape[-1]-1-(rows != 0).flip(-1).int().argmax(-1))
+                if bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any()):
+                    raise ValueError('The neutral atoms miss an element of this frame (fit them from frames that '
+                                     'contain it) or end below '
+                                     f'the {math.sqrt(2*TAIL)/sigma:.3g} 1/Angstrom that a {sigma:.3g} Angstrom '
+                                     'counter charge needs')
             waves = source_waves(g, i, sigma, bool(sheet[i]))
             k2 = waves.square().sum(-1)
             # Self energy (K Q^2/2V) sum_k exp(-s^2 k^2)/k^2, summed over +/-k pairs.
             energy[i] = FIELD_CONSTANT*self.charge[i].square()/g.volume[i]*(torch.exp(-sigma**2*k2)/k2).sum()
+            if not overlap:
+                continue
             # -Q <U_atoms>_g = -(2KQ/V) sum_k exp(-s^2 k^2/2) sum_j f_j(k) cos k.(R_j-c)
             coordinate = (k2.sqrt()/FORM_FACTOR_SPACING).clamp_max(table.shape[-1]-1.001)
             left = coordinate.long()

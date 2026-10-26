@@ -17,7 +17,7 @@ K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
 FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
 DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
-PROTO_K_CUTOFF = 3.5  # XYZ bandwidth of proto_fourier_potential; sheets of width sigma need 3.5/sigma.
+PROTO_K_CUTOFF = None  # XYZ bandwidth of vasp_proto_phi (1/A); None keeps that of vasp_phi.
 FMAX_TOL = 6.0
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
@@ -201,7 +201,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
     return data
 
 
-def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
+def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None, cutoff=None):
     """Compact, unsmoothed XYZ targets; higher-frequency data stay in the HDF."""
     if not sigmas:
         return
@@ -209,7 +209,7 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     sigma = float(min(sigmas))
     if not np.isfinite(sigma) or sigma <= 0:
         raise ValueError("Fourier widths must be positive and finite")
-    cutoff = FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / sigma
+    cutoff = cutoff or FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / sigma
     shape = 2 * np.ceil(cutoff * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     if cutoff > K_CUTOFF or np.any(shape > coefficients.shape):
         raise ValueError("XYZ Fourier bandwidth exceeds the HDF/VASP grid; increase its resolution")
@@ -219,17 +219,6 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     if charge is not None:
         target[:, 0, 0, 0] = (charge * coefficients.size / atoms.get_volume(), 0.0)
     atoms.info[f"{prefix}_fftn_shifted"] = target
-
-
-def add_proto_target(atoms, coefficients):
-    """proto_fourier_potential: unsmoothed LOCPOT_proto modes to PROTO_K_CUTOFF, in add_fourier_targets' layout."""
-    shape = 2 * np.ceil(PROTO_K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
-    if PROTO_K_CUTOFF > K_CUTOFF or np.any(shape > coefficients.shape):
-        raise ValueError("PROTO_K_CUTOFF exceeds the HDF/VASP grid; increase its resolution")
-    coefficients = truncate_fft(coefficients, shape)
-    target = np.empty((2, *coefficients.shape), dtype=np.float32)
-    target[0], target[1] = coefficients.real, coefficients.imag
-    atoms.info["proto_fourier_potential"] = target
 
 
 def add_vacuum_target(atoms, planar, axis, correction):
@@ -354,7 +343,9 @@ def collect_job(outdir):
         if slab:
             add_vacuum_target(atoms, data["planar_potential"], axis, correction)
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
-        add_proto_target(atoms, data["fourier_proto_potential"])
+        # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
+        add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi",
+                            cutoff=PROTO_K_CUTOFF)
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 

@@ -209,21 +209,24 @@ def load_train_valid_sets_from_xyz(args: argparse.Namespace,  config_type_weight
         max_volume_per_atom=args.low_density_pbc_max_volume_per_atom,
         allow_low_density_pbc=args.allow_low_density_pbc,
     )
-    # Neutral atoms of the DFT counter charge, from the frames' proto modes and PSCENC.
+    # Neutral atoms of the reference calculations, from the frames' proto modes.
     from mace_scf.data.new_atomic_data import counter_charge_data
     from mace_scf.electrostatics.potential import NEUTRAL_ATOM_KEYS, fit_neutral_atoms
     configs = [config for split in (collections.train, collections.valid) for config in split]
-    args.neutral_atoms, report = fit_neutral_atoms(
-        [(config.cell, config.positions, config.atomic_numbers, config.properties) for config in collections.train])
-    logging.info(report)
     placed = {int(z) for config in configs
               if float(counter_charge_data(config.properties, config.pbc)["counter_charge_width"]) > 0.
               for z in config.atomic_numbers}
-    missing = sorted(placed-set(args.neutral_atoms))
-    if missing:
-        raise ValueError(f"Frames with a placed counter charge contain elements {missing} without neutral atoms; "
-                         "collect them with scripts/collect_vasp_data.py, which keeps proto_fourier_potential "
-                         "and PSCENC")
+    vacuum = {int(z) for config in configs if config.properties.get("vacuum_potential") is not None
+              for z in config.atomic_numbers}
+    integrals, rows, report = fit_neutral_atoms(
+        [(config.cell, config.positions, config.atomic_numbers, config.properties) for config in collections.train])
+    logging.info(report)
+    args.neutral_atoms = (integrals, rows)
+    for needed, have, what in ((vacuum, integrals, "vacuum labels"), (placed, rows, "a placed counter charge")):
+        if needed-set(have):
+            raise ValueError(f"Frames with {what} contain elements {sorted(needed-set(have))} without neutral "
+                             "atoms; collect them with scripts/collect_vasp_data.py, which keeps the proto modes "
+                             "(vasp_proto_phi_fftn_shifted) and PSCENC")
     for config in configs+[config for _, test in collections.tests for config in test]:
         for key in NEUTRAL_ATOM_KEYS:
             config.properties.pop(key, None)  # Used once; the model stores the fitted atoms.

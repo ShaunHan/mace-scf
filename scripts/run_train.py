@@ -188,7 +188,7 @@ def main() -> None:
         key: args.key_specification.info_keys.get(key, key) for key in NEUTRAL_ATOM_KEYS})
     if getattr(args, 'neutral_atom_potcar', None):
         raise ValueError('neutral_atom_potcar is retired: counter charges use neutral atoms fitted from '
-                         'proto_fourier_potential and PSCENC. Delete it from the configuration.')
+                         'vasp_proto_phi_fftn_shifted and PSCENC. Delete it from the configuration.')
     logging.info("Using the key specifications to parse data:")
     logging.info(args.key_specification)
 

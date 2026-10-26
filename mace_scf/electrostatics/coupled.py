@@ -10,6 +10,7 @@ from typing import Callable, Tuple
 import logging
 import math
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -1387,7 +1388,89 @@ class CoupledGeometry(SpectralGeometry):
         return output.scatter_add(1,self.selected_indices[...,None].expand_as(value),
                                   value*self.selected_mask[...,None])
 
-def prepare_coupled(model, data, local, constant_charge=True, geometry=None, functional=False):
+def electrolyte_molecules(model, data, positions):
+    """Packed indicator (graphs, size, K) of the molecules and ions of the electrolyte.
+
+    Atoms closer than 1.2 times the sum of their covalent radii are bonded. The
+    electrode is a bonded network that continues through a periodic boundary,
+    a slab or a solid. In a cell with an electrode, every finite bonded fragment
+    is a molecule or ion of the electrolyte. A cell without one has none.
+    """
+    from ase.data import covalent_radii
+    numbers = model.atomic_numbers.cpu().numpy()[data['node_attrs'].argmax(-1).cpu().numpy()]
+    x = positions.detach().cpu().double().numpy()
+    batch = data['batch'].cpu().numpy()
+    first, second = data['edge_index'].cpu().numpy()
+    shifts = (np.zeros((len(first), 3)) if data.get('shifts') is None
+              else data['shifts'].detach().cpu().double().numpy())
+    bonded = (np.linalg.norm(x[second]-x[first]+shifts, axis=-1)
+              < 1.2*(covalent_radii[numbers[first]]+covalent_radii[numbers[second]]))
+    cells = data['cell'].reshape(-1, 3, 3).detach().cpu().double().numpy()
+    images = np.rint(np.einsum('ec,ecd->ed', shifts[bonded], np.linalg.inv(cells[batch[first[bonded]]]))).astype(int)
+    neighbors = [[] for _ in x]
+    for a, b, image in zip(first[bonded], second[bonded], images):
+        neighbors[a].append((b, image))
+    # Label bonded fragments; a bond back to a fragment's own atom in another
+    # periodic image makes it extended.
+    label, offset, extended = np.full(len(x), -1), np.zeros((len(x), 3), int), []
+    for start in range(len(x)):
+        if label[start] >= 0:
+            continue
+        label[start], stack, periodic = len(extended), [start], False
+        while stack:
+            a = stack.pop()
+            for b, image in neighbors[a]:
+                if label[b] < 0:
+                    label[b], offset[b] = label[start], offset[a]+image
+                    stack.append(b)
+                elif (offset[b] != offset[a]+image).any():
+                    periodic = True
+        extended.append(periodic)
+    extended = np.asarray(extended, bool)
+    graphs, ptr = len(data['ptr'])-1, data['ptr'].cpu().numpy()
+    electrode = np.zeros(graphs, bool)
+    np.logical_or.at(electrode, batch, extended[label])
+    molecules = [np.unique(label[ptr[g]:ptr[g+1]][~extended[label[ptr[g]:ptr[g+1]]]]) if electrode[g] else []
+                 for g in range(graphs)]
+    members = np.zeros((graphs, int(max(ptr[1:]-ptr[:-1])), max([len(m) for m in molecules]+[0])))
+    for g, ids in enumerate(molecules):
+        for k, fragment in enumerate(ids):
+            members[g, np.flatnonzero(label[ptr[g]:ptr[g+1]] == fragment), k] = 1.
+    return positions.new_tensor(members)
+
+
+def molecular_projection(members, softness, factors, materialized):
+    """Maps from molecular charge excess to the state change that removes it.
+
+    Every molecule k of the electrolyte has its own multiplier nu_k in the charge
+    law, q_i = S_i (phi_i - lambda - nu_k), so that its net charge is held fixed
+    while the electrode takes the rest of Q. screened acts on the moments of the
+    screened update, raw on the charges of the unscreened law. Both keep Q.
+    charging is the screened moment response to a unit charge on the electrode.
+    """
+    graphs, size, count = members.shape
+    matrix, root, lu, pivots = factors
+    c4 = root.new_zeros((graphs, size, 4, count))
+    c4[..., 0, :] = members
+    c4 = c4.flatten(1, 2)
+    safe = torch.where(root > 0, root, torch.ones_like(root))
+    unit = root.new_zeros((graphs, root.shape[-1]+1, 1))
+    unit[:, -1] = 1.
+    right = torch.cat((torch.cat((softness[..., None]*c4/safe[..., None], root.new_zeros((graphs, 1, count))), 1),
+                       unit), -1)
+    solved = matrix@right if materialized else solve_factored_system(matrix, lu, pivots, right)
+    response = root[..., None]*solved[:, :-1]
+    shifts, charging = response[..., :count], response[..., count:]
+    empty = torch.diag_embed((members.sum(1) == 0).to(response.dtype))
+    screened = shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
+    charging = charging-screened@(c4.transpose(1, 2)@charging)
+    s = softness.reshape(graphs, size, 4)[..., :1]
+    raw = s*members-s*(s*members).sum(1, keepdim=True)/s.sum(1, keepdim=True)
+    return screened, raw@torch.linalg.inv(members.transpose(1, 2)@raw+empty), charging[..., 0].reshape(graphs, size, 4)
+
+
+def prepare_coupled(model, data, local, constant_charge=True, geometry=None, functional=False, molecules=None,
+                    start=None):
     """Prepare one live geometry/linear factorization, reused by every update."""
     r = model.field_dependent_charges_map
     g = CoupledGeometry(model, data, local.positions) if geometry is None else geometry
@@ -1438,13 +1521,28 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     # Species offsets are selected once by the geometric node maps. The
     # recurrent neural features contain geometry, fields and messages only.
     # Keep this scalar attached to autograd for training and implicit response.
+    # Electrode charging: each molecule of the electrolyte keeps a fixed charge.
+    confined = charging = ()
+    if molecules is not None:
+        soft, present_moments, _ = moment_coordinates(reference, mask)
+        *confined, charging = molecular_projection(molecules[0], soft*present_moments, factors, not functional)
+        confined = (*molecules, *confined)
     fixed = (chemical, vector, species_level, p0, mask, target, transport, reference,
-             completion, *factors, *g.tensors, *g.kernels, *prepared)
+             completion, *factors, *g.tensors, *g.kernels, *prepared, *confined)
     count = len(fixed)
     geometry_end = 13+len(g.tensors)
 
     def evaluate(z, *args, screened=True, include_energy=False, observe=True):
         chem, vec, level, initial, present, charge, neighbors, ref, coupling = args[:9]
+
+        def confine(proposal, screened):
+            if not confined:
+                return proposal
+            members, targets, projector = args[count-4], args[count-3], args[count-2 if screened else count-1]
+            excess = (members*proposal[..., :1]).sum(1)-targets
+            change = (projector@excess[..., None])[..., 0].reshape(*proposal.shape[:2], -1)
+            change = torch.cat((change, torch.zeros_like(proposal[..., change.shape[-1]:4])), -1)
+            return torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
         factor = args[9:13]
         geometry, kernels = args[13:geometry_end], args[geometry_end:geometry_end+2]
         spectral = (evaluate_coefficients(z*present[..., None], geometry, kernels, r.density_width,include_carrier=True)
@@ -1453,7 +1551,8 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
         if screened and not observe and not functional:
             levels,source=r.recurrent_coefficients(z,chem,vec,level,potential,field,initial,present,
                 charge,neighbors,ref,args[geometry_end+4:geometry_end+7])
-            proposal=apply_screen_action(levels,source,present,charge,*args[geometry_end+2:geometry_end+4])
+            proposal=confine(apply_screen_action(levels,source,present,charge,*args[geometry_end+2:geometry_end+4]),
+                             True)
             return (proposal,), (*spectral,potential,field)
         inputs = (z, chem, vec, level, potential, field, initial, present, charge, neighbors)
         options = {'include_energy': include_energy, 'reference_offset': ref,
@@ -1464,7 +1563,10 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
                   if functional else r(*inputs, **options))
         proposal = result[0]
         if screened:
-            proposal=screen_coupled(z,proposal,ref,coupling,present,factor,materialized=not functional)
+            proposal=confine(screen_coupled(z,proposal,ref,coupling,present,factor,materialized=not functional),
+                             True)
+        else:
+            proposal=confine(proposal,False)
         return (proposal, *result[1:]), (*spectral, potential, field)
 
     def update(z, *args):
@@ -1481,6 +1583,9 @@ def prepare_coupled(model, data, local, constant_charge=True, geometry=None, fun
     dipole = state[..., 1:4]-reference[..., -3:-2]*r.density_width*gradient[..., 0, :]
     proposal = torch.cat((q[..., None], dipole, state[..., 4:]), -1)
     state = screen_moments(state, proposal, reference, mask, factors, materialized=not functional)
+    if start is not None:
+        # The charged state starts from the neutral one with Q on the electrode.
+        state = torch.cat((start[..., :4]+target[:, None, None]*charging, start[..., 4:]), -1)
     return g, state, (*fixed, *parameters), update, evaluate
 
 def reference_predictions(model, data, g, fixed, state, response, spectral, output,
@@ -1658,15 +1763,35 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True,
             edge_batch = data['batch'][data['edge_index'][0]]
             data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj',data['shifts'],symmetric[edge_batch])
         local = model.local_part(data, compute_force=compute_force)
-        g, initial, args, update, evaluate = prepare_coupled(model, data, local, functional=mode == 'implicit')
-        if mode == 'implicit':
-            state, info = implicit_root(update, initial, *args,
-                options=RootOptions(max_steps=int(steps), mixing=mixing, tolerance=tolerance,
-                                    linear_tolerance=min(1.e-9,tolerance*.01)))
-        else:
+
+        def solve(update, initial, args, steps):
+            if mode == 'implicit':
+                return implicit_root(update, initial, *args,
+                    options=RootOptions(max_steps=int(steps), mixing=mixing, tolerance=tolerance,
+                                        linear_tolerance=min(1.e-9,tolerance*.01)))
             state = unroll_steps(update, initial, args, int(steps), mixing,
                                  checkpointed=training and mode == 'shortcut_scf')
-            info = state.new_tensor([steps, 0., 0.])
+            return state, state.new_tensor([steps, 0., 0.])
+
+        # Electrode charging. The neutral interface fixes the charge of every
+        # electrolyte molecule; the same number of updates then charges it with
+        # those charges held, so the electrode takes all of Q.
+        members = (electrolyte_molecules(model, data, local.positions)
+                   if getattr(r, 'confined_charging', False) else None)
+        molecules = None
+        if members is not None and members.shape[-1]:
+            zero = torch.zeros_like(data['total_charge']).detach()
+            neutral = dict(data, total_charge=zero, counter_charge=zero)
+            _, initial, args, update, _ = prepare_coupled(model, neutral, local, functional=mode == 'implicit')
+            neutral_state, _ = solve(update, initial, args, steps)
+            molecules = (members, (members*neutral_state[..., :1]).sum(1))
+        g, initial, args, update, evaluate = prepare_coupled(model, data, local, functional=mode == 'implicit',
+                                                             molecules=molecules, start=molecules and neutral_state)
+        if molecules is None:
+            state, info = solve(update, initial, args, steps)
+        else:
+            state, info = solve(update, initial, args, steps)
+            info = info+info.new_tensor([steps, 0., 0.])
         response, spectral = evaluate(state, *args, screened=False, include_energy=True)
         proposal, mu = response[:2]
         total, lr, sr, effective = (g.expand_spectrum(value) for value in spectral[:4])
@@ -1841,15 +1966,11 @@ def apply_scalar_reference(output, response):
 def initialize_coupled(model, loader, device, options=None, loss_config=None):
     """Training-only proto/feature conditioning; never a validation correction."""
     from mace_scf.utils.foundation import calibration_loader
-    from .potential import initialize_vacuum_reference
     from .desmearing import configure_desmearing
     configure_desmearing(model.field_dependent_charges_map, loss_config or {})
-    # Counter charges use the DFT neutral atoms of load_data
-    # (fit_neutral_atoms), not this band-limited proto refit; vacuum
-    # labels are raw.
+    # The neutral atoms of load_data (fit_neutral_atoms) place the vacuum and
+    # serve counter charges; nothing here is fitted to vacuum labels.
     initialize_response(model, loader, device, apply_potential_smearing=False, fit_proto=False)
-    initialize_vacuum_reference(model, loader, device,
-        apply_potential_smearing=False)
     r = model.field_dependent_charges_map
     ss, vv, count = torch.zeros_like(r.geometry_scalar_unit), torch.zeros_like(r.geometry_vector_unit), 0
     for batch in calibration_loader(loader):
