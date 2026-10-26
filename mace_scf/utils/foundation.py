@@ -242,9 +242,10 @@ def condition_energy(model, loader, device):
     states = [p.requires_grad for p in model.parameters()]
     try:
         model.requires_grad_(False)
+        steps = int(model.field_dependent_charges_map.deployment_steps)
         for batch in calibration_loader(loader):
             batch = batch.to(device)
-            output = evaluate_coupled(model, batch.to_dict(), steps=50, compute_force=False)
+            output = evaluate_coupled(model, batch.to_dict(), steps=steps, compute_force=False)
             counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)
             n = counts.sum(-1)
             features.append(counts/n[:, None])
