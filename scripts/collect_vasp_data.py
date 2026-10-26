@@ -4,10 +4,8 @@ import multiprocessing as mp
 
 import h5py
 import numpy as np
-from ase.data import chemical_symbols
 from ase.io import read, write
 from pymatgen.io.vasp import Chgcar, Locpot, Outcar
-from scipy.interpolate import CubicSpline
 
 
 BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
@@ -25,7 +23,6 @@ SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
 HDF_NAME = "fourier_data.hdf"
-FORM_FACTOR_SPACING, FORM_FACTOR_END = 0.05, 30.0  # Neutral-atom table grid, inverse Angstrom.
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
@@ -241,59 +238,6 @@ def add_vacuum_target(atoms, planar, axis, correction):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
-def read_potcar(path):
-    """{element: (Z_val, q, n(q))}, the atomic pseudo valence densities in reciprocal space."""
-    lines = Path(path).read_text(errors="replace").splitlines()
-    datasets, symbol, zval, qmax = {}, None, None, None
-    for i, line in enumerate(lines):
-        if "VRHFIN" in line:
-            symbol = line.split("=")[1].split(":")[0].strip().split("_")[0]
-        elif "ZVAL" in line and "POMASS" in line:
-            zval = float(line.split("ZVAL")[1].split("=")[1].split()[0])
-        elif line.strip() == "local part":
-            qmax = float(lines[i + 1].split()[0])
-        elif line.strip() == "atomic pseudo charge-density":
-            values, j = [], i + 1
-            while len(values) < 1000:
-                values += [float(x) for x in lines[j].split()]
-                j += 1
-            density = np.asarray(values[:1000])
-            if not np.isclose(density[0], zval, rtol=0, atol=1e-6):
-                raise ValueError(f"POTCAR {symbol}: atomic density integrates to {density[0]}, not ZVAL")
-            if symbol in datasets and not np.array_equal(datasets[symbol][2], density):
-                raise ValueError(f"{path}: two different {symbol} datasets; the model needs one per element")
-            datasets[symbol] = (zval, np.arange(1000) * qmax / 1000, density)
-    if not datasets:
-        raise ValueError(f"No PAW datasets in {path}")
-    return datasets
-
-
-def add_neutral_atom_targets(atoms, potcar):
-    """Form factors f(q) = (n(q) - Z)/q^2 of the neutral atoms, for every element.
-
-    The VASP-Python counter charge couples to point valence ions plus the
-    POTCAR atomic pseudo densities n(q), so these are the neutral atoms it
-    sees. Every frame carries the table, so training and MD need no POTCAR.
-    """
-    datasets = read_potcar(potcar)
-    grid = FORM_FACTOR_SPACING * np.arange(round(FORM_FACTOR_END / FORM_FACTOR_SPACING) + 1)
-    numbers = np.unique(atoms.numbers)
-    rows = []
-    for z in numbers:
-        if chemical_symbols[z] not in datasets:
-            raise ValueError(f"{potcar} has no dataset for {chemical_symbols[z]}")
-        zval, q, density = datasets[chemical_symbols[z]]
-        f = np.empty_like(q)
-        f[1:] = (density[1:] - zval) / q[1:] ** 2
-        f[0] = np.polyval(np.polyfit(q[1:7] ** 2, f[1:7], 2), 0.0)  # -Z<r^2>/6
-        inside = grid <= q[-1]  # Beyond the POTCAR grid n(q) = 0, a point ion.
-        rows.append(np.where(inside, CubicSpline(q, f)(np.minimum(grid, q[-1])),
-                             -zval / np.where(inside, 1.0, grid) ** 2))
-    atoms.info["neutral_atom_numbers"] = numbers
-    atoms.info["neutral_atom_q_spacing"] = FORM_FACTOR_SPACING
-    atoms.info["neutral_atom_form_factors"] = np.stack(rows).ravel()
-
-
 def collect_job(outdir):
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
@@ -363,7 +307,6 @@ def collect_job(outdir):
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
-    add_neutral_atom_targets(atoms, outdir / "POTCAR")
     places = [key for key in COUNTER_CHARGE_PLACES if key in meta]
     if places:
         # The Gaussian counter charge as placed, also at Q = 0.

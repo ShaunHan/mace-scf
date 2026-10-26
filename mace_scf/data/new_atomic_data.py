@@ -32,46 +32,6 @@ COUNTER_CHARGE_KEYS = ("counter_charge", "counter_charge_center", "counter_charg
                        "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac")
 COUNTER_CHARGE_FIELDS = ("counter_charge", "counter_charge_center", "counter_charge_width",
                          "counter_charge_axis", "counter_charge_fraction")
-NEUTRAL_ATOM_KEYS = ("neutral_atom_numbers", "neutral_atom_q_spacing", "neutral_atom_form_factors")
-
-
-def neutral_atom_reference(records):
-    """{Z: (dq, f(q))} from frame metadata, the same in every frame that has it.
-
-    f_Z(q) = -rho_Z(q)/q^2 in Angstrom^2 on q = 0, dq, 2dq, ... (inverse
-    Angstrom), where rho_Z(q) is the Fourier transform of the charge density of
-    an isolated neutral atom as the DFT counter charge couples to it, so that
-    f_Z(0) = -Z<r^2>/6. The collection script of each DFT code writes these
-    tables into every frame; the model only interpolates them. records are
-    dict-like frame metadata, Configuration.properties or ase.Atoms.info.
-    """
-    reference = {}
-    for properties in records:
-        numbers = properties.get("neutral_atom_numbers")
-        if numbers is None:
-            continue
-        numbers = np.atleast_1d(np.asarray(numbers)).astype(int)
-        spacing = properties.get("neutral_atom_q_spacing")
-        values = properties.get("neutral_atom_form_factors")
-        if spacing is None or values is None:
-            raise ValueError("Neutral-atom form factors need neutral_atom_numbers, neutral_atom_q_spacing "
-                             "and neutral_atom_form_factors together")
-        spacing, values = float(spacing), np.asarray(values, dtype=float).reshape(-1)
-        if (not np.isfinite(spacing) or spacing <= 0. or values.size % len(numbers)
-                or not np.isfinite(values).all()):
-            raise ValueError("Invalid neutral-atom form-factor table")
-        values = values.reshape(len(numbers), -1)
-        if values.shape[1] < 4 or not (values[:, 0] < 0.).all():
-            raise ValueError("A neutral-atom form factor must start at f(0) = -Z<r^2>/6 < 0")
-        for z, row in zip(numbers.tolist(), values):
-            known = reference.setdefault(z, (spacing, row))
-            if known[0] != spacing or known[1].shape != row.shape or not np.allclose(
-                    known[1], row, rtol=1.e-6, atol=1.e-9):
-                raise ValueError(f"Neutral-atom form factors of Z={z} differ between frames: "
-                                 "the data mix different pseudopotentials")
-    return reference
-
-
 def counter_charge_data(properties, pbc=None):
     """Read a prescribed Gaussian source, independently of electronic labels.
 

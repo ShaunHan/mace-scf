@@ -182,14 +182,9 @@ def main() -> None:
         info_keys=head_dict.get("info_keys", {}),
         arrays_keys=head_dict.get("arrays_keys", {}),
     )
-    # Neutral-atom form factors are read from every frame that carries them.
-    from mace_scf.data.new_atomic_data import NEUTRAL_ATOM_KEYS
-    args.key_specification.update(info_keys={
-        key: args.key_specification.info_keys.get(key, key) for key in NEUTRAL_ATOM_KEYS})
     if getattr(args, 'neutral_atom_potcar', None):
-        raise ValueError('neutral_atom_potcar has been removed. Neutral-atom form factors now come with the '
-                         'data: collect it with scripts/collect_vasp_data.py, which writes neutral_atom_* '
-                         'into every frame, and delete neutral_atom_potcar from the configuration.')
+        raise ValueError('neutral_atom_potcar is retired: counter charges use the built-in neutral atoms. '
+                         'Delete it from the configuration.')
     logging.info("Using the key specifications to parse data:")
     logging.info(args.key_specification)
 

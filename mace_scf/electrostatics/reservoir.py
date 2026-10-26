@@ -18,9 +18,49 @@ the potential step from the counter charge to the vacuum beyond the solution.
 Delta contains no Fermi level. In the fixed-V* ensemble <WF> = e V* + <Delta>,
 so V* = 4.44 V + U* - <Delta>/e imposes <U_SHE> = U*.
 """
+import numpy as np
 import torch
 
 SHE_ABSOLUTE_V = 4.44  # Trasatti's absolute SHE potential at 298.15 K, IUPAC.
+# Electrode elements that place the counter-charge sheet: the d block.
+D_BLOCK = frozenset([*range(21, 31), *range(39, 49), *range(57, 81), *range(89, 113)])
+
+
+def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
+    """Dipole cut, vacuum plane and counter-charge sheet of a slab open along z, from its geometry.
+
+    Unless given, the cut lies in the middle of the largest empty gap along z.
+    The electrode surface is the outermost d-block atom or O bonded to one
+    within 2.3 Angstrom, on the side that holds more of the other atoms, the
+    solvent. The sheet sits sheet_height beyond that surface, and the vacuum
+    plane halfway between the cut and the solvent surface, or the sheet if that
+    lies further out. Compute once per trajectory.
+    """
+    z = atoms.get_scaled_positions(wrap=True)[:, 2]
+    if cut is None:
+        order = np.sort(z)
+        gaps = np.diff(np.append(order, order[0]+1.))
+        i = int(np.argmax(gaps))
+        cut = (order[i]+.5*gaps[i]) % 1.
+    length = atoms.cell[2, 2]
+    height = ((z-cut) % 1.)*length   # from the cut upwards, through the system
+    numbers = atoms.get_atomic_numbers()
+    electrode = np.isin(numbers, list(D_BLOCK))
+    if not electrode.any():
+        raise ValueError('No d-block electrode atoms to place the counter-charge sheet')
+    surface = list(np.flatnonzero(electrode))
+    for o in np.flatnonzero(numbers == 8):
+        if (atoms.get_distances(int(o), np.flatnonzero(electrode), mic=True) < 2.3).any():
+            surface.append(int(o))
+    top, bottom = height[surface].max(), height[surface].min()
+    if (height > top).sum() >= (height < bottom).sum():
+        sheet = top+sheet_height
+        vacuum = .5*(max(height.max(), sheet+4*sheet_width)+length)
+    else:
+        sheet = bottom-sheet_height
+        vacuum = .5*min(height.min(), sheet-4*sheet_width)
+    return {'dipole_correction_zfrac': float(cut), 'vacuum_zfrac': float((cut+vacuum/length) % 1.),
+            'counter_charge_zfrac': float((cut+sheet/length) % 1.), 'counter_charge_width': float(sheet_width)}
 
 
 def evaluate_cell(model, data, *, steps, mixing, tolerance):

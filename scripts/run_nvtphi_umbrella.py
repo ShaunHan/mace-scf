@@ -19,7 +19,6 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 # ------------------------------ user settings ------------------------------ #
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_51.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_209/models/fit_0_best_wf.model'
-NEUTRAL_ATOM_FILE = None    # Collected xyz with neutral_atom_* tables; only for a model without them.
 OUTPUT_ROOT = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/nvtphi_umbrella'
 RUN_INDEXES = list(range(0, 10))                # A list of frame indexes.
 OXYGEN_PAIRS = {}           # Optional {index: (O_id, O_id)}, zero-based ASE indexes.
@@ -381,22 +380,8 @@ def run_one(source, index, replica, model_file, model_sha, directory):
 
 
 def prepared_model():
-    """The model file to run and its hash; installs neutral-atom tables into a copy if needed."""
-    import torch
+    """The model file to run and its hash; the calculator supplies any missing neutral atoms."""
     model = Path(MODEL_FILE).resolve(strict=True)
-    network = torch.load(model, map_location='cpu', weights_only=False)
-    if not bool(getattr(network.field_dependent_charges_map, 'neutral_atom_fitted', False)):
-        if NEUTRAL_ATOM_FILE is None:
-            raise ValueError(f'{MODEL_FILE} has no neutral-atom form factors; set NEUTRAL_ATOM_FILE to a collected xyz')
-        counter = model.with_suffix('.counter.model')
-        if not counter.exists() or counter.stat().st_mtime < model.stat().st_mtime:
-            from mace_scf.data.new_atomic_data import neutral_atom_reference
-            from mace_scf.electrostatics.potential import install_neutral_atom_reference
-            reference = neutral_atom_reference(a.info for a in read(NEUTRAL_ATOM_FILE, index=':'))
-            install_neutral_atom_reference(network.field_dependent_charges_map, reference,
-                                           [int(z) for z in network.atomic_numbers])
-            torch.save(network, counter)  # Written once, so restarts see one model hash.
-        model = counter
     hasher = hashlib.sha256()
     with model.open('rb') as f:
         for chunk in iter(lambda: f.read(1 << 22), b''):

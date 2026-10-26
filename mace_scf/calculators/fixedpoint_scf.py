@@ -178,9 +178,16 @@ class MACEFixedPointSCF(Calculator):
         jellium_slab_bounds: Optional[tuple[float, float]] = None,
         adjust_kspace_cutoff: float = 1.0,
         counter_charge_width: float = 1.0,
+        counter_charge_height: float = 6.0,
         constant_potential: bool = False,
         **kwargs,
     ):
+        """With constant_potential=True the calculator needs only the geometry: on the
+        first call on a slab it stores in atoms.info the dipole cut, the vacuum plane
+        and a Gaussian counter-charge sheet of width counter_charge_width,
+        counter_charge_height above the electrode surface (reservoir.slab_controls),
+        unless atoms.info gives them, and they stay fixed for the trajectory. Models
+        without neutral-atom form factors get the built-in neutral atoms."""
         kwargs.pop("enable_cueq", None)  # backbone acceleration is a training-time choice
         Calculator.__init__(self, **kwargs)
         if verbose:
@@ -211,6 +218,10 @@ class MACEFixedPointSCF(Calculator):
             raise ValueError('Constant-potential MD requires a model trained with DFT energy and derivative-based EF, '
                              'fixed-charge SCF and eV/Angstrom units')
         self.constant_potential = bool(constant_potential)
+        if response is not None and not bool(getattr(response, 'neutral_atom_fitted', True)):
+            # Built-in neutral atoms: counter charges need no POTCAR or form-factor file.
+            from mace_scf.electrostatics.potential import install_neutral_atoms
+            install_neutral_atoms(response, [int(z) for z in self.model.atomic_numbers])
         if getattr(response, "spectral", False):
             from dataclasses import replace
             if scf_options is None or "num_scf_steps" not in scf_options:
@@ -256,6 +267,7 @@ class MACEFixedPointSCF(Calculator):
         self.compensating_jellium = compensating_jellium
         self.jellium_slab_bounds = jellium_slab_bounds
         self.counter_charge_width = float(counter_charge_width)
+        self.counter_charge_height = float(counter_charge_height)
         self.compiled_evaluator = None
 
         self.r_max = float(self.model.r_max)
@@ -643,7 +655,28 @@ class MACEFixedPointSCF(Calculator):
                     changes.append(key)
         return changes
 
+    def _place_slab_controls(self, atoms):
+        """Fix the dipole cut, vacuum plane and counter-charge sheet of a slab once, from its geometry."""
+        info = atoms.info
+
+        def given(prefix):
+            return any(info.get(f"{prefix}_{axis}frac") is not None for axis in "xyz")
+
+        sheet = given("counter_charge") or info.get("counter_charge_center") is not None
+        if sheet and given("dipole_correction") and given("vacuum"):
+            return
+        from mace_scf.electrostatics.reservoir import slab_controls
+        controls = slab_controls(atoms, sheet_height=self.counter_charge_height,
+                                 sheet_width=self.counter_charge_width, cut=info.get("dipole_correction_zfrac"))
+        for prefix, key in (("dipole_correction", "dipole_correction_zfrac"), ("vacuum", "vacuum_zfrac"),
+                            ("counter_charge", "counter_charge_zfrac")):
+            if not given(prefix) and not (prefix == "counter_charge" and sheet):
+                info[key] = controls[key]
+        info.setdefault("counter_charge_width", controls["counter_charge_width"])
+
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
+        if atoms is not None and self.constant_potential and tuple(bool(p) for p in atoms.pbc) == (True, True, False):
+            self._place_slab_controls(atoms)
         Calculator.calculate(self, atoms, system_changes=system_changes)
         # ASE shallow-copies info. Snapshot mutable controls so an in-place
         # source-center or applied-field change cannot reuse stale observables.

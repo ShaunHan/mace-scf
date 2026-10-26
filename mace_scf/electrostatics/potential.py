@@ -141,27 +141,27 @@ def radial_basis(k2, cutoff, knots=64):
 # Neutral-atom form factors on one uniform grid (inverse Angstrom); Gaussian
 # source tails below exp(-TAIL) are dropped from every exact source sum.
 FORM_FACTOR_SPACING, FORM_FACTOR_MAXIMUM, TAIL = .01, 40., 36.
+# Neutral atoms that a counter charge in the solvent overlaps: a point valence
+# charge Z in a Gaussian valence cloud of width s (Angstrom), so that
+# f(q) = Z [exp(-s^2 q^2/2) - 1]/q^2. The widths fit the PBE PAW datasets of the
+# training data, whose counter-charge overlap they reproduce within 1.5%.
+NEUTRAL_ATOMS = {1: (1., .5796), 8: (6., .4246), 77: (9., .6518)}
 
 
-def install_neutral_atom_reference(response, reference, atomic_numbers):
-    """Interpolate the data's neutral-atom form factors onto the model grid.
+def install_neutral_atoms(response, atomic_numbers):
+    """Form factors of the built-in neutral atoms (NEUTRAL_ATOMS) on the model grid.
 
-    reference is {Z: (dq, f(q))} from neutral_atom_reference, which the DFT
-    collection script writes into every frame. It is fixed physics without
-    parameters and enters only counter-charge energies, so neutral
-    predictions are unchanged. Elements without a table keep a zero row, and
-    a placed counter charge refuses frames that contain them. Interpolating
-    f rather than the density keeps the limit f(0) = -Z<r^2>/6 exact.
+    They are fixed physics without parameters and enter only counter-charge
+    energies, so neutral predictions are unchanged. Elements without an entry
+    keep a zero row, and a placed counter charge refuses frames that contain them.
     """
-    from scipy.interpolate import CubicSpline
     grid = np.arange(0., FORM_FACTOR_MAXIMUM+.5*FORM_FACTOR_SPACING, FORM_FACTOR_SPACING)
+    k = np.maximum(grid, 1.e-12)
     table = np.zeros((len(atomic_numbers), len(grid)))
     for row, z in enumerate(atomic_numbers):
-        if int(z) in reference:
-            spacing, values = reference[int(z)]
-            q = spacing*np.arange(len(values))
-            inside = grid <= q[-1]
-            table[row, inside] = CubicSpline(q, values)(grid[inside])
+        if int(z) in NEUTRAL_ATOMS:
+            valence, width = NEUTRAL_ATOMS[int(z)]
+            table[row] = np.where(grid > 0., valence*np.expm1(-.5*(width*k)**2)/k**2, -.5*valence*width**2)
     table = torch.as_tensor(table).to(response.source_widths)
     installed = torch.tensor(bool((table[:, 0] != 0).any()), device=table.device)
     for name, value in (('neutral_atom_form_factors', table), ('neutral_atom_fitted', installed)):
@@ -232,15 +232,15 @@ class CounterCharge:
         # Every placed source, also at Q_cc = 0: the linear term gives dE/dQ_cc.
         for i in torch.nonzero(present).flatten().tolist():
             if table is None or not bool(getattr(g.response, 'neutral_atom_fitted', False)):
-                raise ValueError('A placed counter charge needs neutral-atom form factors. Train on frames '
-                                 'that carry them (scripts/collect_vasp_data.py writes neutral_atom_* into '
-                                 'every frame), or install them from such a frame')
+                raise ValueError('A placed counter charge needs neutral-atom form factors; '
+                                 'MACEFixedPointSCF installs the built-in atoms of potential.NEUTRAL_ATOMS')
             sigma = float(width[i])
             atoms = data['batch'] == i
             rows = table[species[atoms].unique()]
             covered = FORM_FACTOR_SPACING*(rows.shape[-1]-1-(rows != 0).flip(-1).int().argmax(-1))
             if bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any()):
-                raise ValueError('The neutral-atom form factors miss an element of this frame or end below '
+                raise ValueError('The neutral-atom form factors miss an element of this frame (add its valence '
+                                 'charge and cloud width to potential.NEUTRAL_ATOMS) or end below '
                                  f'the {math.sqrt(2*TAIL)/sigma:.3g} 1/Angstrom that a {sigma:.3g} Angstrom '
                                  'counter charge needs')
             waves = source_waves(g, i, sigma, bool(sheet[i]))
