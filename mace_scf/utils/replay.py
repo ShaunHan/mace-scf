@@ -198,22 +198,31 @@ def prepare_replay(args, model, tag):
         torch.save(dict(fingerprint=fingerprint, train=train, valid=valid), pending)
         os.replace(pending, cache)
     logging.info('Replay dataset: %d training, %d validation configurations; E/F-only losses', len(train), len(valid))
+    interval = int(getattr(args, 'replay_interval', 1))
+    if interval < 1:
+        raise ValueError('replay_interval must be a positive integer')
     return ReplayTraining(train, valid, args.batch_size, args.energy_weight, args.forces_weight,
-                          args.weight_pt_head)
+                          args.weight_pt_head, interval)
 
 
 class ReplayTraining:
-    def __init__(self, train, valid, batch_size, energy_weight=1., forces_weight=100., weight=1.):
+    def __init__(self, train, valid, batch_size, energy_weight=1., forces_weight=100., weight=1., interval=1):
         self.train_loader = torch_geometric.dataloader.DataLoader(train, batch_size=batch_size, shuffle=True)
         self.valid_loader = torch_geometric.dataloader.DataLoader(valid, batch_size=1, shuffle=False,
             generator=torch.Generator().manual_seed(0))
         self.loss_fn = WeightedLoss({'energy_per_atom':energy_weight, 'forces':forces_weight})
         self.weight = weight
+        # One replay update every interval steps, weighted by the interval, keeps the mean
+        # replay gradient and divides its cost by the interval.
+        self.interval, self.count = int(interval), 0
 
     def backward(self, model, batch, parameters, device):
+        self.count += 1
+        if (self.count-1) % self.interval:
+            return torch.zeros((), device=device)
         batch = batch.to(device)
         output = model.replay_head(batch.to_dict(), training=True, compute_force=True)
-        loss = self.weight*self.loss_fn(ref=batch, pred=output)
+        loss = self.interval*self.weight*self.loss_fn(ref=batch, pred=output)
         torch.autograd.backward(loss, inputs=parameters)
         return loss.detach()
 

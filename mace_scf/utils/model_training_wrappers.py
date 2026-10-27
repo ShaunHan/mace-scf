@@ -151,7 +151,7 @@ class FixedPointWrapper:
                 return evaluate_coupled(model, batch_dict, steps=self.scf_options.num_scf_steps,
                     training=training, compute_force=self.output_args.get("forces", False),
                     compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
-                    mode=self.mode)
+                    mode=self.mode, stability=training and self.training_options.fixedpoint_scf_stability)
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)
             elif self.mode == "unroll_scf":

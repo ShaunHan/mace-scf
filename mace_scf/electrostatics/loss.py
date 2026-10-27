@@ -230,6 +230,9 @@ class FixedPointStability(torch.nn.Module):
         self.offset = offset    
     
     def __call__(self, ref: Batch, pred: TensorDict) -> torch.Tensor:
+        if "perturbing_vector" not in pred:
+            # The probe runs in training updates only; validation reports the other terms.
+            return ref.positions.new_zeros(())
         num_graphs = ref.ptr.numel() - 1
         # scf_random_vector_stability_loss: [n_graphs, 1]
         perturbation_norms = scatter_sum(

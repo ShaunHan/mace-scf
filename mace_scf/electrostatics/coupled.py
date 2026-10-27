@@ -689,43 +689,52 @@ def fermi_level_screening(softness, kernel, mask):
 def nonlinear_solve(r, g, chemical, vector, transport, source, electronic, species_level, p0, kernel, mask):
     """solve(target, members) of atomic_multipole_update='nonlinear', the MACE-SCF update of every multipole.
 
-    The network proposes the charges, dipoles and amplitudes from the sampled
-    field, so their response is nonlinear. There is no electronegativity and no
-    polarizability. The positive softness is the local density of states at the
-    Fermi level: it places the charge Q, sets the band-filling energy of the
-    charging work and screens the charge residual (fermi_level_screening). No
-    molecule is held, so members is ignored.
+    As in MACE-SCF, every update proposes the field independent multipoles of the MACE
+    readout plus a field response, q_i = q0_i + S_i dphi_i + Fq(u_i) - Fq(u0_i) and
+    d_i = d0_i + Fd(u_i) - Fd(u0_i). The network response F is nonlinear in the sampled
+    field and vanishes at zero field. S_i dphi_i is the linear response of the states at
+    the Fermi level, with local density of states S_i, to the centered potential of the
+    density receiver. A fixed point map cannot learn this metallic screening, and it
+    places the charge Q exactly, because sum_i S_i dphi_i = Q. fermi_level_screening
+    inverts its Jacobian, so the screening converges in one step and only the network
+    response is iterated. There is no electronegativity, no polarizability and no
+    molecule constraint, so members is ignored.
     """
     sigma, fixed = r.density_width, g.fixed[1]
     dos = electronic[..., -1]*mask
+    total = dos.sum(-1)
     # The response input then sees the potential alone, centered with the same weights.
     levels = torch.cat((torch.zeros_like(electronic[..., :2]), electronic[..., -1:]), -1)
     screening = fermi_level_screening(moment_softness(levels, mask), kernel, mask)
     # The field independent multipoles of the MACE readout, dipoles in units of the density width.
-    base = torch.cat((p0[..., :1], p0[..., 1:4]/sigma), -1)
+    base = torch.cat((p0[..., :1], p0[..., 1:4]/sigma), -1)*mask[..., None]
 
     def place(charges, target):
-        return charges+dos*((target-charges.sum(-1))/dos.sum(-1))[:, None]
+        return charges+dos*((target-charges.sum(-1))/total)[:, None]
 
     def solve(target, members=None):
         reference = r.reference_offsets(chemical, vector, source, levels, mask, target, transport, charge=True)
-        start = (base+reference[..., :4])*mask[..., None]
-        # The seed is the zero field proposal with the charge Q in the Fermi level states.
-        initial = torch.cat((place(start[..., 0], target)[..., None], start[..., 1:4], source), -1)
+        # The zero field charge and dipole readouts, removed so that the network adds only a field response.
+        zero = reference[..., :4]
+        # The seed is the zero field proposal, the MACE multipoles with Q in the Fermi level states.
+        initial = torch.cat((place(base[..., 0], target)[..., None], base[..., 1:4], source), -1)
 
         def update(z, observe=False):
             potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, sigma, fixed), g.tensors)
             amplitudes, hidden, charge, dipole = r(chemical, vector, potential, field, mask, target, reference,
                                                    transport, moments=True)
-            proposed = (base+torch.cat((charge[..., None], dipole), -1))*mask[..., None]
+            # Thomas-Fermi response to the centered potential, with sum_i S_i dphi_i = Q.
+            centered = potential[..., 0]-(((dos*potential[..., 0]).sum(-1)-target)/total)[:, None]
+            response = torch.cat(((dos*centered+charge)[..., None], dipole), -1)-zero
+            proposed = (base+response)*mask[..., None]
             step = (screening@(proposed-z[..., :4]).flatten(1)[..., None]).reshape(*mask.shape, 4)
             moments = z[..., :4]+step
             proposal = torch.cat((place(moments[..., 0], target)[..., None], moments[..., 1:4], amplitudes), -1)
             if not observe:
                 return proposal
-            f = dos/dos.sum(-1, keepdim=True)
+            f = dos/total[:, None]
             common = r.common_level((f[..., None]*hidden).sum(1)).squeeze(-1)+(f*species_level).sum(-1)
-            return proposal, potential, dos.sum(-1), common
+            return proposal, potential, total, common
         return initial, update
     return solve
 
@@ -810,7 +819,7 @@ def prepare_coupled(model, data, local):
 
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, compute_stress=False,
-                     mode='unroll_scf', mixing=None):
+                     mode='unroll_scf', mixing=None, stability=False):
     """One electronic trajectory, one scalar energy and its derivatives.
 
     The energy is the DFT free energy at fixed total charge Q, counter charge
@@ -819,7 +828,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     WF = vacuum potential - EF. With atomic_multipole_update='linear' the exact linear
     solution of the neutral interface fixes the charge of every electrolyte molecule,
     and one solve charges the electrode. With 'nonlinear' the network proposes every
-    multipole and no molecule is held.
+    multipole and no molecule is held. With stability, one more update probes the gain
+    of the update map along a random direction at the final state, for the MACE-SCF
+    stability loss (outputs perturbing_vector and perturbed_density).
     """
     r = model.field_dependent_charges_map
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -852,6 +863,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         state = unroll_steps(update, initial, steps, mixing, checkpointed)
         proposal, potential, softness, common = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
+        probe = None
+        if stability:
+            # Finite difference along a random direction; a gain above one marks a map that swings.
+            direction = torch.randn_like(state)*g.present[..., None]
+            direction = direction*(1.e-4*state.detach().square().mean().sqrt().clamp_min(1.))
+            probe = (direction, update(state+direction)-proposal)
 
         moments = torch.cat((state[..., :1], state[..., 1:4]*r.density_width), -1)
         density_coefficients = g.unpack(moments)[..., [0, 2, 3, 1]]
@@ -914,6 +931,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
               'electrostatic_features': g.unpack(potential)}
     # WF - eV is the potential step from the counter charge to the outer vacuum.
     output['she_offset'] = output['work_function']-output['cell_voltage']
+    if probe is not None:
+        output['perturbing_vector'], output['perturbed_density'] = (g.unpack(x) for x in probe)
     attach_labels(data, g, output)
     if 'fourier_density_dft' in output:
         output['smooth_fourier_density_dft'] = output['fourier_density_dft']/sharpen

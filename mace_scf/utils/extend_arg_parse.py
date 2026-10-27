@@ -278,6 +278,12 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
     )
     parser.add_argument(
+        "--replay_interval",
+        help="multihead finetuning: one replay update every replay_interval steps, weighted by the interval",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
         "--model",
         choices=[
             "ScaleShiftMACE",
