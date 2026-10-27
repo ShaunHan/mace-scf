@@ -71,30 +71,33 @@ restart hooks for advanced use.
 ### Atomic Multipole Update of the Coupled Response
 
 `atomic_multipole_update` belongs to the model and must be the same in every
-stage. With `nonlinear`, the default, the network proposes in every update, as
-in MACE-SCF, the field independent multipoles of the MACE readout plus a field
-response, `q0_i + Fq(u_i) - Fq(u0_i)` and `d0_i + Fd(u_i) - Fd(u0_i)`. The
-response `F` is nonlinear in the sampled field and vanishes at zero field. The
-electrons at the Fermi level, with local density of states `S_i`, and the
-atomic polarizability `alpha_i` screen this proposal in the field it creates,
+stage. Both choices give every atom one local law,
 
-    q_i = proposal_i + S_i (phi_i - mu),    d_i = proposal_i + alpha_i E_i.
+    q_i = S_i (chi_i + phi_i - mu_k),    d_i = d0_i - alpha_i f_i,
 
-A fixed point map cannot build this linear screening within a few updates, a
-metal least of all, so every update solves it exactly, starting from the exact
-linear solution, and the trajectory iterates only the network proposal and the
-local potential amplitudes. Electrons move within bonded networks: every
-molecule of the electrolyte keeps the charge it has in the exact linear
-solution of the neutral interface, with its own level `mu`, and the electrode
-takes the rest of the total charge. There is no electronegativity.
+with the charge softness `S_i` (the local density of states at the Fermi
+level), the level `chi_i`, the dipole softness `alpha_i` and the dipole `d0_i`.
+`mu_k` is the level of the bonded network of the atom: the electrode's places
+its charge, and every molecule of the electrolyte keeps the charge it has in the
+exact linear solution of the neutral interface. The law is first solved
+exactly with its geometry coefficients. At the field of that solution the
+network then reads
+
+- with `linear`, the level `chi_i`;
+- with `nonlinear`, the default, the whole law, `chi_i`, `S_i`, `alpha_i` and
+  `d0_i`, so the charges and dipoles respond nonlinearly to the field.
+
+Every update solves the read law exactly, and only the local potential
+amplitudes iterate. No network multipole re-enters the network's own input, so
+the solve converges as fast as the linear update and its 8 updates are not a
+transient that training could fit. With no field dependence in the network,
+`nonlinear` equals `linear`.
 
 Leave `fixedpoint_scf_stability` out of the loss. Its probe measures the gain
 of one update along a random direction, which is about 2 even for trained
-models that converge within 8 updates, so it would penalize a sound map. With
-`linear`, every update solves the charge law and the dipole law exactly, with
-electronegativities read once at the field of the linear solution, and every
-molecule of the electrolyte keeps its charge. Models saved before this option
-existed were trained with the laws and run as `linear`.
+models that converge within 8 updates, so it would penalize a sound map. Models
+saved before this option existed were trained with the laws and run as
+`linear`.
 
 ```yaml
 fixed_point_training_options:
