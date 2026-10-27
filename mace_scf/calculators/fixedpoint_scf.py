@@ -231,6 +231,8 @@ class MACEFixedPointSCF(Calculator):
                 self.scf_options = replace(self.scf_options, num_scf_steps=int(response.deployment_steps))
             if scf_options is None or 'mixing_parameter' not in scf_options:
                 self.scf_options = replace(self.scf_options, mixing_parameter=float(response.deployment_mixing))
+            if (scf_options is None or 'scf_tolerance' not in scf_options) and response.deployment_tolerance is not None:
+                self.scf_options = replace(self.scf_options, scf_tolerance=float(response.deployment_tolerance))
             if use_compile:
                 raise ValueError("CoupledResponse uses the differentiable eager solver; use_compile=False")
 
@@ -470,7 +472,7 @@ class MACEFixedPointSCF(Calculator):
         if self.constant_potential:
             from mace_scf.electrostatics.reservoir import evaluate_cell
             return evaluate_cell(self.model, batch_dict, steps=self.scf_options.num_scf_steps,
-                                 mixing=self.scf_options.mixing_parameter)
+                                 mixing=self.scf_options.mixing_parameter, tolerance=self.scf_options.scf_tolerance)
         if getattr(self.model.field_dependent_charges_map, "coupled", False):
             if self.compensating_jellium:
                 raise NotImplementedError("CoupledResponse takes a Gaussian counter charge, not compensating_jellium")
@@ -543,7 +545,7 @@ class MACEFixedPointSCF(Calculator):
                 raise FloatingPointError("Nonfinite electronic solve residual")
             if self.scf_options.constant_charge and abs(diagnostics["charge_error"]) > 1.e-6:
                 raise RuntimeError("Electronic solve violated the fixed-charge constraint")
-            if not self.ignore_nonconverged and residual > self.scf_options.scf_tolerance:
+            if not self.ignore_nonconverged and 0 < self.scf_options.scf_tolerance < residual:
                 raise RuntimeError(
                     f"Electronic residual {residual:.4g} exceeds {self.scf_options.scf_tolerance:.4g} "
                     f"after {diagnostics['num_scf_steps']} steps. Check conditioning before MD."

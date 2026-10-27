@@ -63,8 +63,8 @@ def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
             'counter_charge_zfrac': float((cut+sheet/length) % 1.), 'counter_charge_width': float(sheet_width)}
 
 
-def evaluate_cell(model, data, *, steps, mixing):
-    """E, F, cell voltage, WF and the SHE offset from ONE electronic trajectory."""
+def evaluate_cell(model, data, *, steps, mixing, tolerance=None):
+    """E, F, cell voltage, WF and the SHE offset from ONE electronic trajectory of at most steps updates."""
     from .coupled import evaluate_coupled
     charge = data['total_charge'].reshape(-1)
     counter = data.get('counter_charge', torch.zeros_like(charge)).reshape(-1)
@@ -74,6 +74,6 @@ def evaluate_cell(model, data, *, steps, mixing):
     if bool((width <= 0).any()):
         raise ValueError('Constant-potential evaluation needs an explicit Gaussian counter-charge '
                          'profile (width and sheet fraction or centre), also at Q = 0')
-    output = evaluate_coupled(model, data, steps=steps, mixing=mixing, compute_force=True)
+    output = evaluate_coupled(model, data, steps=steps, mixing=mixing, compute_force=True, tolerance=tolerance)
     output['electrode_potential_she'] = output['work_function']-SHE_ABSOLUTE_V
     return output

@@ -106,7 +106,7 @@ class FixedPointSCFRunner:
             return evaluate_coupled(
                 model, data, steps=self.scf_options.num_scf_steps if num_scf_steps is None else num_scf_steps,
                 training=training, compute_force=compute_force, compute_stress=compute_stress or compute_virials,
-                mixing=self.scf_options.mixing_parameter,
+                mixing=self.scf_options.mixing_parameter, tolerance=self.scf_options.scf_tolerance,
             )
 
         local_state = model.local_part(

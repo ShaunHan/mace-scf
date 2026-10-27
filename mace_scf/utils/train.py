@@ -158,7 +158,7 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
             train_sampler.set_epoch(epoch)
         if hasattr(optimizer, "train"):
             optimizer.train()
-        norms, clipped, skipped = [], 0, 0
+        norms, clipped, skipped, scf_steps = [], 0, 0, []
         replay_iterator = iter(replay.train_loader) if replay is not None else None
         epoch_errors = torch.zeros((len(RMSE_KEYS), 2), dtype=torch.float64, device=device)
         for step, batch in enumerate(train_loader):
@@ -176,6 +176,8 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                 skipped += 1
                 continue
             epoch_errors += metrics["_rmse_sums"]
+            if "scf_steps" in metrics:
+                scf_steps.append(metrics["scf_steps"])
             norms.append(metrics["grad_norm_before_clip"])
             clipped += int(metrics["grad_clip_applied"])
         if skipped:
@@ -205,9 +207,12 @@ def train(model, model_eval_wrapper, loss_fn, train_loader, valid_loader,
                           [g["lr"] for g in optimizer.param_groups], float(np.mean(norms)) if norms else 0.,
                           clipped, len(norms))
             logging.debug('Epoch timing: train=%.3fs, validation=%.3fs, updates=%d, train/update=%.5fs, '
-                          'peak allocated=%.1f MiB, backbone=%s', train_seconds, time.perf_counter()-validation_start,
+                          'peak allocated=%.1f MiB, backbone=%s, SCF updates per solve: training %.1f, validation '
+                          '%.1f', train_seconds, time.perf_counter()-validation_start,
                           len(norms), train_seconds/max(1, len(norms)), peak_mib,
-                          'CuEq' if getattr(model, 'backbone_layout', 'mul_ir') == 'ir_mul' else 'e3nn')
+                          'CuEq' if getattr(model, 'backbone_layout', 'mul_ir') == 'ir_mul' else 'e3nn',
+                          float(np.mean(scf_steps)) if scf_steps else float('nan'),
+                          metrics.get('scf_steps_mean', float('nan')))
             if log_wandb:
                 import wandb
                 wandb.log({"epoch":epoch, **{"valid_"+k:v for k,v in metrics.items() if isinstance(v,(int,float))}})
@@ -257,6 +262,8 @@ def take_step(model, model_eval_wrapper, loss_fn, batch, optimizer, ema,
         optimizer.zero_grad(set_to_none=True)
         return None, {"skipped": True}
     metrics = {"_rmse_sums": training_error_sums(batch, output)}
+    if output.get("scf_steps") is not None:
+        metrics["scf_steps"] = float(output["scf_steps"].detach().double().mean())
     loss = loss.detach()
     del output
     if replay is not None:
@@ -352,7 +359,7 @@ def _evaluate(
 
     # Pooled numerators and denominators: one exact mean over the split per term.
     objective = {name: [0., 0.] for name, weight in loss_fn.loss_weights.items() if weight}
-    scalars, fields, residuals, wf_rows = {}, {}, [], []
+    scalars, fields, residuals, wf_rows, scf_steps = {}, {}, [], [], []
     start_time = time.time()
     for batch in data_loader:
         batch = batch.to(device)
@@ -382,6 +389,8 @@ def _evaluate(
                     ((spectral_errors(batch, output, field)*weight).sum(), weight.sum())).double()
         if output.get("scf_residual") is not None:
             residuals.append(output["scf_residual"].max())
+        if output.get("scf_steps") is not None:
+            scf_steps.append(output["scf_steps"].double().mean())
 
         if output.get("energy") is not None and batch.energy is not None:
             observed = batch.weight*batch.energy_weight > 0
@@ -558,6 +567,8 @@ def _evaluate(
             aux[name+'_bias'] = float(first/weight)
     if residuals:
         aux["scf_residual_max"] = float(torch.stack(residuals).max())
+    if scf_steps:
+        aux["scf_steps_mean"] = float(torch.stack(scf_steps).mean())
     rows = [row for chunk in wf_rows for row in chunk]
     if rows:
         _voltage_diagnostics(rows, split)

@@ -135,6 +135,20 @@ For evaluation and calculator use, start with a tolerance such as `1.0e-5` or
 short unrolled training, the number of steps is often the more important
 control because the objective may intentionally use a truncated SCF solve.
 
+For MACE-VOLT models (the coupled response) the same rule holds in training,
+validation and deployment: the solve stops once the largest change of the
+state, the charges, dipoles and local amplitudes, in one update is below
+`scf_tolerance` for every structure of the batch, and `num_scf_steps` is the
+maximum. Autograd differentiates exactly the updates that ran, so forces,
+Fermi levels and the cell voltage remain exact derivatives of the computed
+energy. Where the number of updates changes between configurations, the
+energy changes by about the tolerance times its sensitivity to the state.
+`scf_tolerance: 0` runs every update, as before this option existed. The model
+keeps the tolerance of its last training stage for the ASE calculator, as it
+keeps `num_scf_steps`, and `scf_options` overrides both. The debug line of the
+epoch timing reports the mean number of updates per solve in training and
+validation.
+
 ### Mixing Parameter
 
 `mixing_parameter` controls how much of each new density update is accepted:

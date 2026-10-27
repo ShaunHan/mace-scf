@@ -225,6 +225,7 @@ def build_model(
         first = args.train_schedule[0]["fixed_point_training_options"].scf
         response.deployment_mixing.fill_(first.mixing_parameter)
         response.deployment_steps.fill_(int(first.num_scf_steps))
+        response.deployment_tolerance = float(first.scf_tolerance)
         # The atomic multipole update belongs to the model: one choice for every stage and for deployment.
         options = [stage["fixed_point_training_options"].scf for stage in args.train_schedule]
         updates = {option.atomic_multipole_update for option in options if option is not None}

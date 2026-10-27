@@ -51,8 +51,8 @@ def validate_fixed_point_scf_options(
         raise ValueError("num_scf_steps must be positive for SCF modes")
 
     scf_tolerance = float(options["scf_tolerance"])
-    if scf_tolerance <= 0:
-        raise ValueError("scf_tolerance must be positive")
+    if not scf_tolerance >= 0:
+        raise ValueError("scf_tolerance must be nonnegative (0 runs every update)")
 
     mixing_parameter = float(options["mixing_parameter"])
     if not (0 < mixing_parameter <= 1):

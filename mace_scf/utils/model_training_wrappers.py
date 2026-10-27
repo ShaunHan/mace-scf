@@ -138,20 +138,23 @@ class FixedPointWrapper:
                 # Validation runs the trajectory of training, and the model deploys that of its last stage.
                 response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
                 response.deployment_steps.fill_(int(self.scf_options.num_scf_steps))
+                response.deployment_tolerance = float(self.scf_options.scf_tolerance)
                 update = getattr(response, "atomic_multipole_update", "linear")
                 if update != self.scf_options.atomic_multipole_update:
                     raise ValueError(f"The model uses atomic_multipole_update={update!r}, but this stage sets "
                                      f"{self.scf_options.atomic_multipole_update!r} (default 'nonlinear'). "
                                      "Set the value of the model in every stage.")
                 if not getattr(self, "_logged_coupled", False):
-                    logging.info("CoupledResponse mode=%s, atomic_multipole_update=%s: %d updates per solve in "
-                                 "training, validation and deployment", self.mode, update,
-                                 self.scf_options.num_scf_steps)
+                    logging.info("CoupledResponse mode=%s, atomic_multipole_update=%s: at most %d updates per solve "
+                                 "in training, validation and deployment, stopping once the largest change of the "
+                                 "state in one update is below scf_tolerance=%.1e (0 runs every update)", self.mode,
+                                 update, self.scf_options.num_scf_steps, self.scf_options.scf_tolerance)
                     self._logged_coupled = True
                 return evaluate_coupled(model, batch_dict, steps=self.scf_options.num_scf_steps,
                     training=training, compute_force=self.output_args.get("forces", False),
                     compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
-                    mode=self.mode, stability=training and self.training_options.fixedpoint_scf_stability)
+                    mode=self.mode, stability=training and self.training_options.fixedpoint_scf_stability,
+                    tolerance=self.scf_options.scf_tolerance)
             if self.mode == "direct":
                 return self._forward_direct(model, batch_dict, training)
             elif self.mode == "unroll_scf":

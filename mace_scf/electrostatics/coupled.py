@@ -101,6 +101,8 @@ class CoupledResponse(nn.Module):
     """
     coupled = True
     atomic_multipole_update = 'linear'
+    # The scf_tolerance of the last training stage; models saved without it take the calculator's.
+    deployment_tolerance = None
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
                  field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
@@ -546,11 +548,16 @@ def secant_relaxation(displacement, residual_change, previous, mixing, floor):
     return torch.sqrt((mixing**2*dx+floor*previous.square())/(dx+stabilizer+floor))
 
 
-def unroll_steps(update, initial, steps, mixing, checkpointed=False):
+def unroll_steps(update, initial, steps, mixing, checkpointed=False, tolerance=None):
     """Two-history residual mixing with a secant safeguard, differentiated through every step.
 
     Both history coefficients and the safeguard remain in autograd, including
-    force derivatives. checkpointed recomputes blocks of steps in backward.
+    force derivatives. checkpointed recomputes blocks of steps in backward. With a
+    positive tolerance, steps is a maximum: the updates stop once the largest change
+    of the state in one update, over the whole batch, falls below it, checked after
+    every update (every block when checkpointed). Autograd follows the updates made,
+    so every derivative stays exact for the computed state. Returns the state and the
+    number of updates made.
     """
     if not bool(torch.isfinite(initial).all()):
         raise SCFNumericalError('SCF initial state is not finite')
@@ -574,7 +581,11 @@ def unroll_steps(update, initial, steps, mixing, checkpointed=False):
     previous_state, previous_proposal = initial, state
     weight = torch.zeros_like(floor)
     relaxation = torch.full_like(floor, mixing)
-    block = max(1, math.isqrt(int(steps))) if checkpointed else int(steps)
+    stop = tolerance is not None and tolerance > 0
+    if stop and float(residual.detach().abs().amax()) < tolerance:
+        return state, 1
+    block = max(1, math.isqrt(int(steps))) if checkpointed else 1 if stop else int(steps)
+    taken = 1
     for start in range(1, int(steps), block):
         def advance(value, old_state, old_proposal, old_residual, weight, relaxation,
                     count=min(block, int(steps)-start), first=start+1):
@@ -595,7 +606,10 @@ def unroll_steps(update, initial, steps, mixing, checkpointed=False):
         state, previous_state, previous_proposal, residual, weight, relaxation = (
             checkpoint(advance, *values, use_reentrant=False, preserve_rng_state=False)
             if checkpointed else advance(*values))
-    return state
+        taken = min(start+block, int(steps))
+        if stop and float(residual.detach().abs().amax()) < tolerance:
+            break
+    return state, taken
 
 
 def electrolyte_molecules(model, data, positions):
@@ -812,7 +826,7 @@ def prepare_coupled(model, data, local):
 
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, compute_stress=False,
-                     mode='unroll_scf', mixing=None, stability=False):
+                     mode='unroll_scf', mixing=None, stability=False, tolerance=None):
     """One electronic trajectory, one scalar energy and its derivatives.
 
     The energy is the DFT free energy at fixed total charge Q, counter charge
@@ -823,7 +837,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     atomic_multipole_update='nonlinear' the network proposes every multipole and each
     update screens it exactly. With stability, one more update probes the gain
     of the update map along a random direction at the final state, for the MACE-SCF
-    stability loss (outputs perturbing_vector and perturbed_density).
+    stability loss (outputs perturbing_vector and perturbed_density). With a positive
+    tolerance, steps is the maximum number of updates, and the solve stops once the
+    largest change of the state in one update falls below tolerance (scf_steps).
     """
     r = model.field_dependent_charges_map
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -852,7 +868,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         g, solve = prepare_coupled(model, data, local)
         q = charge.reshape(-1).to(g.volume)
         initial, update = solve(q, electrolyte_molecules(model, data, local.positions))
-        state = unroll_steps(update, initial, steps, mixing, checkpointed)
+        state, taken = unroll_steps(update, initial, steps, mixing, checkpointed, tolerance)
         proposal, potential, softness, common = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
         probe = None
@@ -917,7 +933,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
               'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smoothing)*g.ngrid,
               'k_vectors': g.wave, 'k_vectors_mask': g.mask,
               'k_vectors_grid_shape': torch.tensor(g.shape, device=positions.device),
-              'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), float(int(steps))),
+              'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), float(taken)),
               'electrostatic_energy': electrostatic, 'electron_energy': electron, 'external_field': g.external,
               'esps': None, 'esps_dft': None, 'charges_history': density_coefficients[..., None],
               'electrostatic_features': g.unpack(potential)}
