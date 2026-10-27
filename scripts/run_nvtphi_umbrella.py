@@ -37,7 +37,7 @@ OUTPUT_ROOT = 'nvtphi_umbrella'
 RUN_INDEXES = list(range(0, 10))                # Frames of ATOMS_FILE to run.
 OXYGEN_PAIRS = {}                               # Optional {index: (O_id, O_id)}, zero-based.
 MAX_WORKERS, REPLICAS = len(RUN_INDEXES), 1     # Workers share one visible GPU.
-DEVICE, HEAD, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', None, True, 50
+DEVICE, HEAD, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', None, True, None  # None: the model's training steps.
 TARGET_U_SHE = 1.60                             # V vs SHE: <WF> = 4.44 eV + e U*.
 SHEET_HEIGHT, SHEET_WIDTH = 6.0, 1.0            # A above the electrode surface, Gaussian sigma.
 CAPACITANCE, TAUPHI_FS = 0.05, 100.0            # C0 (e/V, whole cell) and tau set only the charge relaxation.
@@ -186,7 +186,9 @@ def make_calculator(model_file):
     from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
     torch.set_num_threads(1)
     options = dict(constant_charge=True, use_autograd_forces=True, initial_density='local_guess',
-                   initial_fermi_level='zero', num_scf_steps=int(SCF_STEPS))
+                   initial_fermi_level='zero')
+    if SCF_STEPS is not None:
+        options['num_scf_steps'] = int(SCF_STEPS)
     calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64', pbc_handling='slab',
                              scf_options=options, scf_restart=False, ignore_nonconverged=True, use_compile=False,
                              counter_charge_height=SHEET_HEIGHT, counter_charge_width=SHEET_WIDTH,

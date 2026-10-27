@@ -36,7 +36,7 @@ CAPACITANCE = 0.05            # C0 in e/V for the whole cell; sets the charge re
 STEPS = 10000                 # Production steps after relaxation and alignment.
 MAX_CHARGE_E = 1.0            # Stop if |Q| exceeds it: the model has left its range.
 SEED = 7777
-SCF_STEPS = 50
+SCF_STEPS = None              # Updates per solve; None runs the model's last training stage.
 
 DEVICE = "cuda"
 TRAJECTORY = "nvtphi.traj"
@@ -68,7 +68,7 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
     atoms = prepare_frame(read(ATOMS_FILE, index=-1))
     atoms.calc = MACEFixedPointSCF(model_path=MODEL_FILE, device=DEVICE, default_dtype="float64",
-                                   constant_potential=True, scf_options={"num_scf_steps": SCF_STEPS},
+                                   constant_potential=True, scf_options={} if SCF_STEPS is None else {"num_scf_steps": SCF_STEPS},
                                    ignore_nonconverged=True, counter_charge_height=SHEET_HEIGHT,
                                    counter_charge_width=SHEET_WIDTH)
     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=rng)

@@ -222,7 +222,9 @@ def build_model(
         from mace_scf.electrostatics.coupled import initialize_coupled
         from mace_scf.electrostatics.potential import install_neutral_atoms
         from mace_scf.utils.foundation import condition_readouts
-        response.deployment_mixing.fill_(args.train_schedule[0]["fixed_point_training_options"].scf.mixing_parameter)
+        first = args.train_schedule[0]["fixed_point_training_options"].scf
+        response.deployment_mixing.fill_(first.mixing_parameter)
+        response.deployment_steps.fill_(int(first.num_scf_steps))
         # A fresh electronic response starts at the foundation local E/F.
         # Its moment readouts remain trainable, in the correct species basis.
         with torch.no_grad():
@@ -691,4 +693,5 @@ def warn_with_traceback(message, category, filename, lineno, file=None, line=Non
     print(f"Category: {category.__name__}")
     print(f"File: {filename}, Line: {lineno}")
     print("Traceback:")
+    import traceback
     traceback.print_stack()

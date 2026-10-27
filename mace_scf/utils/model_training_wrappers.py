@@ -135,14 +135,14 @@ class FixedPointWrapper:
                 from mace_scf.electrostatics.coupled import evaluate_coupled
                 if self.mode not in ("unroll_scf", "shortcut_scf") or not self.scf_options.constant_charge:
                     raise ValueError("CoupledResponse trains with unroll_scf or shortcut_scf at constant charge")
-                # Validation and deployment run the exported finite trajectory.
+                # Validation runs the trajectory of training, and the model deploys that of its last stage.
                 response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
+                response.deployment_steps.fill_(int(self.scf_options.num_scf_steps))
                 if not getattr(self, "_logged_coupled", False):
-                    logging.info("CoupledResponse mode=%s: %d training steps, %d validation/deployment steps",
-                                 self.mode, self.scf_options.num_scf_steps, int(response.deployment_steps))
+                    logging.info("CoupledResponse mode=%s: %d updates per solve in training, validation and "
+                                 "deployment", self.mode, self.scf_options.num_scf_steps)
                     self._logged_coupled = True
-                return evaluate_coupled(model, batch_dict,
-                    steps=self.scf_options.num_scf_steps if training else int(response.deployment_steps),
+                return evaluate_coupled(model, batch_dict, steps=self.scf_options.num_scf_steps,
                     training=training, compute_force=self.output_args.get("forces", False),
                     compute_stress=self.output_args.get("stress", False) or self.output_args.get("virials", False),
                     mode=self.mode)

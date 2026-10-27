@@ -339,7 +339,7 @@ class CoupledGeometry:
             mask = self.selected_mask.reshape(*self.selected_mask.shape, *([1]*(value.ndim-2)))
             return value[rows[:, None], self.selected_indices]*mask
         self.tensors = tuple(selected(value) if i < 9 or i == 11 else value for i, value in enumerate(tensors))
-        # The fixed fields of the neutral solve (applied) and of the charged one (applied and counter charge).
+        # The fixed fields of the neutral interface (applied) and of the solve (applied and counter charge).
         self.fixed = (self.tensors[8], self.tensors[8]+selected(torch.view_as_real(counter.potential)))
         self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3,
                                            r.potential_amplitudes_smearing_width)
@@ -631,11 +631,10 @@ def electrolyte_molecules(model, data, positions):
 
 
 def molecular_projection(members, softness, factors):
-    """The screened state change that removes molecular charge excess, and the electrode charging.
+    """The screened state change that removes a molecular charge excess.
 
     Every molecule of the electrolyte has its own multiplier in the charge law,
-    so its net charge is held while the electrode takes the rest of Q. charging
-    is the screened moment response to a unit charge on the electrode.
+    so its net charge is held while the electrode takes the rest of Q.
     """
     graphs, size, count = members.shape
     inverse, root = factors
@@ -643,26 +642,19 @@ def molecular_projection(members, softness, factors):
     c4[..., 0, :] = members
     c4 = c4.flatten(1, 2)
     safe = torch.where(root > 0, root, torch.ones_like(root))
-    unit = root.new_zeros((graphs, root.shape[-1]+1, 1))
-    unit[:, -1] = 1.
-    right = torch.cat((torch.cat((softness[..., None]*c4/safe[..., None], root.new_zeros((graphs, 1, count))), 1),
-                       unit), -1)
-    response = root[..., None]*(inverse@right)[:, :-1]
-    shifts, charging = response[..., :count], response[..., count:]
-    empty = torch.diag_embed((members.sum(1) == 0).to(response.dtype))
-    screened = shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
-    charging = charging-screened@(c4.transpose(1, 2)@charging)
-    return screened, charging[..., 0].reshape(graphs, size, 4)
+    right = torch.cat((softness[..., None]*c4/safe[..., None], root.new_zeros((graphs, 1, count))), 1)
+    shifts = root[..., None]*(inverse@right)[:, :-1]
+    empty = torch.diag_embed((members.sum(1) == 0).to(shifts.dtype))
+    return shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
 
 
 def prepare_coupled(model, data, local):
-    """One live geometry, inverse and screened action per batch, shared by its two solves.
+    """One live geometry, inverse and screened action per batch.
 
-    Returns the geometry and solve(target, charged, molecules=None, start=None),
-    which gives the initial state and the update map at total charge target, with
-    the counter charge if charged. Without molecules this is the free solve from the
-    geometry seed. With molecules (indicator, charges) every electrolyte molecule
-    keeps its charge and the state starts from start plus the electrode charging.
+    Returns the geometry and solve(target, members), which gives the initial state
+    and the update map at total charge target with the counter charge. Every
+    electrolyte molecule (indicator members) keeps the charge it has in the exact
+    linear solution of the neutral interface, and the electrode takes the rest.
     """
     r = model.field_dependent_charges_map
     g = CoupledGeometry(model, data, local.positions)
@@ -685,37 +677,41 @@ def prepare_coupled(model, data, local):
     factors = screen_factors(softness, kernel, mask)
     action, sources = screen_action(completion, softness, mask, factors)
 
-    def solve(target, charged, molecules=None, start=None):
-        fixed = g.fixed[int(charged)]
+    def linear(target, fixed):
+        """The exact linear solution at total charge target, with chi read once at its field.
+
+        chi is read at the field of the linear solution with the geometry levels.
+        Held during the updates, it cannot feed back into the screened solve.
+        """
         reference = r.reference_offsets(chemical, vector, source, electronic, mask, target, transport)
 
         def offset_at(levels):
             return screen_offset(action, factors, levels, reference, fixed, g.tensors, p0, target, mask,
                                  r.density_width)
-        # chi is read once, at the field of the exact linear solution with the geometry levels.
-        # Held during the updates, it cannot feed back into the screened solve.
-        linear = apply_screen_action(source, mask, target, sources, offset_at(reference[..., -2]))
-        potential, field = sample_spectrum(total_spectrum(linear, g.tensors, g.kernels, r.density_width, fixed),
+        state = apply_screen_action(source, mask, target, sources, offset_at(reference[..., -2]))
+        potential, field = sample_spectrum(total_spectrum(state, g.tensors, g.kernels, r.density_width, fixed),
                                            g.tensors)
         offset = offset_at(r.chemical_levels(chemical, vector, potential, field, mask, reference, target, transport,
                                              species_level, p0))
-        if molecules is None:
-            # The seed: the exact affine solution at the reference amplitudes and these levels.
-            state = apply_screen_action(source, mask, target, sources, offset)
-        else:
-            members, charges = molecules
-            projector, charging = molecular_projection(members, softness, factors)
-            state = torch.cat((start[..., :4]+target[:, None, None]*charging, start[..., 4:]), -1)
+        return reference, offset, apply_screen_action(source, mask, target, sources, offset)
+
+    def solve(target, members):
+        # The neutral interface (Q = Q_cc = 0) at the linear level fixes the charge of every molecule.
+        charges = (members*linear(torch.zeros_like(target).detach(), g.fixed[0])[-1][..., :1]).sum(1)
+        projector = molecular_projection(members, softness, factors)
+        fixed = g.fixed[1]
+        reference, offset, free = linear(target, fixed)
+
+        def hold(proposal):
+            excess = (members*proposal[..., :1]).sum(1)-charges
+            change = (projector@excess[..., None])[..., 0].reshape(*mask.shape, 4)
+            return torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
 
         def update(z, observe=False):
             potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, r.density_width, fixed),
                                                g.tensors)
             amplitudes, hidden = r(chemical, vector, potential, field, mask, target, reference, transport)
-            proposal = apply_screen_action(amplitudes, mask, target, sources, offset)
-            if molecules is not None:
-                excess = (members*proposal[..., :1]).sum(1)-charges
-                change = (projector@excess[..., None])[..., 0].reshape(*mask.shape, 4)
-                proposal = torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
+            proposal = hold(apply_screen_action(amplitudes, mask, target, sources, offset))
             if not observe:
                 return proposal
             # The common chemical level of the charging energy, from the final hidden features.
@@ -723,7 +719,8 @@ def prepare_coupled(model, data, local):
             f = f/f.sum(-1, keepdim=True)
             common = r.common_level((f[..., None]*hidden).sum(1)).squeeze(-1)+(f*species_level).sum(-1)
             return proposal, potential, (electronic[..., -1]*mask).sum(-1), common
-        return state, update
+        # The seed: the exact linear solution at the baseline amplitudes, with every molecular charge held.
+        return hold(free), update
     return g, solve
 
 
@@ -734,8 +731,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     The energy is the DFT free energy at fixed total charge Q, counter charge
     Q_cc and external field. Forces are -dE/dR, EF = -dE/dQ at fixed Q_cc and
     the cell voltage dE/dQ - dE/dQ_cc is the derivative along Q_cc = -Q.
-    WF = vacuum potential - EF. The neutral interface fixes the charge of every
-    electrolyte molecule; the same number of updates then charges the electrode.
+    WF = vacuum potential - EF. The exact linear solution of the neutral interface
+    fixes the charge of every electrolyte molecule, and one solve charges the electrode.
     """
     r = model.field_dependent_charges_map
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -763,10 +760,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         local = model.local_part(data, compute_force=compute_force)
         g, solve = prepare_coupled(model, data, local)
         q = charge.reshape(-1).to(g.volume)
-        initial, update = solve(torch.zeros_like(q).detach(), False)
-        neutral = unroll_steps(update, initial, steps, mixing, checkpointed)
-        members = electrolyte_molecules(model, data, local.positions)
-        initial, update = solve(q, True, (members, (members*neutral[..., :1]).sum(1)), neutral)
+        initial, update = solve(q, electrolyte_molecules(model, data, local.positions))
         state = unroll_steps(update, initial, steps, mixing, checkpointed)
         proposal, potential, softness, common = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
@@ -802,8 +796,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
 
     # Raw fields undo the Gaussian smoothing of the learned ones, smooth = raw exp(-sigma^2 k^2/2):
     # sigma is the density width for the density and the amplitude width for the potential.
-    # The prescribed sawtooth enters the vacuum level exactly. Labels are attached at the
-    # resolution of each prediction.
+    # Labels are attached at the resolution of each prediction. The vacuum level reads the
+    # smooth potential and the exact sawtooth: a Gaussian filter leaves a flat vacuum unchanged,
+    # while the truncated raw series rings there, by 85 mV on average for DFT fields.
     sharpen = torch.exp(.5*r.density_width**2*g.k2)[..., None]
     smoothing = torch.exp(-.5*r.potential_amplitudes_smearing_width**2*g.k2)
     learned = torch.view_as_complex((carrier+regular).contiguous())
@@ -811,7 +806,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     raw = learned/torch.where(g.mask, smoothing, 1.)-g.coulomb*g.counter_density
     prescribed = g.ramp(boundary, width=0.)-g.coulomb*g.counter_density
     fermi_level = -charge_potential
-    vacuum = g.plane(raw)+g.ramp_plane(boundary)+g.vacuum_reference
+    vacuum = g.plane(learned-g.coulomb*g.counter_density*smoothing)+g.ramp_plane(boundary)+g.vacuum_reference
     farfield = r.farfield_filter(g.k2)[..., None]
     output = {'energy': energy, 'forces': forces, 'stress': stress,
               'virials': -stress*g.volume[:, None, None] if stress is not None else None,
@@ -825,7 +820,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
               'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smoothing)*g.ngrid,
               'k_vectors': g.wave, 'k_vectors_mask': g.mask,
               'k_vectors_grid_shape': torch.tensor(g.shape, device=positions.device),
-              'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), 2.*int(steps)),
+              'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), float(int(steps))),
               'electrostatic_energy': electrostatic, 'electron_energy': electron, 'external_field': g.external,
               'esps': None, 'esps_dft': None, 'charges_history': density_coefficients[..., None],
               'electrostatic_features': g.unpack(potential)}
