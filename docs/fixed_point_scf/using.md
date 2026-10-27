@@ -71,26 +71,30 @@ restart hooks for advanced use.
 ### Atomic Multipole Update of the Coupled Response
 
 `atomic_multipole_update` belongs to the model and must be the same in every
-stage. With `nonlinear`, the default, every update proposes, as in MACE-SCF,
-the field independent multipoles of the MACE readout plus a field response,
-`q_i = q0_i + S_i dphi_i + Fq(u_i) - Fq(u0_i)` and `d_i = d0_i + Fd(u_i) - Fd(u0_i)`.
-The network response `F` is nonlinear in the sampled field and vanishes at zero
-field. `S_i dphi_i` is the linear response of the states at the Fermi level,
-with local density of states `S_i`, to the centered potential. A fixed point
-map cannot learn this metallic screening; it also places the total charge
-exactly. Its Jacobian is inverted in every update, so screening converges in
-one step and only the network response is iterated. There is no
-electronegativity and no polarizability, and no molecule is held at a fixed
-charge.
+stage. With `nonlinear`, the default, the network proposes in every update, as
+in MACE-SCF, the field independent multipoles of the MACE readout plus a field
+response, `q0_i + Fq(u_i) - Fq(u0_i)` and `d0_i + Fd(u_i) - Fd(u0_i)`. The
+response `F` is nonlinear in the sampled field and vanishes at zero field. The
+electrons at the Fermi level, with local density of states `S_i`, and the
+atomic polarizability `alpha_i` screen this proposal in the field it creates,
 
-Add `fixedpoint_scf_stability` to the loss of each stage, for example with
-weight 10. Every training update then probes the gain of the update map along
-a random direction at the final state and penalizes gains above one, which
-keeps the learned map stable. With `linear`, every
-update solves the charge law and the dipole law exactly, with learned
-electronegativities, softnesses and polarizabilities, and every molecule of the
-electrolyte keeps its charge. Models saved before this option existed were
-trained with the laws and run as `linear`.
+    q_i = proposal_i + S_i (phi_i - mu),    d_i = proposal_i + alpha_i E_i.
+
+A fixed point map cannot build this linear screening within a few updates, a
+metal least of all, so every update solves it exactly, starting from the exact
+linear solution, and the trajectory iterates only the network proposal and the
+local potential amplitudes. Electrons move within bonded networks: every
+molecule of the electrolyte keeps the charge it has in the exact linear
+solution of the neutral interface, with its own level `mu`, and the electrode
+takes the rest of the total charge. There is no electronegativity.
+
+Leave `fixedpoint_scf_stability` out of the loss. Its probe measures the gain
+of one update along a random direction, which is about 2 even for trained
+models that converge within 8 updates, so it would penalize a sound map. With
+`linear`, every update solves the charge law and the dipole law exactly, with
+electronegativities read once at the field of the linear solution, and every
+molecule of the electrolyte keeps its charge. Models saved before this option
+existed were trained with the laws and run as `linear`.
 
 ```yaml
 fixed_point_training_options:
