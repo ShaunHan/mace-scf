@@ -2,7 +2,7 @@
 
 Charges follow the fixed-Q law q_i = S_i (chi_i + phi_i - mu) with positive
 softness S_i of the geometry and chemical levels chi_i read from the environment
-at the field of the linear seed; atomic_multipole_update='nonlinear' reads both
+at the field of the linear seed; include_nonlinear_multipole_update reads both
 softnesses and the dipole there too. Dipoles respond linearly to the field, and two
 local potential amplitudes complete the short-range field as a nonlinear function
 of the evolving deformation field. Every update solves the affine electrostatic
@@ -92,19 +92,25 @@ class CoupledResponse(nn.Module):
     which is also the smoothing width of the smoothed potential observation.
     Receivers average the field over the density width and the field feature widths.
 
-    atomic_multipole_update selects how the atomic charges and dipoles follow the
-    field. With 'linear' the network reads chi once, at the field of the exact linear
-    solution, and the softnesses and the dipole come from the geometry. With
-    'nonlinear' it reads the whole local law there, chi, both softnesses and its
-    dipole, so the multipoles respond nonlinearly to the field. In both, every update
-    solves the screened law exactly and only the local amplitudes iterate: no network
+    include_nonlinear_multipole_update selects how the atomic charges and dipoles
+    follow the field. Without it the network reads chi once, at the field of the exact
+    linear solution, and the softnesses and the dipole come from the geometry. With it
+    the network reads the whole local law there, chi, both softnesses and its dipole,
+    so the multipoles respond nonlinearly to the field. In both, every update solves
+    the screened law exactly and only the local amplitudes iterate: no network
     multipole feeds back into its own input, a loop that training makes slow.
-    Models saved without this attribute were trained with the laws and run as 'linear'.
+    Models saved without this attribute were trained with the laws and run without it.
     """
     coupled = True
-    atomic_multipole_update = 'linear'
+    include_nonlinear_multipole_update = False
     # The scf_tolerance of the last training stage; models saved without it take the calculator's.
     deployment_tolerance = None
+
+    def __setstate__(self, state):
+        # Models saved as atomic_multipole_update='linear' or 'nonlinear' keep their update.
+        if 'atomic_multipole_update' in state:
+            state['include_nonlinear_multipole_update'] = state.pop('atomic_multipole_update') == 'nonlinear'
+        super().__setstate__(state)
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
                  field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
@@ -268,7 +274,7 @@ class CoupledResponse(nn.Module):
         return species_level+self.scalar_out(self.shared(invariants))[..., 0]+p0[..., 0]
 
     def local_law(self, chemical, vector, potential, field, mask, reference, target, transport, species_level, p0):
-        """The whole local law read at one sampled field, for atomic_multipole_update='nonlinear'.
+        """The whole local law read at one sampled field, for include_nonlinear_multipole_update.
 
         Returns [dipole softness, chi, charge softness], the layout of the geometry law,
         and the network dipole in units of the density width.
@@ -714,13 +720,13 @@ def prepare_coupled(model, data, local):
     softness = moment_softness(electronic, mask)
     factors = screen_factors(softness, kernel, mask)
     action, sources = screen_action(completion, softness, mask, factors)
-    nonlinear = getattr(r, 'atomic_multipole_update', 'linear') == 'nonlinear'
+    nonlinear = bool(r.include_nonlinear_multipole_update)
 
     def linear(target, fixed):
         """The exact linear solution at total charge target, with the law read once at its field.
 
         The geometry law gives a first exact solution. At its field the network reads
-        chi, and with atomic_multipole_update='nonlinear' also both softnesses and its
+        chi, and with include_nonlinear_multipole_update also both softnesses and its
         dipole, the whole local law. Held during the updates, the read law cannot feed
         back into the screened solve. Returns the reference of the amplitudes, the law
         in the layout of the reference, its screening, the offset and the solution.
@@ -785,7 +791,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     the cell voltage dE/dQ - dE/dQ_cc is the derivative along Q_cc = -Q.
     WF = vacuum potential - EF. The exact linear solution of the neutral interface fixes
     the charge of every electrolyte molecule, and one solve charges the electrode. With
-    atomic_multipole_update='nonlinear' the network reads the whole local law at the
+    include_nonlinear_multipole_update the network reads the whole local law at the
     field of the exact linear solution. With stability, one more update probes the gain
     of the update map along a random direction at the final state, for the MACE-SCF
     stability loss (outputs perturbing_vector and perturbed_density). With a positive

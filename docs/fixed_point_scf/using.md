@@ -58,9 +58,9 @@ Most fixed-point SCF behaviour is controlled by a small set of settings:
   how the initial density is chosen in interfaces that expose this option;
 - `initial_fermi_level`
   how the initial Fermi level is chosen in interfaces that expose this option;
-- `atomic_multipole_update`
-  how the coupled MACE-VOLT response updates its atomic charges and dipoles,
-  `nonlinear` (default) or `linear` (see below);
+- `include_nonlinear_multipole_update`
+  whether the coupled MACE-VOLT response reads its whole local law at the field
+  of the linear solution, `true` (default), or only its level (see below);
 
 The option names are similar across training, evaluation, and calculator
 interfaces, but not every interface accepts every setting directly. Training
@@ -70,8 +70,8 @@ restart hooks for advanced use.
 
 ### Atomic Multipole Update of the Coupled Response
 
-`atomic_multipole_update` belongs to the model and must be the same in every
-stage. Both choices give every atom one local law,
+`include_nonlinear_multipole_update` belongs to the model and must be the same
+in every stage. Both choices give every atom one local law,
 
     q_i = S_i (chi_i + phi_i - mu_k),    d_i = d0_i - alpha_i f_i,
 
@@ -83,21 +83,22 @@ exact linear solution of the neutral interface. The law is first solved
 exactly with its geometry coefficients. At the field of that solution the
 network then reads
 
-- with `linear`, the level `chi_i`;
-- with `nonlinear`, the default, the whole law, `chi_i`, `S_i`, `alpha_i` and
+- with `false`, the level `chi_i`;
+- with `true`, the default, the whole law, `chi_i`, `S_i`, `alpha_i` and
   `d0_i`, so the charges and dipoles respond nonlinearly to the field.
 
 Every update solves the read law exactly, and only the local potential
 amplitudes iterate. No network multipole re-enters the network's own input, so
 the solve converges as fast as the linear update and its 8 updates are not a
 transient that training could fit. With no field dependence in the network,
-`nonlinear` equals `linear`.
+both choices agree.
 
 Leave `fixedpoint_scf_stability` out of the loss. Its probe measures the gain
 of one update along a random direction, which is about 2 even for trained
 models that converge within 8 updates, so it would penalize a sound map. Models
-saved before this option existed were trained with the laws and run as
-`linear`.
+saved before this option existed were trained with the laws and run with
+`false`, and models saved with the former `atomic_multipole_update` keep their
+update.
 
 ```yaml
 fixed_point_training_options:
@@ -105,7 +106,7 @@ fixed_point_training_options:
   scf:
     num_scf_steps: 8
     mixing_parameter: 0.5
-    atomic_multipole_update: nonlinear
+    include_nonlinear_multipole_update: true
 ```
 
 ### Number of SCF Steps
