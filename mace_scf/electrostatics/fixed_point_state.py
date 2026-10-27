@@ -38,6 +38,7 @@ class FixedPointSCFOptions:
     use_autograd_forces: bool = True
     initial_density: str = "local_guess"
     initial_fermi_level: str = "from_data"
+    atomic_multipole_update: str = "nonlinear"
 
 
 @dataclass(frozen=True)

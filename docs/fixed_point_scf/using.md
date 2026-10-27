@@ -58,12 +58,39 @@ Most fixed-point SCF behaviour is controlled by a small set of settings:
   how the initial density is chosen in interfaces that expose this option;
 - `initial_fermi_level`
   how the initial Fermi level is chosen in interfaces that expose this option;
+- `atomic_multipole_update`
+  how the coupled MACE-VOLT response updates its atomic charges and dipoles,
+  `nonlinear` (default) or `linear` (see below);
 
 The option names are similar across training, evaluation, and calculator
 interfaces, but not every interface accepts every setting directly. Training
 stages expose the most explicit initial-state controls. The ASE calculator
 uses local density guesses and data-provided Fermi levels by default, with
 restart hooks for advanced use.
+
+### Atomic Multipole Update of the Coupled Response
+
+`atomic_multipole_update` belongs to the model and must be the same in every
+stage. With `nonlinear`, the default, the shared network proposes the atomic
+charges and dipoles in every update, as in MACE-SCF, so their response to the
+field can be nonlinear. There is no electronegativity and no polarizability. The
+softness remains as the local density of states at the Fermi level. It places
+the total charge, sets the band-filling energy of the charging work, and screens
+each charge residual in a Newton step that shortens the path to the fixed point
+without changing it. No molecule is held at a fixed charge. With `linear`, every
+update solves the charge law and the dipole law exactly, with learned
+electronegativities, softnesses and polarizabilities, and every molecule of the
+electrolyte keeps its charge. Models saved before this option existed were
+trained with the laws and run as `linear`.
+
+```yaml
+fixed_point_training_options:
+  mode: unroll_scf
+  scf:
+    num_scf_steps: 8
+    mixing_parameter: 0.5
+    atomic_multipole_update: nonlinear
+```
 
 ### Number of SCF Steps
 

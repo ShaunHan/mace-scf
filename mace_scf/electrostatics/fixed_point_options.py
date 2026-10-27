@@ -5,6 +5,9 @@ from .fixed_point_state import FixedPointSCFOptions, FixedPointTrainingOptions
 
 
 FIXED_POINT_MODES = ("direct", "unroll_scf", "shortcut_scf", "implicit", "linearize_solve")
+# How the coupled response updates its atomic charges and dipoles: by the network
+# proposal of MACE-SCF (nonlinear) or by the exact charge and dipole laws (linear).
+ATOMIC_MULTIPOLE_UPDATES = ("linear", "nonlinear")
 SCF_OPTION_KEYS = {field.name for field in fields(FixedPointSCFOptions)}
 TRAINING_OPTION_KEYS = {
     "mode",
@@ -22,6 +25,7 @@ FIXED_POINT_SCF_DEFAULTS = {
     "use_autograd_forces": True,
     "initial_density": "local_guess",
     "initial_fermi_level": "from_data",
+    "atomic_multipole_update": "nonlinear",
 }
 
 
@@ -70,6 +74,11 @@ def validate_fixed_point_scf_options(
     if initial_fermi_level not in ("zero", "from_data"):
         raise ValueError("initial_fermi_level must be one of {'zero', 'from_data'}")
 
+    atomic_multipole_update = options["atomic_multipole_update"]
+    if atomic_multipole_update not in ATOMIC_MULTIPOLE_UPDATES:
+        raise ValueError(f"atomic_multipole_update must be one of {ATOMIC_MULTIPOLE_UPDATES}, "
+                         f"got {atomic_multipole_update!r}")
+
     return FixedPointSCFOptions(
         num_scf_steps=num_scf_steps,
         scf_tolerance=scf_tolerance,
@@ -78,6 +87,7 @@ def validate_fixed_point_scf_options(
         use_autograd_forces=use_autograd_forces,
         initial_density=initial_density,
         initial_fermi_level=initial_fermi_level,
+        atomic_multipole_update=atomic_multipole_update,
     )
 
 

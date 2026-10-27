@@ -90,8 +90,16 @@ class CoupledResponse(nn.Module):
     width sigma and 2 sigma, sigma being potential_amplitudes_smearing_width,
     which is also the smoothing width of the smoothed potential observation.
     Receivers average the field over the density width and the field feature widths.
+
+    atomic_multipole_update selects how the atomic charges and dipoles follow the
+    field. With 'nonlinear' the shared network proposes them in every update, as in
+    MACE-SCF, without electronegativities or polarizabilities, and the softness
+    remains only as the local density of states at the Fermi level (nonlinear_solve).
+    With 'linear' the screened update solves the charge and dipole laws exactly.
+    Models saved without this attribute were trained with the laws and run as 'linear'.
     """
     coupled = True
+    atomic_multipole_update = 'linear'
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
                  field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
@@ -233,18 +241,21 @@ class CoupledResponse(nn.Module):
                                 species_level[..., None]+initial[..., :1]+p0[..., :1], _positive(initial[..., 1:2])), -1)
         return local, electronic, species_level
 
-    def reference_offsets(self, chemical, vector, local, electronic, mask, target, transport):
+    def reference_offsets(self, chemical, vector, local, electronic, mask, target, transport, charge=False):
         """The reference [state offsets, dipole softness, geometry chi, charge softness] at total charge target.
 
         At zero field the amplitudes equal the local readout; the field response
-        enters as their difference. The geometry dipole is read here once.
+        enters as their difference. The geometry dipole is read here once. With
+        charge, the zero field charge readout of atomic_multipole_update='nonlinear'
+        fills the charge offset.
         """
         zeros = local.new_zeros((*mask.shape, self.field_channels))
         invariants, embedded = self._invariants(chemical, vector, zeros, zeros[..., None].expand(-1, -1, -1, 3),
                                                 mask, electronic[..., -2:], target, transport)
         scalar, polar, _ = self._constitutive_outputs(invariants, vector, embedded)
         raw = torch.cat((scalar[..., 2:], polar[..., 1:, :].flatten(-2)), -1)
-        offset = torch.cat((torch.zeros_like(local[..., :1]), polar[..., 0, :], local-raw), -1)*mask[..., None]
+        first = scalar[..., :1] if charge else torch.zeros_like(local[..., :1])
+        offset = torch.cat((first, polar[..., 0, :], local-raw), -1)*mask[..., None]
         return torch.cat((offset, electronic), -1)
 
     def chemical_levels(self, chemical, vector, potential, field, mask, reference, target, transport,
@@ -254,13 +265,19 @@ class CoupledResponse(nn.Module):
                                          transport)
         return species_level+self.scalar_out(self.shared(invariants))[..., 0]+p0[..., 0]
 
-    def forward(self, chemical, vector, potential, field, mask, target, reference, transport):
-        """Local potential amplitudes and hidden features at the sampled field."""
+    def forward(self, chemical, vector, potential, field, mask, target, reference, transport, moments=False):
+        """Local potential amplitudes and hidden features at the sampled field.
+
+        With moments, also the charge and dipole readouts that atomic_multipole_update='nonlinear' proposes.
+        """
         invariants, embedded = self._invariants(chemical, vector, potential, field, mask, reference[..., -2:],
                                                 target, transport)
-        scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded, include_dipole=False)
-        amplitudes = (torch.cat((scalars[..., 2:], polar.flatten(-2)), -1)+reference[..., 4:-3])*mask[..., None]
-        return amplitudes, hidden
+        scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded, include_dipole=moments)
+        sources = polar[..., 1:, :] if moments else polar
+        amplitudes = (torch.cat((scalars[..., 2:], sources.flatten(-2)), -1)+reference[..., 4:-3])*mask[..., None]
+        if not moments:
+            return amplitudes, hidden
+        return amplitudes, hidden, scalars[..., 0], polar[..., 0, :]
 
 
 class CoupledGeometry:
@@ -648,6 +665,71 @@ def molecular_projection(members, softness, factors):
     return shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
 
 
+def fermi_level_screening(softness, kernel, mask):
+    """(I-L)^-1 at fixed total charge, in the four moment coordinates of every atom.
+
+    L = -diag(softness) kernel is the charge response of a metal with this local
+    density of states. On the residual of a network proposal it gives a Newton
+    step with that model Jacobian, which shortens the path to the fixed point and
+    leaves the fixed point unchanged. Coordinates without softness, every dipole
+    here, pass unchanged.
+    """
+    present = mask[..., None].expand(-1, -1, 4).flatten(-2)
+    charge = torch.cat((mask[..., None], torch.zeros_like(mask[..., None].expand(-1, -1, 3))), -1).flatten(-2)
+    matrix = torch.eye(kernel.shape[-1], dtype=kernel.dtype, device=kernel.device)+softness[..., None]*kernel
+    bordered = torch.cat((torch.cat((matrix, (softness*charge)[..., None]), -1),
+                          torch.cat((charge, torch.zeros_like(charge[:, :1])), -1)[:, None, :]), -2)
+    ensure_cuda_linalg(bordered.device)
+    inverse, info = torch.linalg.inv_ex(bordered)
+    if not bool(torch.isfinite(inverse).all() & (info == 0).all()):
+        raise SCFNumericalError('Singular or nonfinite network preconditioner')
+    return inverse[:, :-1, :-1]*present[..., None]*present[:, None, :]
+
+
+def nonlinear_solve(r, g, chemical, vector, transport, source, electronic, species_level, p0, kernel, mask):
+    """solve(target, members) of atomic_multipole_update='nonlinear', the MACE-SCF update of every multipole.
+
+    The network proposes the charges, dipoles and amplitudes from the sampled
+    field, so their response is nonlinear. There is no electronegativity and no
+    polarizability. The positive softness is the local density of states at the
+    Fermi level: it places the charge Q, sets the band-filling energy of the
+    charging work and screens the charge residual (fermi_level_screening). No
+    molecule is held, so members is ignored.
+    """
+    sigma, fixed = r.density_width, g.fixed[1]
+    dos = electronic[..., -1]*mask
+    # The response input then sees the potential alone, centered with the same weights.
+    levels = torch.cat((torch.zeros_like(electronic[..., :2]), electronic[..., -1:]), -1)
+    screening = fermi_level_screening(moment_softness(levels, mask), kernel, mask)
+    # The field independent multipoles of the MACE readout, dipoles in units of the density width.
+    base = torch.cat((p0[..., :1], p0[..., 1:4]/sigma), -1)
+
+    def place(charges, target):
+        return charges+dos*((target-charges.sum(-1))/dos.sum(-1))[:, None]
+
+    def solve(target, members=None):
+        reference = r.reference_offsets(chemical, vector, source, levels, mask, target, transport, charge=True)
+        start = (base+reference[..., :4])*mask[..., None]
+        # The seed is the zero field proposal with the charge Q in the Fermi level states.
+        initial = torch.cat((place(start[..., 0], target)[..., None], start[..., 1:4], source), -1)
+
+        def update(z, observe=False):
+            potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, sigma, fixed), g.tensors)
+            amplitudes, hidden, charge, dipole = r(chemical, vector, potential, field, mask, target, reference,
+                                                   transport, moments=True)
+            proposed = (base+torch.cat((charge[..., None], dipole), -1))*mask[..., None]
+            step = (screening@(proposed-z[..., :4]).flatten(1)[..., None]).reshape(*mask.shape, 4)
+            moments = z[..., :4]+step
+            proposal = torch.cat((place(moments[..., 0], target)[..., None], moments[..., 1:4], amplitudes), -1)
+            if not observe:
+                return proposal
+            f = dos/dos.sum(-1, keepdim=True)
+            common = r.common_level((f[..., None]*hidden).sum(1)).squeeze(-1)+(f*species_level).sum(-1)
+            return proposal, potential, dos.sum(-1), common
+        return initial, update
+    return solve
+
+
 def prepare_coupled(model, data, local):
     """One live geometry, inverse and screened action per batch.
 
@@ -673,6 +755,9 @@ def prepare_coupled(model, data, local):
     transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
     source, electronic, species_level = r.prepare_reference(chemical, vector, g.attrs, p0, mask)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
+    if getattr(r, 'atomic_multipole_update', 'linear') == 'nonlinear':
+        return g, nonlinear_solve(r, g, chemical, vector, transport, source, electronic, species_level, p0, kernel,
+                                  mask)
     softness = moment_softness(electronic, mask)
     factors = screen_factors(softness, kernel, mask)
     action, sources = screen_action(completion, softness, mask, factors)
@@ -731,8 +816,10 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     The energy is the DFT free energy at fixed total charge Q, counter charge
     Q_cc and external field. Forces are -dE/dR, EF = -dE/dQ at fixed Q_cc and
     the cell voltage dE/dQ - dE/dQ_cc is the derivative along Q_cc = -Q.
-    WF = vacuum potential - EF. The exact linear solution of the neutral interface
-    fixes the charge of every electrolyte molecule, and one solve charges the electrode.
+    WF = vacuum potential - EF. With atomic_multipole_update='linear' the exact linear
+    solution of the neutral interface fixes the charge of every electrolyte molecule,
+    and one solve charges the electrode. With 'nonlinear' the network proposes every
+    multipole and no molecule is held.
     """
     r = model.field_dependent_charges_map
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -760,7 +847,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         local = model.local_part(data, compute_force=compute_force)
         g, solve = prepare_coupled(model, data, local)
         q = charge.reshape(-1).to(g.volume)
-        initial, update = solve(q, electrolyte_molecules(model, data, local.positions))
+        nonlinear = getattr(r, 'atomic_multipole_update', 'linear') == 'nonlinear'
+        initial, update = solve(q, None if nonlinear else electrolyte_molecules(model, data, local.positions))
         state = unroll_steps(update, initial, steps, mixing, checkpointed)
         proposal, potential, softness, common = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
