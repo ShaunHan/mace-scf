@@ -139,17 +139,10 @@ class FixedPointWrapper:
                 response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
                 response.deployment_steps.fill_(int(self.scf_options.num_scf_steps))
                 response.deployment_tolerance = float(self.scf_options.scf_tolerance)
-                update = bool(response.include_nonlinear_multipole_update)
-                flows = getattr(response, "flows", False)  # a ChargeFlowResponse has no law to read
-                if not flows and update != self.scf_options.include_nonlinear_multipole_update:
-                    raise ValueError(f"The model uses include_nonlinear_multipole_update={update}, but this stage "
-                                     f"sets {self.scf_options.include_nonlinear_multipole_update} (default true). "
-                                     "Set the value of the model in every stage.")
                 if not getattr(self, "_logged_coupled", False):
-                    logging.info("%s mode=%s, include_nonlinear_multipole_update=%s: at most %d updates per solve "
-                                 "in training, validation and deployment, stopping once the largest change of the "
-                                 "state in one update is below scf_tolerance=%.1e (0 runs every update)",
-                                 type(response).__name__, self.mode, "unused" if flows else update,
+                    logging.info("%s mode=%s: at most %d updates per solve in training, validation and deployment, "
+                                 "stopping once the largest change of the state in one update is below "
+                                 "scf_tolerance=%.1e (0 runs every update)", type(response).__name__, self.mode,
                                  self.scf_options.num_scf_steps, self.scf_options.scf_tolerance)
                     self._logged_coupled = True
                 return evaluate_coupled(model, batch_dict, steps=self.scf_options.num_scf_steps,

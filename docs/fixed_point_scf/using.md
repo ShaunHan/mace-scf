@@ -57,11 +57,7 @@ Most fixed-point SCF behaviour is controlled by a small set of settings:
 - `initial_density`
   how the initial density is chosen in interfaces that expose this option;
 - `initial_fermi_level`
-  how the initial Fermi level is chosen in interfaces that expose this option;
-- `include_nonlinear_multipole_update`
-  whether the coupled MACE-VOLT response reads its whole local law at the field
-  of the linear solution, `true` (default), or only its bias (see below).
-  `ChargeFlowResponse` has no such law and ignores it;
+  how the initial Fermi level is chosen in interfaces that expose this option.
 
 The option names are similar across training, evaluation, and calculator
 interfaces, but not every interface accepts every setting directly. Training
@@ -69,7 +65,7 @@ stages expose the most explicit initial-state controls. The ASE calculator
 uses local density guesses and data-provided Fermi levels by default, with
 restart hooks for advanced use.
 
-### Atomic Multipole Update of the Coupled Response
+### Charge Law of the Coupled Response
 
 The names follow MACE-SCF, which calls the charge response to the Fermi level
 `dq_dmu` and its normalized form the Fukui functions. `dq_dphi` is the charge per
@@ -77,94 +73,36 @@ volt of electron potential, `dd_dE` the dipole per V/A of electric field and
 `bias` the field independent potential that the charges respond to besides
 `phi`, the bias of a MACE-SCF biased linear potential embedding.
 
-`include_nonlinear_multipole_update` belongs to the model and must be the same
-in every stage. Both choices give every atom one local law,
+Every atom follows one local law,
 
-    q_i = dq_dphi_i (bias_i + phi_i - mu_k),    d_i = d0_i + dd_dE_i E_i,
+    q_i = dq_dphi_i (bias_i + phi_i - mu),    d_i = d0_i + dd_dE_i E_i,
 
-with the charge response `dq_dphi_i` (the local density of states at the Fermi
-level), the bias `bias_i`, the dipole response `dd_dE_i`, the electric field
-`E_i` and the dipole `d0_i`. `mu_k` is the Fermi level of the bonded network of
-the atom: the electrode's places its charge, and every molecule of the
-electrolyte keeps the charge it has in the exact linear solution of the neutral
-interface. The law is first solved exactly with its geometry coefficients. At
-the field of that solution the network then reads
+with the charge response `dq_dphi_i`, the local density of states at the Fermi
+level, the dipole response `dd_dE_i`, the electric field `E_i` and the dipole
+`d0_i` of the geometry. `mu` is the one Fermi level of the cell, which the Fukui
+functions fix to the total charge, as in MACE-SCF. The charge goes where the
+states at the Fermi level are. No part of the cell is held at a charge of its
+own, so nothing depends on how the atoms group into molecules, and a bond that
+forms or breaks changes no rule.
 
-- with `false`, the bias `bias_i`;
-- with `true`, the default, the whole law, `bias_i`, `dq_dphi_i`, `dd_dE_i` and
-  `d0_i`, so the charges and dipoles respond nonlinearly to the field.
-
-Every update solves the read law exactly, and only the local potential
-amplitudes iterate. No network multipole re-enters the network's own input, so
-the solve converges as fast as the linear update and its 8 updates are not a
-transient that training could fit. With no field dependence in the network,
-both choices agree.
-
-Leave `fixedpoint_scf_stability` out of the loss. Its probe measures the gain
-of one update along a random direction, which is about 2 even for trained
-models that converge within 8 updates, so it would penalize a sound map. Models
-saved before this option existed were trained with the laws and run with
-`false`, and models saved with the former `atomic_multipole_update` keep their
-update.
-
-```yaml
-fixed_point_training_options:
-  mode: unroll_scf
-  scf:
-    num_scf_steps: 8
-    mixing_parameter: 0.5
-    include_nonlinear_multipole_update: true
-```
-
-### Charge Flow Response
-
-`ChargeFlowResponse` replaces the per-atom charge law of `CoupledResponse`, its
-molecules and its biases read at the field by one rule: charge moves along bonds.
-
-    q_i = q0_i + fukui_i charge_deficit + sum_j c_ij [(phi_i + bias_i) - (phi_j + bias_j)]
-    d_i = d0_i + dd_dE_i E_i
-
-Every atom keeps its MACE charge `q0_i`. The charge deficit of the MACE charges,
-`Q - sum_j q0_j`, lands at the states of the Fermi level with the Fukui functions
-`fukui_i`, the local density of states at the Fermi level normalized to one, as in
-MACE-SCF. Charge then flows between every two atoms closer than `flow_cutoff`
-until it balances the difference of their electron energies `phi + bias`, the
-potential `phi` of all charges, dipoles, local amplitudes and external sources
-plus the field independent potential `bias_i` of the atom in its environment. The
-conductance `c_ij` is positive, depends on the two atoms and their distance, and
-vanishes smoothly at `flow_cutoff`. A flow leaves one atom and enters the other,
-so a group of atoms changes its charge only through the bonds that leave it.
-Molecules therefore need no list and no charge constraint, and a bond that forms
-or breaks passes charge smoothly.
-
-`bias_i`, `c_ij`, `dd_dE_i`, `fukui_i` and the dipole `d0_i` come from the geometry
-and the total charge, never from the field. In a conductor the potential follows
-the biases one to one, so a bias read from the field would feed its own input back
-with gain one. The multipoles are therefore an exact affine map of the local
-amplitudes, solved once per batch, and the updates iterate only the amplitudes,
-which the network reads from the field at every update as MACE-SCF reads its
-density. Nothing is held and nothing is projected, and
-`include_nonlinear_multipole_update` does not apply. Select it in `config.yaml`:
-
-```yaml
-fixed_point_update_config:
-  type: ChargeFlowResponse
-  flow_cutoff: 4.0   # Angstrom, at most r_max
-```
-
-Models of `CoupledResponse` keep their law. Train a `ChargeFlowResponse` from the
-foundation model, since its conductance head is new.
+The law is first solved exactly with its geometry coefficients and the baseline
+local amplitudes. At the field of that solution the network reads the biases
+`bias_i` once, and they stay fixed while the state converges, so a bias cannot
+cancel the response of a charge to the evolving field. Every update then solves
+the law exactly in the field of the amplitudes the network proposes, and only the
+local potential amplitudes iterate. The field is linear in the charges and
+dipoles, so this exact solution is one affine map of the amplitudes, built once
+per structure.
 
 ### Counter Charge at Linear Response
 
-Both MACE-VOLT response types read the network at the net charge of the cell,
-`Q + Q_cc`, without the Gaussian counter charge. Moving charge between the counter
-charge and the electrode at fixed net charge then acts through the exact screened
-response with every network output held. Along `Q_cc = -Q`, the direction of the
+The MACE-VOLT response reads the network at the net charge of the cell,
+`Q + Q_cc`, without the Gaussian counter charge. The counter charge then enters
+the cell at exact linear response with every network output held, and the Fukui
+functions place the charge it moves. Along `Q_cc = -Q`, the direction of the
 thermopotentiostat, the energy at fixed geometry is a convex quadratic, the cell
-voltage rises linearly with Q, and every target has exactly one stable charge. Cells
-without a counter charge are unchanged, Fermi level included, so trained models keep
-their predictions.
+voltage rises linearly with Q, and every target has exactly one stable charge.
+Cells without a counter charge are unchanged.
 
 ### Number of SCF Steps
 
@@ -228,12 +166,12 @@ $$
 
 where $\alpha$ is the mixing parameter.
 
-`CoupledResponse` and `ChargeFlowResponse` use the same linear mixing. Each of
-their updates already contains the exact screened response of the charges and
-dipoles, so the mixing only has to converge the local potential amplitudes. On
-the IrO2/water data, simple mixing of the charges and dipoles themselves
-trained much worse (WF error +35% at equal training), because the electrode
-response is too strong for it, while simple mixing of the screened updates
+`CoupledResponse` uses this linear mixing. Each of its updates already contains
+the exact screened response of the charges and dipoles, so the mixing only has to
+converge the local potential amplitudes. On the IrO2/water data, simple mixing of
+the charges and dipoles themselves trained much worse (WF error +35% at equal
+training), because the electrode response is too strong for it, while simple
+mixing of the screened updates
 matched the earlier two-history mixer within 4% on every error. For a trained
 model the two mixers take the same updates: on the deployed IrO2 model the
 two-history weights stay at zero and its safeguard never acts, so energies agree

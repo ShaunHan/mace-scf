@@ -92,7 +92,6 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 8
-        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -120,7 +119,6 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 12
-        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -148,7 +146,6 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 20
-        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -176,7 +173,6 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 50
-        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess

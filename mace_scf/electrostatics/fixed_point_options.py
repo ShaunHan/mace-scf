@@ -22,7 +22,10 @@ FIXED_POINT_SCF_DEFAULTS = {
     "use_autograd_forces": True,
     "initial_density": "local_guess",
     "initial_fermi_level": "from_data",
-    "include_nonlinear_multipole_update": True,
+}
+# Options that no longer exist, with what replaced them.
+REMOVED_SCF_OPTIONS = {
+    "include_nonlinear_multipole_update": "the coupled response has one linear multipole update; delete the key",
 }
 
 
@@ -34,6 +37,9 @@ def validate_fixed_point_scf_options(
     raw: dict,
     defaults: dict,
 ) -> FixedPointSCFOptions:
+    removed = sorted(set(raw) & set(REMOVED_SCF_OPTIONS))
+    if removed:
+        raise ValueError("Removed SCF option(s): "+"; ".join(f"{key}: {REMOVED_SCF_OPTIONS[key]}" for key in removed))
     unknown_keys = set(raw) - SCF_OPTION_KEYS
     if unknown_keys:
         raise ValueError(f"Unknown SCF option(s): {sorted(unknown_keys)}")
@@ -71,10 +77,6 @@ def validate_fixed_point_scf_options(
     if initial_fermi_level not in ("zero", "from_data"):
         raise ValueError("initial_fermi_level must be one of {'zero', 'from_data'}")
 
-    # Whether the coupled response reads its whole local law at the field of the linear solution.
-    include_nonlinear_multipole_update = options.get("include_nonlinear_multipole_update", True)
-    if not isinstance(include_nonlinear_multipole_update, bool):
-        raise TypeError("include_nonlinear_multipole_update must be bool")
 
     return FixedPointSCFOptions(
         num_scf_steps=num_scf_steps,
@@ -84,7 +86,6 @@ def validate_fixed_point_scf_options(
         use_autograd_forces=use_autograd_forces,
         initial_density=initial_density,
         initial_fermi_level=initial_fermi_level,
-        include_nonlinear_multipole_update=include_nonlinear_multipole_update,
     )
 
 

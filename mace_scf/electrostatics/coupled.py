@@ -7,24 +7,23 @@ states at the Fermi level, fukui its normalized form, which places the charge de
 and bias the field independent potential that the charges respond to besides phi, the
 bias of a MACE-SCF biased linear potential embedding.
 
-CoupledResponse charges follow the fixed-Q law q_i = dq_dphi_i (bias_i + phi_i - mu),
-with dq_dphi_i = fermi_dos_i of the geometry and biases read from the environment at
-the field of the linear seed; include_nonlinear_multipole_update reads both responses
-and the dipole there too. Dipoles respond linearly to the field, and two local
-potential amplitudes complete the short-range field as a nonlinear function of the
-evolving deformation field. Every update solves the affine electrostatic block
+CoupledResponse charges follow the local law q_i = dq_dphi_i (bias_i + phi_i - mu) with
+dq_dphi_i = fermi_dos_i of the geometry and one Fermi level mu per cell, which the Fukui
+functions fix to the total charge: the charge goes where the states at the Fermi level
+are, and no part of the cell is held at a charge of its own. The biases are read once,
+at the field of the exact linear solution. Dipoles respond linearly to the field, and
+two local potential amplitudes complete the short-range field as a nonlinear function
+of the evolving deformation field. Every update solves the affine electrostatic block
 exactly, so MACE-SCF linear mixing of the updates only resolves the nonlinear amplitudes.
-ChargeFlowResponse moves charge along bonds instead, with biases, conductances and
-responses of the geometry, and needs no molecules. In both, the network reads the cell at its net charge Q + Q_cc without the counter
-charge. Moving charge between the counter charge and the electrode then acts at exact
-linear response with every network output held, so along Q_cc = -Q the energy is a
-convex quadratic and the cell voltage rises linearly with Q.
+The network reads the cell at its net charge Q + Q_cc without the counter charge. The
+counter charge then enters the cell at exact linear response with every network output
+held, so along Q_cc = -Q the energy is a convex quadratic and the cell voltage rises
+linearly with Q.
 Potentials are electron referenced (in V, equal to eV).
 """
 import logging
 import math
 
-import numpy as np
 import torch
 from e3nn import o3
 from graph_longrange.utils import FIELD_CONSTANT
@@ -97,33 +96,25 @@ class CoupledResponse(nn.Module):
 
     dq_dphi is the bare charge response of the charge law; the fixed-Q projection
     and electrostatic coupling give its full response. It belongs to the geometry.
-    Biases are read once per solve, at the field of the linear seed, and held during
-    the updates. The charge response to the evolving field therefore stays positive:
-    a bias that followed it could cancel the response, an anti-screening that drives
-    the fixed point to instability. dd_dE times density_width**2 is the dipole per
+    Biases are read once per solve, at the field of the exact linear solution, and held
+    during the updates. The charge response to the evolving field therefore stays
+    positive: a bias that followed it could cancel the response, an anti-screening that
+    drives the fixed point to instability. dd_dE times density_width**2 is the dipole per
     electric field. The local potential amplitudes are Gaussians of
     width sigma and 2 sigma, sigma being potential_amplitudes_smearing_width,
     which is also the smoothing width of the smoothed potential observation.
     Receivers average the field over the density width and the field feature widths.
-
-    include_nonlinear_multipole_update selects how the atomic charges and dipoles
-    follow the field. Without it the network reads the bias once, at the field of the
-    exact linear solution, and both responses and the dipole come from the geometry.
-    With it the network reads the whole local law there, the bias, both responses and
-    its dipole, so the multipoles respond nonlinearly to the field. In both, every update solves
-    the screened law exactly and only the local amplitudes iterate: no network
-    multipole feeds back into its own input, a loop that training makes slow.
-    Models saved without this attribute were trained with the laws and run without it.
+    Every update solves the screened law exactly and only the local amplitudes iterate.
     """
     coupled = True
-    include_nonlinear_multipole_update = False
     # The scf_tolerance of the last training stage; models saved without it take the calculator's.
     deployment_tolerance = None
 
     def __setstate__(self, state):
-        # Models saved as atomic_multipole_update='linear' or 'nonlinear' keep their update.
-        if 'atomic_multipole_update' in state:
-            state['include_nonlinear_multipole_update'] = state.pop('atomic_multipole_update') == 'nonlinear'
+        # The nonlinear multipole update was removed: a model trained with it has no linear law.
+        nonlinear = state.pop('atomic_multipole_update', 'linear') == 'nonlinear'
+        if state.pop('include_nonlinear_multipole_update', nonlinear):
+            raise ValueError('This model was trained with the removed nonlinear multipole update; train it again')
         # Models saved before the MACE-SCF naming keep their parameters.
         for group in ('_parameters', '_modules'):
             if any(name in state.get(group, ()) for name in RENAMED):
@@ -297,19 +288,6 @@ class CoupledResponse(nn.Module):
                                          transport)
         return species_bias+self.scalar_out(self.shared(invariants))[..., 0]+p0[..., 0]
 
-    def local_law(self, chemical, vector, potential, field, mask, reference, target, transport, species_bias, p0):
-        """The whole local law read at one sampled field, for include_nonlinear_multipole_update.
-
-        Returns [dd_dE, bias, fermi_dos], the layout of the geometry law,
-        and the network dipole in units of the density width.
-        """
-        invariants, embedded = self._invariants(chemical, vector, potential, field, mask, reference[..., -2:], target,
-                                                transport)
-        scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded)
-        law = torch.cat((_positive(self.dd_dE_readout(hidden)), (species_bias+scalars[..., 0]+p0[..., 0])[..., None],
-                         _positive(scalars[..., 1:2])), -1)
-        return law, polar[..., 0, :]
-
     def forward(self, chemical, vector, potential, field, mask, target, reference, transport):
         """Local potential amplitudes and hidden features at the sampled field."""
         invariants, embedded = self._invariants(chemical, vector, potential, field, mask, reference[..., -2:],
@@ -317,81 +295,6 @@ class CoupledResponse(nn.Module):
         scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded, include_dipole=False)
         amplitudes = (torch.cat((scalars[..., 2:], polar.flatten(-2)), -1)+reference[..., 4:-3])*mask[..., None]
         return amplitudes, hidden
-
-
-class ChargeFlowResponse(CoupledResponse):
-    """MACE-VOLT response in which charge moves along bonds.
-
-    Every atom keeps its MACE charge q0_i, the charge deficit Q - sum_j q0_j of the MACE
-    charges lands at the states of the Fermi level with the Fukui functions fukui_i, and
-    charge flows along every bond shorter than flow_cutoff until it balances the
-    difference of the electron energies,
-
-        q_i = q0_i + fukui_i (Q - sum_j q0_j) + sum_j c_ij [(phi_i + bias_i) - (phi_j + bias_j)].
-
-    phi is the electron potential of all charges, dipoles, local amplitudes and external
-    sources, and bias_i the field independent potential of the atom in its environment.
-    The conductance c_ij > 0 of the two atoms and their distance vanishes smoothly at
-    flow_cutoff, and the bond Laplacian it builds is dq_dphi. Dipoles follow
-    d_i = d0_i + dd_dE_i E_i. A flow leaves one atom and enters the other, so the charge of
-    a group of atoms changes only through the bonds that leave it: molecules need no list
-    and no charge constraint, and a bond that forms or breaks passes charge smoothly.
-    bias, c, dd_dE, fukui and d0 come from the geometry and Q, never from the field. In a
-    conductor the potential follows the biases one to one, so a bias read from the field
-    would feed its own input back with gain one. The multipoles are therefore an exact
-    affine map of the local amplitudes, solved once per batch, and the updates iterate
-    only the amplitudes, which the network reads from the field. fermi_dos, the local
-    density of states at the Fermi level that fukui normalizes, also gives the charging
-    energy. include_nonlinear_multipole_update does not apply.
-    """
-    flows = True
-
-    def __init__(self, *args, flow_cutoff=4., **kwargs):
-        super().__init__(*args, **kwargs)
-        if not 0 < float(flow_cutoff):
-            raise ValueError('flow_cutoff must be positive')
-        width = self.chemical_scalar.out_features
-        self.flow_cutoff = float(flow_cutoff)
-        self.register_buffer('bond_frequencies', math.pi*torch.arange(1., 9.)/self.flow_cutoff)
-        self.bond_conductance = nn.Sequential(nn.Linear(2*width+len(self.bond_frequencies), width), nn.SiLU(),
-                                              nn.Linear(width, 1))
-        nn.init.zeros_(self.bond_conductance[2].weight)
-        nn.init.zeros_(self.bond_conductance[2].bias)
-
-    def bond_laplacian(self, chemical, positions, edge_index, shifts, g):
-        """dq_dphi of the bond flows: the conductance weighted Laplacian of the bonds shorter than flow_cutoff.
-
-        Every bond enters once, from the MACE edges with sender < receiver; periodic
-        images are separate bonds. The conductance is symmetric in the two atoms and
-        vanishes at flow_cutoff with the polynomial cutoff of MACE (p = 6). Returns
-        (graphs, size, size).
-        """
-        sender, receiver = edge_index
-        length = torch.linalg.vector_norm(positions[sender]-positions[receiver]-shifts.to(positions), dim=-1)
-        keep = (length < self.flow_cutoff) & (sender < receiver)
-        sender, receiver, length = sender[keep], receiver[keep], length[keep]
-        graph, a, b = g.batch[sender], g.slot[sender], g.slot[receiver]
-        first, second = chemical[graph, a], chemical[graph, b]
-        basis = torch.sin(self.bond_frequencies*length[:, None])/length[:, None]
-        x = length/self.flow_cutoff
-        envelope = 1.-28.*x**6+48.*x**7-21.*x**8
-        conductance = _positive(self.bond_conductance(torch.cat((first+second, first*second, basis), -1))[..., 0])
-        conductance = conductance*envelope
-        size, graphs = g.size, len(g.counts)
-        row, column = (graph*size+a)*size, (graph*size+b)*size
-        index = torch.cat((row+a, column+b, row+b, column+a))
-        values = torch.cat((conductance, conductance, -conductance, -conductance))
-        return conductance.new_zeros(graphs*size*size).index_add(0, index, values).reshape(graphs, size, size)
-
-    def zero_field_outputs(self, chemical, vector, local, centering, mask, target, transport, species_bias):
-        """The reference of the amplitudes, and the bias and network dipole of the geometry and Q."""
-        zeros = local.new_zeros((*mask.shape, self.field_channels))
-        invariants, embedded = self._invariants(chemical, vector, zeros, zeros[..., None].expand(-1, -1, -1, 3),
-                                                mask, centering[..., -2:], target, transport)
-        scalar, polar, _ = self._constitutive_outputs(invariants, vector, embedded)
-        raw = torch.cat((scalar[..., 2:], polar[..., 1:, :].flatten(-2)), -1)
-        offset = torch.cat((torch.zeros_like(local[..., :1]), polar[..., 0, :], local-raw), -1)*mask[..., None]
-        return torch.cat((offset, centering), -1), species_bias+scalar[..., 0], polar[..., 0, :]
 
 
 class CoupledGeometry:
@@ -675,147 +578,11 @@ def mixing_steps(update, initial, steps, mixing, checkpointed=False, tolerance=N
     return state, taken
 
 
-def electrolyte_molecules(model, data, positions):
-    """Packed indicator (graphs, size, K) of the molecules and ions of the electrolyte.
-
-    Atoms closer than 1.2 times the sum of their covalent radii are bonded. The
-    electrode is a bonded network that continues through a periodic boundary,
-    a slab or a solid. In a cell with an electrode, every finite bonded fragment
-    is a molecule or ion of the electrolyte. A cell without one has none.
-    """
-    from ase.data import covalent_radii
-    numbers = model.atomic_numbers.cpu().numpy()[data['node_attrs'].argmax(-1).cpu().numpy()]
-    x = positions.detach().cpu().double().numpy()
-    batch = data['batch'].cpu().numpy()
-    first, second = data['edge_index'].cpu().numpy()
-    shifts = data['shifts'].detach().cpu().double().numpy()
-    bonded = (np.linalg.norm(x[second]-x[first]+shifts, axis=-1)
-              < 1.2*(covalent_radii[numbers[first]]+covalent_radii[numbers[second]]))
-    cells = data['cell'].reshape(-1, 3, 3).detach().cpu().double().numpy()
-    images = np.rint(np.einsum('ec,ecd->ed', shifts[bonded], np.linalg.inv(cells[batch[first[bonded]]]))).astype(int)
-    neighbors = [[] for _ in x]
-    for a, b, image in zip(first[bonded], second[bonded], images):
-        neighbors[a].append((b, image))
-    # Label bonded fragments; a bond back to a fragment's own atom in another
-    # periodic image makes it extended.
-    label, offset, extended = np.full(len(x), -1), np.zeros((len(x), 3), int), []
-    for start in range(len(x)):
-        if label[start] >= 0:
-            continue
-        label[start], stack, periodic = len(extended), [start], False
-        while stack:
-            a = stack.pop()
-            for b, image in neighbors[a]:
-                if label[b] < 0:
-                    label[b], offset[b] = label[start], offset[a]+image
-                    stack.append(b)
-                elif (offset[b] != offset[a]+image).any():
-                    periodic = True
-        extended.append(periodic)
-    extended = np.asarray(extended, bool)
-    graphs, ptr = len(data['ptr'])-1, data['ptr'].cpu().numpy()
-    electrode = np.zeros(graphs, bool)
-    np.logical_or.at(electrode, batch, extended[label])
-    molecules = [np.unique(label[ptr[g]:ptr[g+1]][~extended[label[ptr[g]:ptr[g+1]]]]) if electrode[g] else []
-                 for g in range(graphs)]
-    members = np.zeros((graphs, int(max(ptr[1:]-ptr[:-1])), max([len(m) for m in molecules]+[1])))
-    for g, ids in enumerate(molecules):
-        for k, fragment in enumerate(ids):
-            members[g, np.flatnonzero(label[ptr[g]:ptr[g+1]] == fragment), k] = 1.
-    return positions.new_tensor(members)
-
-
-def molecular_projection(members, response, factors):
-    """The screened state change that removes a molecular charge excess.
-
-    Every molecule of the electrolyte has its own Fermi level in the charge law,
-    so its net charge is held while the electrode takes the rest of Q.
-    """
-    graphs, size, count = members.shape
-    inverse, root = factors
-    c4 = root.new_zeros((graphs, size, 4, count))
-    c4[..., 0, :] = members
-    c4 = c4.flatten(1, 2)
-    safe = torch.where(root > 0, root, torch.ones_like(root))
-    right = torch.cat((response[..., None]*c4/safe[..., None], root.new_zeros((graphs, 1, count))), 1)
-    shifts = root[..., None]*(inverse@right)[:, :-1]
-    empty = torch.diag_embed((members.sum(1) == 0).to(shifts.dtype))
-    return shifts@torch.linalg.inv(c4.transpose(1, 2)@shifts+empty)
-
-
-def flow_solve(r, g, chemical, vector, transport, source, geometry_law, species_bias, p0, mask, kernel, completion,
-               laplacian, counter):
-    """solve(target, members) of ChargeFlowResponse: the multipoles as an exact affine map of the amplitudes.
-
-    The updates see the cell at its net charge without the counter charge (counter),
-    which then acts at exact linear response.
-
-    The response holds dq_dphi, the bond Laplacian, for the charges and dd_dE for the
-    dipoles, and I + response K is inverted once per batch. No Fermi level is solved
-    for: flows conserve charge, and the Fukui functions place the charge deficit of the
-    MACE charges. members is ignored.
-    """
-    sigma, size, graphs = r.density_width, mask.shape[-1], mask.shape[0]
-    fermi_dos = geometry_law[..., -1]*mask
-    fukui = fermi_dos/fermi_dos.sum(-1, keepdim=True)
-    # The network input sees the potential alone, centered with the Fukui functions.
-    centering = torch.cat((torch.zeros_like(geometry_law[..., :2]), geometry_law[..., -1:]), -1)
-    response = laplacian.new_zeros((graphs, size, 4, size, 4))
-    response[:, :, 0, :, 0] = laplacian
-    dd_dE = torch.cat((torch.zeros_like(geometry_law[..., :1]), geometry_law[..., :1].expand(-1, -1, 3)), -1)
-    response = response.reshape(graphs, 4*size, 4*size)+torch.diag_embed((dd_dE*mask[..., None]).flatten(1))
-    ensure_cuda_linalg(response.device)
-    inverse, info = torch.linalg.inv_ex(torch.eye(4*size, dtype=response.dtype, device=response.device)
-                                        + response@kernel)
-    if not bool(torch.isfinite(inverse).all() & (info == 0).all()):
-        raise SCFNumericalError('Singular or nonfinite bond flow operator')
-    sources = inverse@(response@completion)
-
-    def applied(spectrum):
-        values, field = sample_spectrum(spectrum, g.tensors)
-        return torch.cat((values[..., :1], -sigma*field[..., 0, :]), -1)*mask[..., None]
-
-    def solve(target, members=None):
-        net = target+counter
-        reference, bias, dipole = r.zero_field_outputs(chemical, vector, source, centering, mask, net, transport,
-                                                       species_bias)
-
-        def offset_at(total, fixed):
-            """The exact flows and dipoles at total charge total in the fixed field."""
-            charge_deficit = total-(p0[..., 0]*mask).sum(-1)
-            charge = p0[..., 0]+fukui*charge_deficit[:, None]
-            base = torch.cat((charge[..., None], p0[..., 1:4]/sigma+dipole), -1)*mask[..., None]
-            drive = fixed+torch.cat((bias[..., None], torch.zeros_like(dipole)), -1)*mask[..., None]
-            rhs = base.flatten(1)+(response@drive.flatten(1)[..., None]).squeeze(-1)
-            return (inverse@rhs[..., None]).squeeze(-1)
-        offset = offset_at(net, applied(g.fixed[0]))
-
-        def update(z, observe=False):
-            potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, sigma, g.fixed[0]), g.tensors)
-            amplitudes, hidden = r(chemical, vector, potential, field, mask, net, reference, transport)
-            proposal = apply_screen_action(amplitudes, mask, net, sources, offset)
-            if not observe:
-                return proposal
-            # The Fermi level readout of the charging energy, from the final hidden features.
-            fermi = r.fermi_level_readout((fukui[..., None]*hidden).sum(1)).squeeze(-1)+(fukui*species_bias).sum(-1)
-            return proposal, potential, fermi_dos.sum(-1), fermi
-        # The counter charge at exact linear response, the same at any amplitudes; zero without one.
-        empty = torch.zeros_like(source)
-        shift = (apply_screen_action(empty, mask, target, sources, offset_at(target, applied(g.fixed[1])))
-                 - apply_screen_action(empty, mask, net, sources, offset))
-        # The seed: the exact multipoles at the net charge and the baseline amplitudes.
-        return apply_screen_action(source, mask, net, sources, offset), update, shift
-    return solve
-
-
 def prepare_coupled(model, data, local):
     """One live geometry, inverse and screened action per batch.
 
-    Returns the geometry and solve(target, members), which gives the initial state
-    and the update map at total charge target with the counter charge. Every
-    electrolyte molecule (indicator members) keeps the charge it has in the exact
-    linear solution of the neutral interface, and the electrode takes the rest. A
-    ChargeFlowResponse moves charge along bonds instead and needs no molecules.
+    Returns the geometry and solve(target), which gives the initial state, the update
+    map and the counter charge shift at total charge target with the counter charge.
     """
     r = model.field_dependent_charges_map
     g = CoupledGeometry(model, data, local.positions)
@@ -836,89 +603,52 @@ def prepare_coupled(model, data, local):
     transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
     source, geometry_law, species_bias = r.prepare_reference(chemical, vector, g.attrs, p0, mask)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
-    if getattr(r, 'flows', False):
-        if r.flow_cutoff > float(model.r_max):
-            raise ValueError('flow_cutoff must not exceed r_max, the range of the MACE edges')
-        laplacian = r.bond_laplacian(chemical, local.positions, data['edge_index'], data['shifts'], g)
-        return g, flow_solve(r, g, chemical, vector, transport, source, geometry_law, species_bias, p0, mask, kernel,
-                             completion, laplacian, counter)
     response = moment_responses(geometry_law, mask)
     factors = screen_factors(response, kernel, mask)
     action, sources = screen_action(completion, response, mask, factors)
-    nonlinear = bool(r.include_nonlinear_multipole_update)
+    fukui = geometry_law[..., -1]*mask
+    fukui = fukui/fukui.sum(-1, keepdim=True)
 
-    def linear(target, fixed):
-        """The exact linear solution at total charge target, with the law read once at its field.
-
-        The geometry law gives a first exact solution. At its field the network reads
-        the bias, and with include_nonlinear_multipole_update also both responses and
-        its dipole, the whole local law. Held during the updates, the read law cannot feed
-        back into the screened solve. Returns the reference of the amplitudes, the law
-        in the layout of the reference, its screening, and the offset of the read law as a
-        function of the total charge and the fixed field.
-        """
-        reference = r.reference_offsets(chemical, vector, source, geometry_law, mask, target, transport)
-
-        def offset_at(bias, law=reference, screen=(response, factors, action, sources)):
-            def offset(total, applied):
-                return screen_offset(screen[2], screen[1], bias, law, applied, g.tensors, p0, total, mask,
-                                     r.density_width)
-            return offset
-        state = apply_screen_action(source, mask, target, sources, offset_at(reference[..., -2])(target, fixed))
-        potential, field = sample_spectrum(total_spectrum(state, g.tensors, g.kernels, r.density_width, fixed),
-                                           g.tensors)
-        if not nonlinear:
-            return reference, reference, (response, factors, action, sources), offset_at(
-                r.biases(chemical, vector, potential, field, mask, reference, target, transport, species_bias, p0))
-        law, dipole = r.local_law(chemical, vector, potential, field, mask, reference, target, transport,
-                                  species_bias, p0)
-        read = torch.cat((reference[..., :1], dipole*mask[..., None], reference[..., 4:-3], law), -1)
-        responses = moment_responses(law, mask)
-        fac = screen_factors(responses, kernel, mask)
-        screen = (responses, fac, *screen_action(completion, responses, mask, fac))
-        return reference, read, screen, offset_at(law[..., 1], read, screen)
-
-    def solve(target, members):
+    def solve(target):
         """The updates of the cell at its net charge, and the counter charge at exact linear response.
 
         The network reads the cell at its net charge Q + Q_cc without the counter
-        charge. Moving charge between the counter charge and the electrode then acts at exact
-        linear response with every network output held, so along Q_cc = -Q the energy is a
-        convex quadratic and the cell voltage rises linearly with Q.
+        charge, with the biases it reads at the field of the exact linear solution of the
+        geometry law. Moving charge between the counter charge and the cell then acts at
+        exact linear response with every network output held, so along Q_cc = -Q the
+        energy is a convex quadratic and the cell voltage rises linearly with Q.
         """
-        # The neutral interface (Q = Q_cc = 0) at the linear level fixes the charge of every molecule.
-        zero = torch.zeros_like(target).detach()
-        _, _, neutral, offset_of = linear(zero, g.fixed[0])
-        charges = (members*apply_screen_action(source, mask, zero, neutral[3], offset_of(zero, g.fixed[0]))[..., :1]).sum(1)
         net = target+counter
-        reference, law, screen, offset_of = linear(net, g.fixed[0])
-        offset = offset_of(net, g.fixed[0])
-        free = apply_screen_action(source, mask, net, screen[3], offset)
-        projector = molecular_projection(members, screen[0], screen[1])
+        reference = r.reference_offsets(chemical, vector, source, geometry_law, mask, net, transport)
 
-        def hold(proposal):
-            excess = (members*proposal[..., :1]).sum(1)-charges
-            change = (projector@excess[..., None])[..., 0].reshape(*mask.shape, 4)
-            return torch.cat((proposal[..., :4]-change, proposal[..., 4:]), -1)
+        def offset_at(bias):
+            def offset(total, applied):
+                return screen_offset(action, factors, bias, reference, applied, g.tensors, p0, total, mask,
+                                     r.density_width)
+            return offset
+        linear = apply_screen_action(source, mask, net, sources, offset_at(reference[..., -2])(net, g.fixed[0]))
+        potential, field = sample_spectrum(total_spectrum(linear, g.tensors, g.kernels, r.density_width, g.fixed[0]),
+                                           g.tensors)
+        offset_of = offset_at(r.biases(chemical, vector, potential, field, mask, reference, net, transport,
+                                       species_bias, p0))
+        offset = offset_of(net, g.fixed[0])
 
         def update(z, observe=False):
             potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, r.density_width, g.fixed[0]),
                                                g.tensors)
             amplitudes, hidden = r(chemical, vector, potential, field, mask, net, reference, transport)
-            proposal = hold(apply_screen_action(amplitudes, mask, net, screen[3], offset))
+            proposal = apply_screen_action(amplitudes, mask, net, sources, offset)
             if not observe:
                 return proposal
             # The Fermi level readout of the charging energy, from the final hidden features.
-            fukui = law[..., -1]*mask
-            fukui = fukui/fukui.sum(-1, keepdim=True)
             fermi = r.fermi_level_readout((fukui[..., None]*hidden).sum(1)).squeeze(-1)+(fukui*species_bias).sum(-1)
-            return proposal, potential, (law[..., -1]*mask).sum(-1), fermi
+            return proposal, potential, (geometry_law[..., -1]*mask).sum(-1), fermi
         # The counter charge at exact linear response, the same at any amplitudes; zero without one.
         empty = torch.zeros_like(source)
-        shift = (hold(apply_screen_action(empty, mask, target, screen[3], offset_of(target, g.fixed[1])))
-                 - hold(apply_screen_action(empty, mask, net, screen[3], offset)))
-        # The seed: the exact linear solution at the baseline amplitudes, with every molecular charge held.
-        return hold(free), update, shift
+        shift = (apply_screen_action(empty, mask, target, sources, offset_of(target, g.fixed[1]))
+                 - apply_screen_action(empty, mask, net, sources, offset))
+        # The seed: the exact linear solution at the baseline amplitudes.
+        return apply_screen_action(source, mask, net, sources, offset), update, shift
     return g, solve
 
 
@@ -932,11 +662,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     WF = vacuum potential - EF. The network reads the cell at its net charge Q + Q_cc without the counter
     charge. Moving charge between the counter charge and the electrode then acts at exact
     linear response with every network output held, so along Q_cc = -Q the energy is a
-    convex quadratic and the cell voltage rises linearly with Q. The exact
-    linear solution of the neutral interface fixes the charge of every electrolyte
-    molecule. With
-    include_nonlinear_multipole_update the network reads the whole local law at the
-    field of the exact linear solution. With stability, one more update probes the gain
+    convex quadratic and the cell voltage rises linearly with Q. The cell has one Fermi
+    level, so its charge goes where the states at the Fermi level are. With stability,
+    one more update probes the gain
     of the update map along a random direction at the final state, for the MACE-SCF
     stability loss (outputs perturbing_vector and perturbed_density). The updates use
     MACE-SCF linear mixing. With a positive tolerance, steps is the maximum number of
@@ -969,8 +697,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         local = model.local_part(data, compute_force=compute_force)
         g, solve = prepare_coupled(model, data, local)
         q = charge.reshape(-1).to(g.volume)
-        members = None if getattr(r, 'flows', False) else electrolyte_molecules(model, data, local.positions)
-        initial, update, shift = solve(q, members)
+        initial, update, shift = solve(q)
         state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
         proposal, potential, total_response, fermi = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
