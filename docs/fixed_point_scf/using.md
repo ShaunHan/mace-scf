@@ -228,6 +228,17 @@ $$
 
 where $\alpha$ is the mixing parameter.
 
+`CoupledResponse` and `ChargeFlowResponse` use the same linear mixing. Each of
+their updates already contains the exact screened response of the charges and
+dipoles, so the mixing only has to converge the local potential amplitudes. On
+the IrO2/water data, simple mixing of the charges and dipoles themselves
+trained much worse (WF error +35% at equal training), because the electrode
+response is too strong for it, while simple mixing of the screened updates
+matched the earlier two-history mixer within 4% on every error. For a trained
+model the two mixers take the same updates: on the deployed IrO2 model the
+two-history weights stay at zero and its safeguard never acts, so energies agree
+to 1e-12 eV and forces, Fermi level and work function to 1e-14.
+
 Larger values move faster but are less stable. Smaller values move more slowly
 but can suppress oscillations. A practical starting range is:
 

@@ -13,7 +13,7 @@ the field of the linear seed; include_nonlinear_multipole_update reads both resp
 and the dipole there too. Dipoles respond linearly to the field, and two local
 potential amplitudes complete the short-range field as a nonlinear function of the
 evolving deformation field. Every update solves the affine electrostatic block
-exactly; the unrolled trajectory only resolves the nonlinear amplitudes.
+exactly, so MACE-SCF linear mixing of the updates only resolves the nonlinear amplitudes.
 ChargeFlowResponse moves charge along bonds instead, with biases, conductances and
 responses of the geometry, and needs no molecules. In both, the network reads the cell at its net charge Q + Q_cc without the counter
 charge. Moving charge between the counter charge and the electrode then acts at exact
@@ -630,53 +630,22 @@ def apply_screen_action(amplitudes, mask, target, sources, offset):
     return torch.cat((charge[..., None], value[..., 1:4], amplitudes), -1)
 
 
-def residual_mixing_weight(current, previous, old_weight, floor):
-    """Residual-scaled regularization of the two-history least-squares fit.
+def mixing_steps(update, initial, steps, mixing, checkpointed=False, tolerance=None):
+    """MACE-SCF linear mixing z <- z + mixing (F(z) - z), differentiated through every update.
 
-    Minimize ||r-w(r-r_old)||^2+(||r||^2+||r_old||^2) w^2+floor (w-w_old)^2 on
-    [0,1]. The Gram trace conditions nearly parallel residuals, whose history
-    weights would otherwise give spurious force spikes.
-    """
-    axes = tuple(range(1, current.ndim))
-    difference = current-previous
-    scale = (current.square()+previous.square()).sum(axes, keepdim=True)
-    numerator = (current*difference).sum(axes, keepdim=True)+floor*old_weight
-    denominator = difference.square().sum(axes, keepdim=True)+scale+floor
-    return (numerator/denominator).clamp(0., 1.)
-
-
-def secant_relaxation(displacement, residual_change, previous, mixing, floor):
-    """Keep the requested step for mild response slopes and shorten stiff ones.
-
-    With r=mixing**2 ||dr||**2/||dx||**2, a C2 positive-part transition leaves
-    r<=1 untouched and approaches the inverse secant norm for large r.
-    """
-    axes = tuple(range(1, displacement.ndim))
-    dx = displacement.square().sum(axes, keepdim=True)
-    dr = mixing**2*residual_change.square().sum(axes, keepdim=True)
-    excess = (dr-dx).clamp_min(0.)
-    stabilizer = excess*(excess/(dr+floor)).square()
-    return torch.sqrt((mixing**2*dx+floor*previous.square())/(dx+stabilizer+floor))
-
-
-def unroll_steps(update, initial, steps, mixing, checkpointed=False, tolerance=None):
-    """Two-history residual mixing with a secant safeguard, differentiated through every step.
-
-    Both history coefficients and the safeguard remain in autograd, including
-    force derivatives. checkpointed recomputes blocks of steps in backward. With a
-    positive tolerance, steps is a maximum: the updates stop once the largest change
-    of the state in one update, over the whole batch, falls below it, checked after
-    every update (every block when checkpointed). Autograd follows the updates made,
-    so every derivative stays exact for the computed state. Returns the state and the
-    number of updates made.
+    Every update already contains the exact screened response of the multipoles, so the
+    mixing only resolves the local amplitudes. checkpointed recomputes blocks of updates in
+    backward. With a positive tolerance, steps is a maximum: the updates stop once the
+    largest change of the state in one update, over the whole batch, falls below it,
+    checked after every update (every block when checkpointed). Autograd follows the
+    updates made, so every derivative stays exact for the computed state. Returns the
+    state and the number of updates made.
     """
     if not bool(torch.isfinite(initial).all()):
         raise SCFNumericalError('SCF initial state is not finite')
     # A precision-scaled runaway budget, not a physical bound.
     limit = initial.detach().abs().amax().clamp_min(1.)/math.sqrt(torch.finfo(initial.dtype).eps)
     axes = tuple(range(1, initial.ndim))
-    # History ratios must be conditioned for forces as well as values.
-    floor = torch.finfo(initial.dtype).eps**(1./3.)*initial.square().sum(axes, keepdim=True).clamp_min(1.)
 
     def check(peaks, first):
         invalid = (~torch.isfinite(peaks)) | (peaks > limit)
@@ -685,38 +654,21 @@ def unroll_steps(update, initial, steps, mixing, checkpointed=False, tolerance=N
             raise SCFNumericalError(f'SCF runaway at step {first+step}, graph {graph}: max|state| '
                                     f'{float(peaks[step, graph]):.6e} exceeds {float(limit):.6e}')
 
-    proposal = update(initial)
-    check(proposal.detach().abs().amax(axes)[None], 1)
-    residual = proposal-initial
-    state = initial+mixing*residual
-    previous_state, previous_proposal = initial, state
-    weight = torch.zeros_like(floor)
-    relaxation = torch.full_like(floor, mixing)
     stop = tolerance is not None and tolerance > 0
-    if stop and float(residual.detach().abs().amax()) < tolerance:
-        return state, 1
     block = max(1, math.isqrt(int(steps))) if checkpointed else 1 if stop else int(steps)
-    taken = 1
-    for start in range(1, int(steps), block):
-        def advance(value, old_state, old_proposal, old_residual, weight, relaxation,
-                    count=min(block, int(steps)-start), first=start+1):
+    state, taken = initial, 0
+    for start in range(0, int(steps), block):
+        def advance(value, count=min(block, int(steps)-start), first=start+1):
             peaks = []
             for _ in range(count):
                 proposed = update(value)
                 peaks.append(proposed.detach().abs().amax(axes))
-                current = proposed-value
-                relaxation = secant_relaxation(value-old_state, current-old_residual, relaxation, mixing, floor)
-                mixed = value+relaxation*current
-                weight = residual_mixing_weight(current, old_residual, weight, floor)
-                old_state = value
-                value = (1.-weight)*mixed+weight*old_proposal
-                old_proposal, old_residual = mixed, current
+                residual = proposed-value
+                value = value+mixing*residual
             check(torch.stack(peaks), first)
-            return value, old_state, old_proposal, old_residual, weight, relaxation
-        values = (state, previous_state, previous_proposal, residual, weight, relaxation)
-        state, previous_state, previous_proposal, residual, weight, relaxation = (
-            checkpoint(advance, *values, use_reentrant=False, preserve_rng_state=False)
-            if checkpointed else advance(*values))
+            return value, residual
+        state, residual = (checkpoint(advance, state, use_reentrant=False, preserve_rng_state=False)
+                           if checkpointed else advance(state))
         taken = min(start+block, int(steps))
         if stop and float(residual.detach().abs().amax()) < tolerance:
             break
@@ -986,9 +938,10 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     include_nonlinear_multipole_update the network reads the whole local law at the
     field of the exact linear solution. With stability, one more update probes the gain
     of the update map along a random direction at the final state, for the MACE-SCF
-    stability loss (outputs perturbing_vector and perturbed_density). With a positive
-    tolerance, steps is the maximum number of updates, and the solve stops once the
-    largest change of the state in one update falls below tolerance (scf_steps).
+    stability loss (outputs perturbing_vector and perturbed_density). The updates use
+    MACE-SCF linear mixing. With a positive tolerance, steps is the maximum number of
+    updates, and the solve stops once the largest change of the state in one update falls
+    below tolerance (scf_steps).
     """
     r = model.field_dependent_charges_map
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
@@ -1018,7 +971,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         q = charge.reshape(-1).to(g.volume)
         members = None if getattr(r, 'flows', False) else electrolyte_molecules(model, data, local.positions)
         initial, update, shift = solve(q, members)
-        state, taken = unroll_steps(update, initial, steps, mixing, checkpointed, tolerance)
+        state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
         proposal, potential, total_response, fermi = update(state, observe=True)
         residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
         probe = None
