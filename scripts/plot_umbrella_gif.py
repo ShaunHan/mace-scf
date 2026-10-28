@@ -3,11 +3,12 @@
 
 Examples:
   python plot_umbrella_gif.py umbrella_8 --index 8
-  python plot_umbrella_gif.py umbrella_20 --index 20 --frames 50 --dpi 600
+  python plot_umbrella_gif.py umbrella_20 --index 20 --replica 1 --frames 50 --dpi 600
   python plot_umbrella_gif.py umbrella_8 --index 8 --start-step 34000 --step-interval 100
 
 Requires: numpy, matplotlib, ase, pillow.
-Read run.json, md.csv and md.traj from the SAME run directory.
+Read run.json, md.csv and md.traj of scripts/run_nvtphi_umbrella.py from the SAME
+replica directory, umbrella_<index>/replica_<replica> (or the given folder itself).
 The GIF is rendered at FIGSIZE * DPI pixels; GIF has no physical DPI metadata.
 Only the display is repeated/reimaged. Charges and energies refer to the
 original simulation cell. The energy trace is not a free-energy profile.
@@ -44,10 +45,10 @@ DPI = 600
 FPS = 6
 FIGSIZE = (10.8, 7.6)                # 6480 x 4560 pixels at 600 dpi
 FONT_PATH = "/mnt/nfs/source/arial.ttf"
-ROTATION = "auto"                   # Fixed side view that exposes the short O-O pair
+ROTATION = "-56z,-73x,0y"           # Oblique box of the original movies; "auto" faces the O-O pair
 REPEAT = (2, 2, 1)
 BACKGROUND_ATOM_ALPHA = 0.70
-REFERENCE_SHIFT_V = 4.44            # U vs SHE = calibrated saved voltage - 4.44
+REFERENCE_SHIFT_V = 4.44            # U vs SHE = cell voltage + frozen alignment - 4.44
 ENERGY_MODE = "bias_removed"        # "logged" also available
 PAIR_COLORS = ("#D71920", "#E8392F")
 ELEMENT_COLORS = {"Ir": "#527A99", "O": "#D87870", "H": "#E9EDF0"}
@@ -80,18 +81,16 @@ def configure_style(font_path):
     return str(path)
 
 
-def load_run(folder, index, reference_shift, energy_mode):
+def load_run(folder, reference_shift, energy_mode):
     protocol = json.loads((folder / "run.json").read_text())
-    if int(protocol["source_index"]) != index:
-        raise ValueError(f"--index {index} does not match run.json source_index.")
-    if protocol.get("method") != "distance_umbrella":
-        raise ValueError("This script expects a saved distance_umbrella run.")
+    if "pair" not in protocol or "stages" not in protocol:
+        raise ValueError("This script expects a run.json of scripts/run_nvtphi_umbrella.py.")
     with (folder / "md.csv").open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     if not rows:
         raise ValueError("md.csv is empty.")
     release_start = next((i for i, row in enumerate(rows)
-                          if row["phase"].strip().lower() == "release"), len(rows))
+                          if row["stage"].strip().lower() == "release"), len(rows))
     excluded = len(rows) - release_start
     rows = rows[:release_start]
     if not rows:
@@ -105,18 +104,14 @@ def load_run(folder, index, reference_shift, energy_mode):
     steps = column("step").astype(np.int64)
     if np.any(np.diff(steps) <= 0):
         raise ValueError("CSV steps must be unique and strictly increasing.")
-    # Read the controller's calibrated voltage, not an uncalibrated ESP-EF.
-    voltage_key = next((key for key in (
-        "electrode_potential_V", "voltage_V", "WF_over_e_V", "Phi_V")
-        if key in rows[0]), None)
-    if voltage_key is None:
-        raise ValueError("No calibrated controller-voltage column in md.csv.")
+    # Read the controller's calibrated voltage, the cell voltage on the frozen
+    # alignment, not the instantaneous WF (U_SHE_V), which drifts with the outer water.
     traces = np.array([
-        column(voltage_key) - reference_shift,
-        column("total_charge_e"),
+        column("cell_voltage_V") + column("mean_delta_V") - reference_shift,
+        column("charge_e"),
         column("temperature_K"),
         column("distance_A"),
-        column("energy_eV") - (column("bias_eV") if energy_mode == "bias_removed" else 0.),
+        column("energy_model_eV") - (column("bias_eV") if energy_mode == "bias_removed" else 0.),
     ])
     time_ps = column("time_fs") / 1000.
     if not np.isfinite(traces).all() or not np.isfinite(time_ps).all():
@@ -150,7 +145,7 @@ def load_matched_frames(path, wanted_steps, pair, reference_distances):
     found = {}
     with Trajectory(str(path)) as trajectory:
         for frame in trajectory:
-            step = int(frame.info["step"])
+            step = int(frame.info["restart"]["step"])
             if step not in wanted:
                 continue
             if step in found:
@@ -257,11 +252,12 @@ def draw_structure(ax, atoms, highlighted, pair, rotation, matrix, bbox, corners
     ax.set_axis_off()
 
 
-def report_run(protocol, rows, traces):
-    sample = np.array([r["phase"] == "sample" for r in rows])
+def report_run(index, protocol, rows, traces):
+    sample = np.array([r["stage"].endswith("sample") for r in rows])
     settings = protocol["settings"]
-    print(f"Config {protocol['source_index']}: O pair {protocol['oxygen_pair']}; "
-          f"{len(protocol['centers_A'])} windows; final step {rows[-1]['step']}.")
+    windows = {stage["window"] for stage in protocol["stages"] if stage["window"] >= 0}
+    print(f"Config {index}: O pair {protocol['pair']}; "
+          f"{len(windows)} windows; final step {rows[-1]['step']}.")
     if sample.any():
         print(f"Production U vs SHE = {traces[0, sample].mean():.3f} +/- "
               f"{traces[0, sample].std():.3f} V (SD); "
@@ -270,7 +266,7 @@ def report_run(protocol, rows, traces):
           f"final {traces[3, -1]:.3f} A.")
     dt = settings["TIMESTEP_FS"]
     print(f"Per window: {settings['EQUIL_STEPS']*dt/1000:.2f} ps equilibration + "
-          f"{(settings['WINDOW_STEPS']-settings['EQUIL_STEPS'])*dt/1000:.2f} ps sampling.")
+          f"{settings['SAMPLE_STEPS']*dt/1000:.2f} ps sampling.")
     print("An activation free energy requires a converged, reweighted PMF; "
           "do not read a barrier from this potential-energy trace.")
 
@@ -280,6 +276,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("folder", nargs="?", type=Path)
     parser.add_argument("--index", type=int, default=CONFIG_INDEX)
+    parser.add_argument("--replica", type=int, default=0)
     parser.add_argument("--frames", type=int, default=N_FRAMES)
     parser.add_argument("--step-interval", type=int, help="Minimum MD-step spacing; overrides --frames.")
     parser.add_argument("--start-step", type=int, default=0)
@@ -297,16 +294,17 @@ def main():
             or (args.step_interval is not None and args.step_interval < 1)):
         parser.error("frames, dpi, fps and step-interval must be positive.")
     folder = (args.folder or Path(f"umbrella_{args.index}")).expanduser().resolve()
+    if not (folder / "run.json").is_file():
+        folder = folder / f"replica_{args.replica}"
     output = (args.output or folder / f"umbrella_{args.index}_evolution.gif").resolve()
     if output.suffix.lower() != ".gif":
         parser.error("--output must end in .gif.")
     output.parent.mkdir(parents=True, exist_ok=True)
     font = configure_style(args.font)
-    protocol, rows, steps, time_ps, traces = load_run(
-        folder, args.index, REFERENCE_SHIFT_V, args.energy)
+    protocol, rows, steps, time_ps, traces = load_run(folder, REFERENCE_SHIFT_V, args.energy)
     end = int(steps[-1]) if args.end_step is None else args.end_step
     selected, scope = select_rows(steps, args.start_step, end, args.frames, args.step_interval)
-    pair = protocol["oxygen_pair"]
+    pair = protocol["pair"]
     frames, error = load_matched_frames(folder / "md.traj", steps[selected], pair, traces[3, selected])
     if args.rotation == "auto":
         shortest = frames[int(np.argmin(traces[3, selected]))]
@@ -316,7 +314,7 @@ def main():
         azimuth = (-np.degrees(np.arctan2(vector[1], vector[0])) + 90) % 180 - 90
         args.rotation = f"{azimuth:.4f}z,-73x,0y"
     displays, highlighted, matrix, bbox, corners, edges = prepare_display(frames, pair, args.rotation)
-    report_run(protocol, rows, traces)
+    report_run(args.index, protocol, rows, traces)
     print(f"Matched {len(selected)} frames by MD step; maximum O-O mismatch {error:.2g} A.")
     print(f"Font: {font}")
     print(f"Fixed ASE viewing rotation: {args.rotation}")
@@ -326,7 +324,7 @@ def main():
                            bottom=.080, top=.885, wspace=.25, hspace=.57)
     structure_ax = fig.add_subplot(grid[:, 0])
     axes = [fig.add_subplot(grid[i, 1]) for i in range(5)]
-    target = float(protocol["settings"]["TARGET_POTENTIAL"]) - REFERENCE_SHIFT_V
+    target = float(protocol["settings"]["TARGET_U_SHE"])
     fig.text(.5, .972, "O-O coupling at the electrified IrO$_2$-water interface "
              f"at {protocol['settings']['TEMPERATURE_K']:g}K and {target:g} V vs. SHE",
              fontsize=13, weight="bold", ha="center", va="top")
