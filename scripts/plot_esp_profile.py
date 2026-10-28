@@ -1,36 +1,31 @@
 #!/usr/bin/env python3
-"""Plot an aligned structure strip, total ESP and deformation ESP per XYZ index.
+"""Plot the plane-averaged ESP of MACE-VOLT against DFT for XYZ frames with stored Fourier labels.
 
-Raw total DFT: locpots/LOCPOT_<index> (LOCPOT<index> also accepted), from LVHAR.
-Raw protoatomic reference: locpots/LOCPOT_proto_<index> (required).
-Raw deformation is the direct grid difference, never an inverse-smoothed FFT.
-The model total adds the reference neutral atoms (LOCPOT_proto) to the model
-deformation ESP, at the level of the model's own vacuum potential and Fermi level.
-Edit the settings below; one PNG/PDF/SVG/CSV set is saved per selected index.
+DFT: the deformation potential LOCPOT - LOCPOT_proto (info key vasp_phi_fftn_shifted) and
+the neutral-atom potential LOCPOT_proto (vasp_proto_phi_fftn_shifted), unsmoothed Fourier
+modes written by scripts/collect_vasp_data.py. Model: its deformation potential. Both are
+averaged over the planes of the slab on the Fourier modes they share, raw and with the
+model's Gaussian smearing, as in the potential loss. The total ESP adds the same neutral
+atoms to both and is referenced to each Fermi level, so its vacuum plateau is the work
+function. Edit the settings below; one PNG/PDF/SVG/CSV set is saved per selected index.
 """
-import os
 from pathlib import Path
 
-os.environ['CUDA_VISIBLE_DEVICES'] = os.environ.get('CUDA_VISIBLE_DEVICES', '0').split(',')[0].strip()
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.transforms import Affine2D
 import numpy as np
-from ase.geometry import find_mic
 from ase.io import read
-from ase.io.vasp import read_vasp_configuration
 from ase.visualize.plot import plot_atoms
-from scipy.signal import resample
 from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
-from mace_scf.utils.foundation import accelerate_backbone
 
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v387.model'
 FRAME_INDEXES = list(range(10, 20))
-DEVICE, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', True, 50
-SIGMA_PHI = 1.5  # Å; display smoothing applied to every profile.
-LOCPOT_DIR, OUTPUT_DIR, DPI = Path('locpots'), Path('esp_profiles'), 300
+DEVICE = 'cuda:0'
+POTENTIAL_KEY, PROTO_KEY, FERMI_KEY = 'vasp_phi_fftn_shifted', 'vasp_proto_phi_fftn_shifted', 'vasp_efermi'
+OUTPUT_DIR, DPI = Path('esp_profiles'), 300
 
 
 class ProfileCalculator(MACEFixedPointSCF):
@@ -41,98 +36,59 @@ class ProfileCalculator(MACEFixedPointSCF):
         return results
 
 
-def scalar(value):
-    a = np.asarray(value, dtype=float)
-    if a.size != 1 or not np.isfinite(a).all():
-        raise ValueError('Expected one finite scalar')
-    return float(a.item())
+def planar_modes(coefficients, keep):
+    """Modes m of the plane average sum_m c_m exp(2 pi i m s), s the fractional height.
+
+    coefficients is an unnormalized FFT grid in native order, c along its third axis.
+    keep(m) selects modes; an even grid's Nyquist mode is ambiguous and never kept.
+    """
+    n = coefficients.shape[2]
+    modes = np.rint(np.fft.fftfreq(n)*n).astype(int)
+    column = coefficients[0, 0]/coefficients.size
+    return {int(m): c for m, c in zip(modes, column) if abs(m) <= (n-1)//2 and keep(m)}
 
 
-def locpot_path(index, proto=False):
-    prefix = 'LOCPOT_proto' if proto else 'LOCPOT'
-    paths = [LOCPOT_DIR/f'{prefix}{separator}{index}' for separator in ('_', '')]
-    found = [p for p in paths if p.is_file()]
-    if len(found) > 1:
-        raise ValueError(f'Ambiguous files for index {index}: {found}')
-    if found:
-        return found[0]
-    raise FileNotFoundError(f'Expected {paths[0]} or {paths[1]}')
+def profile(modes, s):
+    return sum((c*np.exp(2j*np.pi*m*s)).real for m, c in modes.items())
 
 
-def read_locpot(path, atoms):
-    """Read the scalar LVHAR block directly, without CHGCAR volume scaling."""
-    with Path(path).open() as stream:
-        structure = read_vasp_configuration(stream)
-        if not np.allclose(structure.cell, atoms.cell, atol=1.e-5, rtol=0.) or not np.array_equal(
-                np.sort(structure.numbers), np.sort(atoms.numbers)):
-            raise ValueError(f'{path}: cell/species do not match the XYZ frame')
-        # VASP may reorder species. Compare periodic coordinates independently of order.
-        for number in np.unique(atoms.numbers):
-            first, second = structure.positions[structure.numbers == number], atoms.positions[atoms.numbers == number]
-            distances = find_mic((first[:, None]-second).reshape(-1, 3), atoms.cell, pbc=True)[1]
-            distances = distances.reshape(len(first), len(second))
-            if max(distances.min(0).max(), distances.min(1).max()) > 1.e-3:
-                raise ValueError(f'{path}: atomic positions do not match the XYZ frame')
-        line = stream.readline()
-        while line and not line.strip():
-            line = stream.readline()
-        shape = tuple(map(int, line.split()))
-        if len(shape) != 3 or min(shape) < 1:
-            raise ValueError(f'{path}: invalid LOCPOT grid')
-        profile = np.empty(shape[2])
-        for iz in range(shape[2]):
-            plane = np.fromfile(stream, count=shape[0]*shape[1], sep=' ')
-            if plane.size != shape[0]*shape[1] or not np.isfinite(plane).all():
-                raise ValueError(f'{path}: incomplete/nonfinite potential grid')
-            profile[iz] = plane.mean()
-    # VASP electron potential energy in eV/e: numerical values in V, same sign as training.
-    return profile
-
-
-def profiles(atoms, results, raw_total, raw_proto):
-    """Smoothed model and DFT profiles; the model total is its deformation plus the reference atoms."""
+def profiles(atoms, results, sigma):
+    """Curves on z in [-L/2, L/2] about the middle of the continuous branch, and RMSEs."""
     length = float(atoms.cell[2, 2])
-    shape = tuple(np.asarray(results['k_vectors_grid_shape'], dtype=int).ravel())
-    modes = np.rint(np.fft.fftfreq(shape[2])*shape[2]).astype(int)
-    mask = np.asarray(results['k_vectors_mask'], dtype=bool).reshape(shape)[0, 0] & (modes != 0)
-    wave = 2*np.pi*modes[mask]/length
-    a = np.asarray(results['fourier_potential']).reshape(*shape, 2)
-    model = (a[0, 0, mask, 0]+1j*a[0, 0, mask, 1])/np.prod(shape)*np.exp(-.5*SIGMA_PHI**2*wave**2)
-    z = np.linspace(-length/2, length/2, max(1201, len(raw_total)+1))
+    shape = tuple(int(n) for n in np.ravel(results['k_vectors_grid_shape']))
+    grid = np.asarray(results['fourier_potential']).reshape(*shape, 2)
+    inside = np.asarray(results['k_vectors_mask']).reshape(shape)[0, 0]
+    model = planar_modes(grid[..., 0]+1j*grid[..., 1], lambda m: inside[m % shape[2]])
 
-    def model_at(points):
-        return (model@np.exp(1j*np.outer(wave, points))).real
-
-    def interpolate(values, points=z):
-        return np.interp(points % length, np.arange(len(values))*length/len(values), values, period=length)
-    grid_wave = 2*np.pi*np.fft.fftfreq(len(raw_total), d=length/len(raw_total))
-
-    def smooth(values):
-        return np.fft.ifft(np.fft.fft(values)*np.exp(-.5*SIGMA_PHI**2*grid_wave**2)).real
-    proto = smooth(resample(raw_proto, len(raw_total)))
-    deformation = raw_total-resample(raw_proto, len(raw_total))
-    deformation -= deformation.mean()
-    # The flat vacuum fixes the model level: its predicted vacuum potential at the vacuum plane.
-    plane = np.array([float(atoms.info.get('vacuum_zfrac', .5))*length])
-    level = scalar(results['vacuum_potential'])-interpolate(proto, plane)[0]-model_at(plane)[0]
-    fermi = scalar(atoms.info['fermi_level' if 'fermi_level' in atoms.info else 'vasp_efermi'])
-    curves = dict(z_A=z, model_total_V=interpolate(proto)+model_at(z)+level-scalar(results['fermi_level']),
-                  model_deformation_V=model_at(z),
-                  dft_total_raw_V=interpolate(raw_total)-fermi,
-                  dft_total_smoothed_V=interpolate(smooth(raw_total))-fermi,
-                  dft_deformation_raw_V=interpolate(deformation),
-                  dft_deformation_smoothed_V=interpolate(smooth(deformation)))
-    # Report the errors of the curves actually plotted, without double-counting
-    # the periodic endpoint. The raw DFT curves retain their full grid resolution.
-    errors = {f'{kind}_rmse_V': float(np.sqrt(np.mean((curves[f'model_{kind}_V'][:-1]
-               -curves[f'dft_{kind}_smoothed_V'][:-1])**2))) for kind in ('total','deformation')}
-    return curves, 'Raw DFT', errors
+    def stored(key):
+        return planar_modes(np.asarray(atoms.info[key][0])+1j*np.asarray(atoms.info[key][1]), lambda m: m in model)
+    dft, proto = stored(POTENTIAL_KEY), stored(PROTO_KEY)
+    model = {m: model[m] for m in dft}
+    smear = {m: np.exp(-.5*(sigma*2*np.pi*m/length)**2) for m in dft}
+    center = (float(atoms.info.get('dipole_correction_zfrac', .5))+.5) % 1.
+    z = np.linspace(-length/2, length/2, 1201)
+    s = center+z/length
+    fermi = {'dft': float(atoms.info[FERMI_KEY]), 'model': float(results['fermi_level'])}
+    curves = {'z_A': z}
+    for name, deformation in (('dft', dft), ('model', model)):
+        for kind, weight in (('raw', lambda m: 1.), ('smeared', smear.get)):
+            curves[f'{name}_deformation_{kind}_V'] = profile({m: weight(m)*c for m, c in deformation.items()}, s)
+            curves[f'{name}_total_{kind}_V'] = (profile({m: weight(m)*(c+proto[m]) for m, c in deformation.items()}, s)
+                                               - fermi[name])
+    # Parseval: the RMSE over the cell of a plane average from its Fourier modes.
+    errors = {kind: float(np.sqrt(sum(abs(weight(m)*(model[m]-dft[m]))**2 for m in dft)))
+              for kind, weight in (('raw', lambda m: 1.), ('smeared', smear.get))}
+    errors['fermi'] = fermi['model']-fermi['dft']
+    work = {'model': float(results['work_function'])}
+    if 'vacuum_potential' in atoms.info:
+        work['dft'] = float(atoms.info['vacuum_potential'])-fermi['dft']
+    return curves, dict(center=center, errors=errors, work=work, kmax=2*np.pi*max(dft)/length)
 
 
-def draw_structure(atoms, axis):
+def draw_structure(atoms, axis, center):
     length = float(atoms.cell[2, 2])
     display = atoms.copy()
-    display.positions[:, 2] += length/2
+    display.positions[:, 2] += (.5-center)*length
     display.wrap(pbc=True)
     display.set_celldisp([0., 0., 0.])
     # Project z horizontally and y vertically; retain physical Angstrom scale.
@@ -148,25 +104,30 @@ def draw_structure(atoms, axis):
     axis.set_aspect('equal', adjustable='datalim')
 
 
-def save_plot(atoms, curves, raw_label, errors, index):
+def save_plot(atoms, curves, summary, sigma, index):
+    center, errors, work = summary['center'], summary['errors'], summary['work']
     plt.rcParams.update({'font.family': 'sans-serif', 'font.sans-serif': ['Arial', 'DejaVu Sans'], 'svg.fonttype': 'none'})
     figure, axes = plt.subplots(3, 1, figsize=(8.2, 8.1), sharex=True,
-        gridspec_kw=dict(height_ratios=(1.15, 2.4, 2.4), hspace=.16))
-    draw_structure(atoms, axes[0])
+                                gridspec_kw=dict(height_ratios=(1.15, 2.4, 2.4), hspace=.16))
+    draw_structure(atoms, axes[0], center)
     axes[0].set_title(f'Configuration {index}', fontsize=11)
     z = curves['z_A']
-    sigma = rf' ($\sigma_\phi={SIGMA_PHI:g}$ $\AA$)'
+    smeared = rf'smeared ($\sigma={sigma:g}$ $\AA$)'
     for axis, kind, letter in zip(axes[1:], ('total', 'deformation'), ('a', 'b')):
-        key = f'dft_{kind}_raw_V'
-        axis.plot(z, curves[key], '--', color='#2166ac', lw=1.3, label=raw_label)
-        axis.plot(z, curves[f'dft_{kind}_smoothed_V'], '-', color='#2166ac', lw=1.8, label='Smoothed DFT'+sigma)
-        axis.plot(z, curves[f'model_{kind}_V'], '-', color='#e68626', lw=1.8, label='Smoothed MACE-VOLT'+sigma)
+        for name, color, label in (('dft', '#2166ac', 'DFT'), ('model', '#e68626', 'MACE-VOLT')):
+            axis.plot(z, curves[f'{name}_{kind}_raw_V'], '--', color=color, lw=1., label=f'{label} raw')
+            axis.plot(z, curves[f'{name}_{kind}_smeared_V'], '-', color=color, lw=1.8, label=f'{label} {smeared}')
         axis.text(.015, .94, letter, transform=axis.transAxes, fontweight='bold', va='top', fontsize=13)
-        axis.set_ylabel(r'Total ESP $\phi$ (V)'+'\nFermi-referenced' if kind == 'total'
-                        else r'Deformation ESP $\Delta\phi$ (V)'+'\nzero mean')
         axis.legend(fontsize=8, loc='best', frameon=False)
         axis.set_xlim(z[0], z[-1])
-        axis.grid(False)
+    if 'vacuum_zfrac' in atoms.info:
+        axes[1].axvline(((float(atoms.info['vacuum_zfrac'])-center+.5) % 1.-.5)*float(atoms.cell[2, 2]),
+                        color='0.6', lw=.8, ls=':')
+    axes[1].set_title('Work function: '+', '.join(f'{label} {work[name]:.3f} eV' for name, label in
+                                                  (('dft', 'DFT'), ('model', 'MACE-VOLT')) if name in work)
+                      + rf'; Fourier modes $|k|\leq{summary["kmax"]:.2f}$ $\AA^{{-1}}$', fontsize=9)
+    axes[1].set_ylabel(r'Total ESP $\phi-E_\mathrm{F}$ (V)')
+    axes[2].set_ylabel(r'Deformation ESP $\Delta\phi$ (V)')
     axes[-1].set_xlabel(r'$z$ ($\AA$)')
     figure.subplots_adjust(left=.13, right=.98, bottom=.08, top=.94)
     OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
@@ -176,41 +137,31 @@ def save_plot(atoms, curves, raw_label, errors, index):
     np.savetxt(output.with_suffix('.csv'), np.column_stack(list(curves.values())), delimiter=',',
                header=','.join(curves), comments='')
     plt.close(figure)
-    print(f'Frame {index}: plotted-profile RMSE total={1000*errors["total_rmse_V"]:.2f} mV, '
-          f'deformation={1000*errors["deformation_rmse_V"]:.2f} mV; saved {output}', flush=True)
+    print(f'Frame {index}: deformation ESP RMSE raw {1000*errors["raw"]:.1f} mV, smeared {1000*errors["smeared"]:.1f} '
+          f'mV; Fermi level error {1000*errors["fermi"]:+.1f} meV; saved {output}', flush=True)
 
 
 def plot_frame(atoms, calculator, index):
     if not np.array_equal(atoms.pbc, [True, True, False]) or atoms.cell[2, 2] <= 0 or not np.allclose(
             [*atoms.cell[:2, 2], *atoms.cell[2, :2]], 0.):
         raise ValueError('ESP z profiles require an xy-periodic slab with a perpendicular open z axis')
-    raw = read_locpot(locpot_path(index), atoms)
-    proto_path = locpot_path(index, proto=True)
-    proto = read_locpot(proto_path, atoms)
     model_atoms = atoms.copy()
-    model_atoms.info = {key: atoms.info[key] for key in (
-        'external_field', 'total_charge', 'vacuum_zfrac', 'dipole_correction_zfrac',
-        'counter_charge', 'counter_charge_width', 'counter_charge_center',
-        'counter_charge_xfrac', 'counter_charge_yfrac', 'counter_charge_zfrac') if key in atoms.info}
     model_atoms.set_constraint([])
     model_atoms.calc = calculator
     model_atoms.get_potential_energy()
-    curves, raw_label, errors = profiles(atoms, calculator.results, raw, proto)
-    save_plot(atoms, curves, raw_label, errors, index)
-    return errors
+    sigma = float(calculator.model.field_dependent_charges_map.potential_amplitudes_smearing_width)
+    curves, summary = profiles(atoms, calculator.results, sigma)
+    save_plot(atoms, curves, summary, sigma, index)
+    return summary['errors']
 
 
 def main():
-    calc = ProfileCalculator(model_path=MODEL_FILE, device=DEVICE, pbc_handling='slab', scf_restart=False,
-        external_field_key='external_field', total_charge_key='total_charge', ignore_nonconverged=True,
-        scf_options=dict(num_scf_steps=SCF_STEPS, constant_charge=True, use_autograd_forces=True,
-                         initial_density='local_guess', initial_fermi_level='zero'))
-    if ENABLE_CUEQ:
-        accelerate_backbone(calc.model, DEVICE)
-    calc.model.eval().requires_grad_(False)
+    calculator = ProfileCalculator(model_path=MODEL_FILE, device=DEVICE, pbc_handling='slab', scf_restart=False,
+                                   external_field_key='external_field', total_charge_key='total_charge')
+    calculator.model.eval().requires_grad_(False)
     frames = read(ATOMS_FILE, index=':')
     for index in FRAME_INDEXES:
-        plot_frame(frames[index], calc, index)
+        plot_frame(frames[index], calculator, index)
 
 
 if __name__ == '__main__':
