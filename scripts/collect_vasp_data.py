@@ -23,6 +23,8 @@ VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
+PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
+PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -31,8 +33,6 @@ OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 
 COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
                          "counter_charge_zfrac")
-# Per-atom PAW projected state weights near EF, copied from the HDF into the XYZ.
-STATE_ARRAYS = ("projected_weight_near_EF", "empty_weight_below_EF", "occupied_weight_above_EF")
 
 
 def get_output_dirs():
@@ -71,9 +71,10 @@ def truncate_fft(coefficients, shape):
 
 
 def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
-    """Small band arrays plus per-atom summaries; no full DOS/projection export.
+    """Small band arrays plus each atom's projected DOS around EF.
 
-    Returns the per-atom STATE_ARRAYS, or None without projections in vaspout.h5.
+    Returns the DOS energies relative to EF and the per-atom DOS in states/eV, or None
+    without projections in vaspout.h5.
     """
     if not kpoints:
         return None
@@ -97,9 +98,9 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
         projected = source["results/projectors/par"]
         if projected.shape[1] != len(atoms):
             raise ValueError(f"Projection atom count mismatch: {path}")
-        windows = np.array([0.1, 0.5])  # Half-widths in eV around EF.
-        near = np.zeros((len(windows), len(atoms)))
-        empty, occupied = np.zeros((2, len(atoms)))
+        half = round(PDOS_RANGE / PDOS_STEP)
+        offsets = np.arange(-half, half + 1)
+        pdos = np.zeros((len(atoms), len(offsets)))
         capacity = 1.0 if spinor or parameters.get("ispin", 1) == 2 else 2.0
         for row, k in enumerate(kpoints):
             # ASE numbers k-points from 1 and reads the XML table rounded to four decimal places.
@@ -110,24 +111,21 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
             occupation = capacity * source["results/electron_eigenvalues/fermiweights"][k.s, k.k - 1]
             states["energy_minus_EF"][row] = energy
             states["occupation"][row] = occupation
-            bands = np.flatnonzero(abs(energy) <= 3.0)
-            if not len(bands):
-                continue
-            site = projected[k.s, :, :, k.k - 1, bands].sum(axis=1)
-            e, f = energy[bands], occupation[bands]
-            near += k.weight * capacity * np.stack([site[:, abs(e) <= w].sum(axis=1) for w in windows])
-            empty += k.weight * (site @ ((capacity - f) * (e < 0)))
-            occupied += k.weight * (site @ (f * (e > 0)))
-    states.attrs.update(projections_available=True, occupation_window_eV=3.0,
-                        projection_units="PAW projected state weights; not atomic charges")
-    for name, values in {"window_eV": windows, "projected_weight_near_EF": near,
-                         "empty_weight_below_EF": empty, "occupied_weight_above_EF": occupied}.items():
-        states.create_dataset(name, data=np.asarray(values, dtype=np.float32))
+            # Histogram: each band adds its orbital-summed projections to the bin of its eigenvalue.
+            bins = np.rint(energy / PDOS_STEP).astype(int)
+            bands = np.flatnonzero(abs(bins) <= half)
+            if len(bands):
+                site = projected[k.s, :, :, k.k - 1, bands].sum(axis=1)
+                pdos += k.weight * capacity / PDOS_STEP * site @ (bins[bands, None] == offsets)
+    states.attrs.update(projections_available=True,
+                        projection_units="PAW projected states per eV; not atomic charges")
+    states.create_dataset("pdos_energy_minus_EF", data=offsets * PDOS_STEP)
+    states.create_dataset("pdos", data=pdos.astype(np.float32))
     # Geometry identifies electrode/solvent atoms without hard-coded species rules.
     for name, values in {"atomic_numbers": atoms.numbers, "positions": atoms.positions,
                          "cell": atoms.cell.array}.items():
         states.create_dataset(name, data=values)
-    return {name: states[name][...] for name in STATE_ARRAYS}
+    return states["pdos_energy_minus_EF"][...], states["pdos"][...]
 
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
@@ -149,7 +147,9 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
             data = {name: handle[name][...] for name in names}
             states = handle.get("states")
             if states is not None and states.attrs.get("projections_available", False):
-                data["states"] = {name: states[name][...] for name in STATE_ARRAYS}
+                if "pdos" not in states:
+                    raise ValueError(f"No projected DOS in {path}; set REUSE_HDF=False")
+                data["pdos"] = states["pdos_energy_minus_EF"][...], states["pdos"][...]
             return data
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
@@ -202,12 +202,12 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         handle.attrs["potential_reference"] = "LOCPOT minus proto LOCPOT"
         if axis is not None:
             handle.attrs["profile_axis"] = axis
-        states = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
+        pdos = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
         for name, values in data.items():
             handle.create_dataset(name, data=values)
     temporary.replace(path)
-    if states is not None:
-        data["states"] = states
+    if pdos is not None:
+        data["pdos"] = pdos
     return data
 
 
@@ -287,9 +287,6 @@ def plugin_forces(outdir, forces):
 def collect_job(outdir):
     path = outdir / "dft_metadata.json"
     meta = json.loads(path.read_text()) if path.is_file() else {}
-    if meta.get("complete") is False:
-        print(f"Skipping {outdir}: dft_runs.py did not complete this run")
-        return None
     plugin = plugin_run(outdir, meta)
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
@@ -370,11 +367,12 @@ def collect_job(outdir):
         atoms.info["config_stress_weight"] = 0.
         atoms.info["config_virials_weight"] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
-    if "states" in data:
-        # Holes below or electrons above EF on water atoms mark its dielectric breakdown.
-        atoms.arrays["vasp_projected_weight_near_EF"] = data["states"]["projected_weight_near_EF"].T
-        for name in STATE_ARRAYS[1:]:
-            atoms.arrays[f"vasp_{name}"] = data["states"][name]
+    if "pdos" in data:
+        # One row per atom, in states/eV rounded to 0.01. As a JSON array in the header this
+        # takes about 6 characters per number; per-atom columns would take 17.
+        energy, pdos = data["pdos"]
+        atoms.info["vasp_pdos_energy_minus_EF"] = np.round(energy, 3)
+        atoms.info["vasp_pdos"] = np.round(np.asarray(pdos, dtype=float), 2)
     if plugin:
         planar = data["planar_electron_density"]
         length = float(atoms.cell[axis] @ normal)
