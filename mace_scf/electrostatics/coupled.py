@@ -7,10 +7,14 @@ states at the Fermi level, fukui its normalized form, which places the charge de
 and bias the field independent potential that the charges respond to besides phi, the
 bias of a MACE-SCF biased linear potential embedding.
 
-CoupledResponse charges follow the local law q_i = dq_dphi_i (bias_i + phi_i - mu) with
-dq_dphi_i = fermi_dos_i of the geometry and one Fermi level mu per cell, which the Fukui
-functions fix to the total charge: the charge goes where the states at the Fermi level
-are, and no part of the cell is held at a charge of its own. The biases are read once,
+CoupledResponse charges follow the two parts of the non-interacting response,
+q_i = dq_dphi_i (bias_i + phi_i - mu) + sum_j g_ij [(bias_i + phi_i) - (bias_j + phi_j)].
+The Fermi surface part exchanges charge with one Fermi level mu per cell, which the Fukui
+functions fix to the total charge, with dq_dphi_i = fermi_dos_i of the geometry: that charge
+goes where the states at the Fermi level are. The interband part moves charge along bonds,
+with a positive, symmetric conductance g_ij of the geometry, so a molecule polarizes along
+its bonds without exchanging charge with the Fermi level, and an insulator may have no
+states there. No part of the cell is held at a charge of its own. The biases are read once,
 at the field of the exact linear solution. Dipoles respond linearly to the field, and
 two local potential amplitudes complete the short-range field as a nonlinear function
 of the evolving deformation field. Every update solves the affine electrostatic block
@@ -34,6 +38,10 @@ from torch.utils.checkpoint import checkpoint
 from .potential import FORM_FACTOR_GRID, CounterCharge, attach_labels, reciprocal_grid
 
 RESPONSE_SCALE = .02
+# Bessel functions of the bond conductance, and its initial offset: an atom's bond conductance
+# then starts comparable to its Fermi level response.
+BOND_BASIS = 8
+BOND_OFFSET = -2.
 # Parameters renamed to the MACE-SCF naming, former name: name.
 RENAMED = {'species_level': 'species_bias', 'dipole_hardness': 'dd_dE_readout', 'common_level': 'fermi_level_readout'}
 
@@ -119,6 +127,12 @@ class CoupledResponse(nn.Module):
         for group in ('_parameters', '_modules'):
             if any(name in state.get(group, ()) for name in RENAMED):
                 state[group] = type(state[group])((RENAMED.get(k, k), v) for k, v in state[group].items())
+        # Models saved before the bond flow have no conductance, which is their own law.
+        parameters = state['_parameters']
+        if 'bond_radial' not in parameters:
+            like = parameters['species_bias']
+            parameters['bond_radial'] = nn.Parameter(like.new_zeros((len(like), len(like), BOND_BASIS)))
+            state['bond_cutoff'], state['bond_offset'] = 3., -math.inf
         super().__setstate__(state)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
@@ -126,10 +140,15 @@ class CoupledResponse(nn.Module):
         for old, new in RENAMED.items():
             for key in [k for k in state_dict if k == prefix+old or k.startswith(prefix+old+'.')]:
                 state_dict[prefix+new+key[len(prefix+old):]] = state_dict.pop(key)
+        # Checkpoints saved before the bond flow load without conductance.
+        if prefix+'bond_radial' not in state_dict:
+            state_dict[prefix+'bond_radial'] = torch.zeros_like(self.bond_radial)
+            self.bond_offset = -math.inf
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
-                 field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
+                 field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, bond_cutoff=3.,
+                 bond_offset=BOND_OFFSET, **kwargs):
         super().__init__()
         irreps = o3.Irreps(node_feats_irreps)
         if o3.Irreps(charges_irreps).dim != 4:
@@ -172,6 +191,11 @@ class CoupledResponse(nn.Module):
         self.local_source_scalar = nn.Linear(width, self.source_channels, bias=False)
         self.local_source_vector = nn.Linear(self.vector_width, self.source_channels, bias=False)
         self.species_source = nn.Parameter(torch.zeros(num_elements, self.source_channels))
+        # The interband bond conductance: a radial function per pair of elements within bond_cutoff.
+        if not 0 < float(bond_cutoff) < math.inf or not math.isfinite(float(bond_offset)):
+            raise ValueError('bond_cutoff must be positive and finite, and bond_offset finite')
+        self.bond_cutoff, self.bond_offset = float(bond_cutoff), float(bond_offset)
+        self.bond_radial = nn.Parameter(torch.zeros(num_elements, num_elements, BOND_BASIS))
         for layer in (self.scalar_out, self.vector_out, self.dd_dE_readout, self.fermi_level_readout,
                       self.local_source_scalar, self.local_source_vector, self.neighbor_scalar,
                       self.neighbor_vector, self.neighbor_divergence, self.neighbor_gradient):
@@ -267,6 +291,32 @@ class CoupledResponse(nn.Module):
         law = torch.cat((_positive(self.dd_dE_readout(hidden)),
                          species_bias[..., None]+initial[..., :1]+p0[..., :1], _positive(initial[..., 1:2])), -1)
         return local, law, species_bias
+
+    def bond_laplacian(self, data, positions, geometry):
+        """The interband response: the Laplacian of the bond conductances, (graphs, size, size).
+
+        g_ij = RESPONSE_SCALE softplus(theta_ZiZj . B(r_ij) + bond_offset) times the smooth MACE
+        envelope on bond_cutoff, with theta symmetric in the elements and B Bessel functions. Each edge adds
+        its conductance to the diagonal of its receiver and subtracts it between the pair, and the
+        reverse edge does the same, so rows sum to zero and charge is conserved.
+        """
+        sender, receiver = data['edge_index']
+        distance = torch.linalg.vector_norm(positions[receiver]-positions[sender]+data['shifts'].to(positions), dim=-1)
+        x = (distance/self.bond_cutoff).clamp(1.e-6, 1.)
+        order = torch.arange(1, self.bond_radial.shape[-1]+1, dtype=x.dtype, device=x.device)
+        basis = torch.sin(math.pi*order*x[:, None])/x[:, None]
+        envelope = (1.-28.*x**6+48.*x**7-21.*x**8)*(distance < self.bond_cutoff)
+        element = data['node_attrs'].argmax(-1)
+        theta = .5*(self.bond_radial+self.bond_radial.transpose(0, 1))
+        conductance = RESPONSE_SCALE*F.softplus((theta[element[receiver], element[sender]]*basis).sum(-1)
+                                                + self.bond_offset)*envelope
+        size, graphs = geometry.size, len(geometry.counts)
+        row = geometry.batch[receiver]*size+geometry.slot[receiver]
+        column = geometry.slot[sender]
+        laplacian = positions.new_zeros((graphs*size, size))
+        laplacian = laplacian.index_put((row, geometry.slot[receiver]), conductance, accumulate=True)
+        laplacian = laplacian.index_put((row, column), -conductance, accumulate=True)
+        return laplacian.reshape(graphs, size, size)
 
     def reference_offsets(self, chemical, vector, local, law, mask, target, transport):
         """The reference [state offsets, dd_dE, bias, fermi_dos] of the geometry law at total charge target.
@@ -480,39 +530,45 @@ def moment_kernels(geometry, kernels, mask, sigma):
     return matrix*present[..., None]*present[:, None, :], completion
 
 
-def screen_factors(response, kernel, mask):
-    """Inverse of the bordered screened moment operator at fixed total charge, and its scaling.
+def response_matrix(response, laplacian):
+    """The response R of the four moments of every atom: dq_dphi and dd_dE on the diagonal and the
+    bond Laplacian between the charges."""
+    graphs, size = laplacian.shape[:2]
+    bonds = laplacian.new_zeros((graphs, size, 4, size, 4))
+    bonds[:, :, 0, :, 0] = laplacian
+    return torch.diag_embed(response)+bonds.reshape(graphs, 4*size, 4*size)
 
-    In coordinates scaled by root = sqrt(R/sum R), R the moment responses, the operator
-    is I + root K root sum R, bordered by the total-charge constraint; dipoles are
-    unconstrained. The live inverse keeps every coordinate, response and higher derivative.
+
+def screen_factors(response, laplacian, kernel, mask):
+    """Inverse of the screened moment operator I + R K, bordered by the total charge, and R.
+
+    The Fermi level enters the charges through the Fukui functions, dq_dphi / sum dq_dphi, so the
+    border stays well scaled, and the bond Laplacian conserves charge, so only the Fermi level
+    term moves the total. Dipoles are unconstrained. The live inverse keeps every derivative.
     """
     present = mask[..., None].expand(-1, -1, 4).flatten(-2)
-    total = response.sum(-1, keepdim=True)
-    root = torch.sqrt(torch.where(present.bool(), response/total, torch.ones_like(response)))*present
-    matrix = kernel*root[..., None]*root[:, None, :]*total[..., None]
-    matrix = matrix+torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device)
-    border = root*torch.cat((mask[..., None], torch.zeros_like(mask[..., None].expand(-1, -1, 3))), -1).flatten(-2)
-    bordered = torch.cat((torch.cat((matrix, border[..., None]), -1),
-                          torch.cat((border, torch.zeros_like(root[:, :1])), -1)[:, None, :]), -2)
+    charge = torch.cat((mask[..., None], torch.zeros_like(mask[..., None].expand(-1, -1, 3))), -1).flatten(-2)
+    matrix = response_matrix(response*present, laplacian*mask[..., None]*mask[:, None, :])
+    operator = torch.eye(matrix.shape[-1], dtype=matrix.dtype, device=matrix.device)+matrix@(kernel*present[..., None])
+    fukui = response*charge/(response*charge).sum(-1, keepdim=True)
+    bordered = torch.cat((torch.cat((operator, fukui[..., None]), -1),
+                          torch.cat((charge, torch.zeros_like(charge[:, :1])), -1)[:, None, :]), -2)
     ensure_cuda_linalg(bordered.device)
     inverse, info = torch.linalg.inv_ex(bordered)
     if not bool(torch.isfinite(inverse).all() & (info == 0).all()):
         raise SCFNumericalError('Singular or nonfinite screened moment operator')
-    return inverse, root
+    return inverse, matrix
 
 
-def screen_action(completion, response, mask, factors):
+def screen_action(completion, factors):
     """The screened moment update as an affine map of the local amplitudes, built once per geometry.
 
     In old+(I-L)^-1 (F(old)-old) the linear moment response L cancels exactly.
     Returns the action on the moment drive and on the amplitudes.
     """
-    inverse, root = factors
-    present = mask[..., None].expand(-1, -1, 4).flatten(-2)
-    divisor = torch.where(present.bool(), root, torch.ones_like(root))
-    action = root[..., None]*inverse[:, :-1, :-1]/divisor[:, None, :]*present[..., None]*present[:, None, :]
-    return action, action@(response[..., None]*completion)
+    inverse, matrix = factors
+    action = inverse[:, :-1, :-1]
+    return action, action@(matrix@completion)
 
 
 def screen_offset(action, factors, bias, reference, fixed, geometry, p0, target, mask, sigma):
@@ -520,11 +576,12 @@ def screen_offset(action, factors, bias, reference, fixed, geometry, p0, target,
 
     The biases, the fixed field, the geometry dipoles and the total charge.
     """
-    inverse, root = factors
+    inverse, matrix = factors
     values, field = sample_spectrum(fixed, geometry)
-    base = torch.cat(((reference[..., -1]*(bias+values[..., 0]))[..., None],
-                      p0[..., 1:4]/sigma+reference[..., 1:4]-reference[..., -3:-2]*sigma*field[..., 0, :]), -1)
-    return (action@(base*mask[..., None]).flatten(1)[..., None]).squeeze(-1)+root*inverse[:, :-1, -1]*target[:, None]
+    drive = torch.cat(((bias+values[..., 0])[..., None], -sigma*field[..., 0, :]), -1)*mask[..., None]
+    static = torch.cat((torch.zeros_like(bias[..., None]), p0[..., 1:4]/sigma+reference[..., 1:4]), -1)*mask[..., None]
+    base = (matrix@drive.flatten(1)[..., None]).squeeze(-1)+static.flatten(1)
+    return (action@base[..., None]).squeeze(-1)+inverse[:, :-1, -1]*target[:, None]
 
 
 def apply_screen_action(amplitudes, mask, target, sources, offset):
@@ -604,8 +661,8 @@ def prepare_coupled(model, data, local):
     source, geometry_law, species_bias = r.prepare_reference(chemical, vector, g.attrs, p0, mask)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, r.density_width)
     response = moment_responses(geometry_law, mask)
-    factors = screen_factors(response, kernel, mask)
-    action, sources = screen_action(completion, response, mask, factors)
+    factors = screen_factors(response, r.bond_laplacian(data, local.positions, g), kernel, mask)
+    action, sources = screen_action(completion, factors)
     fukui = geometry_law[..., -1]*mask
     fukui = fukui/fukui.sum(-1, keepdim=True)
 

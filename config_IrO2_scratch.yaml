@@ -43,6 +43,9 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
   type: CoupledResponse
+  # Interband charge flow along bonds: range (A) and initial conductance offset.
+  bond_cutoff: 3.0
+  bond_offset: -2.0
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
