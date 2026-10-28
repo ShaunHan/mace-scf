@@ -29,9 +29,6 @@ OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
 OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 
-# Presence only: these files mark a charged plug-in run. scripts/dft_runs.py
-# also writes dft_metadata.json, which records a placed counter charge, Q = 0 included.
-PLUGIN_FILES = ("vasp_plugin.py", "plugin_observables.npz", "plugin_scf.csv")
 COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
                          "counter_charge_zfrac")
 # Per-atom PAW projected state weights near EF, copied from the HDF into the XYZ.
@@ -254,6 +251,21 @@ def add_vacuum_target(atoms, planar, axis, correction):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
+def plugin_run(outdir, meta):
+    """Whether a counter-charge plug-in acted in this run.
+
+    scripts/dft_runs.py records it in dft_metadata.json, together with any placed counter
+    charge (Q = 0 included), and installs its proto-potential hook vasp_plugin.py in every
+    run, so that file alone proves nothing. Without metadata, only the plug-in's own output
+    marks a plug-in run, which then lacks the settings it needs.
+    """
+    if "plugin" in meta:
+        return bool(meta["plugin"])
+    if (outdir / "plugin_observables.npz").is_file():
+        raise ValueError(f"Plug-in run without dft_metadata.json: {outdir}")
+    return False
+
+
 def plugin_forces(outdir, forces):
     """Forces of a plug-in run with the net force of its counter charge, in VASP's atom order.
 
@@ -273,6 +285,12 @@ def plugin_forces(outdir, forces):
 
 
 def collect_job(outdir):
+    path = outdir / "dft_metadata.json"
+    meta = json.loads(path.read_text()) if path.is_file() else {}
+    if meta.get("complete") is False:
+        print(f"Skipping {outdir}: dft_runs.py did not complete this run")
+        return None
+    plugin = plugin_run(outdir, meta)
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
     kpoints = atoms.calc.kpts
@@ -280,7 +298,6 @@ def collect_job(outdir):
     energy = atoms.get_potential_energy(force_consistent=True)
     if not np.isfinite(forces).all() or not np.isfinite(energy):
         raise ValueError(f"Nonfinite energy/forces: {outdir}")
-    plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
     # Without a plug-in there is no external source, and both force sets agree.
     forces_with_net_force = plugin_forces(outdir, forces) if plugin else forces
     if max(np.linalg.norm(f, axis=1).max() for f in (forces, forces_with_net_force)) > FMAX_TOL:
@@ -296,8 +313,6 @@ def collect_job(outdir):
     text = (outdir / "OUTCAR").read_text(errors="replace")
     converged = "EDIFF is reached" in text.rsplit("Iteration", 1)[-1]
 
-    path = outdir / "dft_metadata.json"
-    meta = json.loads(path.read_text()) if path.is_file() else {}
     counter = -charge if plugin else 0.0
     slab = plugin or bool(parameters["ldipol"])
     axis = meta["slab_axis"] if plugin else (int(parameters["idipol"]) - 1 if slab else None)
