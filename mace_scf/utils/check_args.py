@@ -212,7 +212,7 @@ def fill_fixed_point_update_config(args):
         if not isinstance(args.fixed_point_update_config, dict) or 'type' not in args.fixed_point_update_config:
             raise ValueError('fixed_point_update_config must be a mapping containing type')
 
-    if args.fixed_point_update_config['type'] == 'CoupledResponse':
+    if args.fixed_point_update_config['type'] in ('CoupledResponse', 'ChargeFlowResponse'):
         args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
                                                   getattr(args, 'potential_amplitudes_smearing_width', 1.5))
 
