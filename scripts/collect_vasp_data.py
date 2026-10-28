@@ -14,11 +14,11 @@ CHUNK_SIZE = 5
 N_PROCS = 64
 REUSE_HDF = False
 K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
-XYZ_K_CUTOFF = 2.3084  # XYZ bandwidth (1/A): 1.25 times the model k-space cutoff at a 1.5 A density width.
-COLLECT_DENSITY, COLLECT_POTENTIAL = True, True
-PROTO_K_CUTOFF = None  # XYZ bandwidth of vasp_proto_phi (1/A); None keeps XYZ_K_CUTOFF. Raise it to
-# 3.5/width for counter-charge sheets narrower than 3.5/XYZ_K_CUTOFF.
+FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
+DENSITY_SIGMAS = [1.5]
+POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 6.0
+PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a uniform net force.
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
 SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
@@ -34,6 +34,8 @@ OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 PLUGIN_FILES = ("vasp_plugin.py", "plugin_observables.npz", "plugin_scf.csv")
 COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
                          "counter_charge_zfrac")
+# Per-atom PAW projected state weights near EF, copied from the HDF into the XYZ.
+STATE_ARRAYS = ("projected_weight_near_EF", "empty_weight_below_EF", "occupied_weight_above_EF")
 
 
 def get_output_dirs():
@@ -72,9 +74,12 @@ def truncate_fft(coefficients, shape):
 
 
 def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
-    """Small band arrays plus per-atom summaries; no full DOS/projection export."""
+    """Small band arrays plus per-atom summaries; no full DOS/projection export.
+
+    Returns the per-atom STATE_ARRAYS, or None without projections in vaspout.h5.
+    """
     if not kpoints:
-        return
+        return None
     states = handle.create_group("states")
     spinor = parameters.get("lnoncollinear", False) or parameters.get("lsorbit", False)
     occupations = [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints]
@@ -88,10 +93,10 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
     states.attrs["projections_available"] = False
     path = outdir / "vaspout.h5"
     if not path.is_file():
-        return  # Do not rescan large PROCAR/XML files for optional projections.
+        return None  # Do not rescan large PROCAR/XML files for optional projections.
     with h5py.File(path, "r") as source:
         if "results/projectors/par" not in source:
-            return
+            return None
         projected = source["results/projectors/par"]
         if projected.shape[1] != len(atoms):
             raise ValueError(f"Projection atom count mismatch: {path}")
@@ -100,8 +105,8 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
         empty, occupied = np.zeros((2, len(atoms)))
         capacity = 1.0 if spinor or parameters.get("ispin", 1) == 2 else 2.0
         for row, k in enumerate(kpoints):
+            # ASE numbers k-points from 1 and reads the XML table rounded to four decimal places.
             saved = source["results/electron_eigenvalues/eigenvalues"][k.s, k.k - 1]
-            # ASE reads the XML table rounded to four decimal places.
             if not np.allclose(saved, k.eps_n, rtol=0, atol=5.1e-5):
                 raise ValueError(f"Projection eigenvalues do not match this VASP run: {path}")
             energy = saved - atoms.info["vasp_efermi"]
@@ -125,12 +130,13 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
     for name, values in {"atomic_numbers": atoms.numbers, "positions": atoms.positions,
                          "cell": atoms.cell.array}.items():
         states.create_dataset(name, data=values)
+    return {name: states[name][...] for name in STATE_ARRAYS}
 
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
     """Cache unsmoothed Fourier grids; widths and vacuum sampling remain editable."""
-    names = ["fourier_density"] if COLLECT_DENSITY else []
-    if COLLECT_POTENTIAL:
+    names = ["fourier_density"] if DENSITY_SIGMAS else []
+    if POTENTIAL_SIGMAS:
         names += ["fourier_potential", "fourier_proto_potential"]
         if axis is not None:
             names += ["planar_potential"]
@@ -143,11 +149,15 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         with h5py.File(path, "r") as handle:
             if handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
-            return {name: handle[name][...] for name in names}
+            data = {name: handle[name][...] for name in names}
+            states = handle.get("states")
+            if states is not None and states.attrs.get("projections_available", False):
+                data["states"] = {name: states[name][...] for name in STATE_ARRAYS}
+            return data
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     data = {}
-    if COLLECT_DENSITY:
+    if DENSITY_SIGMAS:
         density = read_grid(outdir / "AECCAR1", atoms, Chgcar)
         final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
         if density.shape != final_density.shape:
@@ -163,7 +173,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         # Only plugin runs need this extra grid, to recover their physical dipole.
         data["planar_electron_density"] = read_grid(outdir / "CHGCAR", atoms, Chgcar).mean(
             axis=tuple(i for i in range(3) if i != axis)) / atoms.get_volume()
-    if COLLECT_POTENTIAL:
+    if POTENTIAL_SIGMAS:
         if not parameters["lvhar"]:
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
         potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
@@ -195,16 +205,24 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         handle.attrs["potential_reference"] = "LOCPOT minus proto LOCPOT"
         if axis is not None:
             handle.attrs["profile_axis"] = axis
-        add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
+        states = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
         for name, values in data.items():
             handle.create_dataset(name, data=values)
     temporary.replace(path)
+    if states is not None:
+        data["states"] = states
     return data
 
 
-def add_fourier_targets(atoms, coefficients, prefix, charge=None, cutoff=None):
+def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     """Compact, unsmoothed XYZ targets; higher-frequency data stay in the HDF."""
-    cutoff = cutoff or XYZ_K_CUTOFF
+    # The widths set the bandwidth only; they apply no Gaussian filter. The model's k-space
+    # cutoff is 0.75 * 3.0 * (max_l + 1)**0.3 / sigma (graph_longrange gto_basis_kspace_cutoff,
+    # max_l = 1), and the targets keep FOURIER_CUTOFF_FACTOR times it.
+    sigma = float(min(sigmas))
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("Fourier widths must be positive and finite")
+    cutoff = FOURIER_CUTOFF_FACTOR * 0.75 * 3.0 * 2**0.3 / sigma
     shape = 2 * np.ceil(cutoff * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     if cutoff > K_CUTOFF or np.any(shape > coefficients.shape):
         raise ValueError("XYZ Fourier bandwidth exceeds the HDF/VASP grid; increase its resolution")
@@ -236,6 +254,24 @@ def add_vacuum_target(atoms, planar, axis, correction):
     atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
 
 
+def plugin_forces(outdir, forces):
+    """Forces of a plug-in run with the net force of its counter charge, in VASP's atom order.
+
+    VASP removes the net force from the forces it writes. A fixed counter charge exerts a
+    real one, which the plug-in keeps as expected_forces; the two sets may differ only by it.
+    """
+    with np.load(outdir / "plugin_observables.npz") as observables:
+        if "expected_forces" not in observables:
+            raise ValueError(f"Plug-in run without its forces: {outdir}")
+        full = np.asarray(observables["expected_forces"], dtype=float)
+    if full.shape != forces.shape or not np.isfinite(full).all():
+        raise ValueError(f"Invalid plug-in forces: {outdir}")
+    difference = full - forces
+    if np.abs(difference - difference.mean(0)).max() > PLUGIN_FORCE_TOL:
+        raise ValueError(f"Plug-in and VASP forces differ by more than a net force: {outdir}")
+    return full
+
+
 def collect_job(outdir):
     atoms = read(str(outdir / "vasprun.xml"), format="vasp-xml", index=-1)
     parameters = atoms.calc.parameters
@@ -244,7 +280,10 @@ def collect_job(outdir):
     energy = atoms.get_potential_energy(force_consistent=True)
     if not np.isfinite(forces).all() or not np.isfinite(energy):
         raise ValueError(f"Nonfinite energy/forces: {outdir}")
-    if np.linalg.norm(forces, axis=1).max() > FMAX_TOL:
+    plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
+    # Without a plug-in there is no external source, and both force sets agree.
+    forces_with_net_force = plugin_forces(outdir, forces) if plugin else forces
+    if max(np.linalg.norm(f, axis=1).max() for f in (forces, forces_with_net_force)) > FMAX_TOL:
         print(f"Skipping {outdir}: force exceeds FMAX_TOL")
         return None
 
@@ -257,7 +296,6 @@ def collect_job(outdir):
     text = (outdir / "OUTCAR").read_text(errors="replace")
     converged = "EDIFF is reached" in text.rsplit("Iteration", 1)[-1]
 
-    plugin = any((outdir / name).is_file() for name in PLUGIN_FILES)
     path = outdir / "dft_metadata.json"
     meta = json.loads(path.read_text()) if path.is_file() else {}
     counter = -charge if plugin else 0.0
@@ -290,6 +328,7 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
+    atoms.arrays["vasp_forces_with_net_force"] = forces_with_net_force
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),
@@ -301,7 +340,7 @@ def collect_job(outdir):
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
         "config_fermi_level_weight": float(slab),
-        "config_vacuum_potential_weight": float(slab and COLLECT_POTENTIAL),
+        "config_vacuum_potential_weight": float(slab and bool(POTENTIAL_SIGMAS)),
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
@@ -316,6 +355,11 @@ def collect_job(outdir):
         atoms.info["config_stress_weight"] = 0.
         atoms.info["config_virials_weight"] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
+    if "states" in data:
+        # Holes below or electrons above EF on water atoms mark its dielectric breakdown.
+        atoms.arrays["vasp_projected_weight_near_EF"] = data["states"]["projected_weight_near_EF"].T
+        for name in STATE_ARRAYS[1:]:
+            atoms.arrays[f"vasp_{name}"] = data["states"][name]
     if plugin:
         planar = data["planar_electron_density"]
         length = float(atoms.cell[axis] @ normal)
@@ -326,15 +370,14 @@ def collect_job(outdir):
         valences = [outcar.zval_dict[s] for s in atoms.get_chemical_symbols()]
         moment = np.dot(valences, ion_z) - atoms.get_volume() * np.mean(planar * z)
         atoms.info["vasp_dipole"] = float(moment) * normal
-    if COLLECT_DENSITY:
-        add_fourier_targets(atoms, data["fourier_density"], "vasp_rho", charge)
-    if COLLECT_POTENTIAL:
+    if DENSITY_SIGMAS:
+        add_fourier_targets(atoms, data["fourier_density"], DENSITY_SIGMAS, "vasp_rho", charge)
+    if POTENTIAL_SIGMAS:
         if slab:
             add_vacuum_target(atoms, data["planar_potential"], axis, correction)
-        add_fourier_targets(atoms, data["fourier_potential"], "vasp_phi")
+        add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
-        add_fourier_targets(atoms, data["fourier_proto_potential"], "vasp_proto_phi",
-                            cutoff=PROTO_K_CUTOFF)
+        add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name
 
