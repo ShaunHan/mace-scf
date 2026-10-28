@@ -155,6 +155,17 @@ fixed_point_update_config:
 Models of `CoupledResponse` keep their law. Train a `ChargeFlowResponse` from the
 foundation model, since its conductance head is new.
 
+### Counter Charge at Linear Response
+
+Both MACE-VOLT response types read the network at the net charge of the cell,
+`Q + Q_cc`, without the Gaussian counter charge. Moving charge between the counter
+charge and the electrode at fixed net charge then acts through the exact screened
+response with every network output held. Along `Q_cc = -Q`, the direction of the
+thermopotentiostat, the energy at fixed geometry is a convex quadratic, the cell
+voltage rises linearly with Q, and every target has exactly one stable charge. Cells
+without a counter charge are unchanged, Fermi level included, so trained models keep
+their predictions.
+
 ### Number of SCF Steps
 
 `num_scf_steps` is the maximum number of update steps. It is not a guarantee
