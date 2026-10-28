@@ -227,17 +227,25 @@ def simulate(source, index, replica, model_file, model_sha, directory):
     from mace_scf.md import NVTPhiLangevin
     atoms, fixed, mobile, wall, pair, kind = prepare(source, index)
     stages = make_stages(atoms.get_distance(*pair, mic=True))
+    # What a resumed run must share with its start: the physics, not the text of this file.
     identity = dict(settings={k: globals()[k] for k in PHYSICAL}, model_sha256=model_sha, replica=replica,
-                    driver_sha256=sha256(__file__), pair=pair, fixed=fixed, wall_A=wall, stages=stages,
+                    pair=pair, fixed=fixed, wall_A=wall, stages=stages,
                     initial=dict(numbers=atoms.numbers, positions=atoms.positions, cell=atoms.cell.array,
                                  info=atoms.info))
-    run_id = hashlib.sha256(json.dumps(identity, sort_keys=True, default=plain).encode()).hexdigest()
+
+    def canonical(value):
+        return json.dumps(value, sort_keys=True, default=plain)
+    run_id = hashlib.sha256(canonical(identity).encode()).hexdigest()
     config, traj_path, csv_path = (directory/name for name in ('run.json', 'md.traj', 'md.csv'))
     rng = np.random.default_rng(np.random.SeedSequence([SEED, index, replica]))
     state = None
     if config.exists():
-        if json.loads(config.read_text()).get('run_id') != run_id:
-            raise ValueError('Source, model or settings differ from this run; use a fresh output folder')
+        stored = json.loads(config.read_text())
+        changed = [key for key in identity if canonical(stored.get(key)) != canonical(identity[key])]
+        if changed:
+            raise ValueError(f'{", ".join(changed)} differ from this run; use a fresh output folder')
+        print(f'Resuming with driver {sha256(__file__)[:12]}, started with {stored.get("driver_sha256", "?")[:12]}',
+              flush=True)
         if traj_path.exists():
             with Trajectory(traj_path) as previous:
                 if len(previous):
@@ -246,7 +254,8 @@ def simulate(source, index, replica, model_file, model_sha, directory):
     elif traj_path.exists() or csv_path.exists():
         raise ValueError('Output exists without run.json; refusing to overwrite')
     else:
-        write_json(config, dict(identity, run_id=run_id, pair_kind=kind, model_file=str(model_file)))
+        write_json(config, dict(identity, run_id=run_id, driver_sha256=sha256(__file__), pair_kind=kind,
+                                model_file=str(model_file)))
     stage_id, done = (0, 0) if state is None else (state['stage'], state['done'])
     if state is not None:
         rng.bit_generator.state = state['rng']
