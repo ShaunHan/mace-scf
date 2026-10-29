@@ -133,9 +133,13 @@ class FixedPointWrapper:
             response = model.field_dependent_charges_map
             if getattr(response, "coupled", False):
                 from mace_scf.electrostatics.coupled import evaluate_coupled
+                if self.mode == "direct":
+                    return self._forward_direct_coupled(model, batch_dict, training, response, evaluate_coupled)
                 if self.mode not in ("unroll_scf", "shortcut_scf") or not self.scf_options.constant_charge:
-                    raise ValueError("CoupledResponse trains with unroll_scf or shortcut_scf at constant charge")
+                    raise ValueError("CoupledResponse trains with direct, unroll_scf or shortcut_scf "
+                                     "at constant charge")
                 # Validation runs the trajectory of training, and the model deploys that of its last stage.
+                response.deployment_direct = False
                 response.deployment_mixing.fill_(self.scf_options.mixing_parameter)
                 response.deployment_steps.fill_(int(self.scf_options.num_scf_steps))
                 response.deployment_tolerance = float(self.scf_options.scf_tolerance)
@@ -171,6 +175,27 @@ class FixedPointWrapper:
                 return self._forward_implicit(model, batch_dict, training)
             elif self.mode == "linearize_solve":
                 return self._forward_linearize_solve(model, batch_dict, training)
+
+    def _forward_direct_coupled(self, model, batch_dict, training, response, evaluate_coupled):
+        """The coupled response in one shot: amplitudes read once at the field of the exact linear solution.
+
+        The multipoles follow them exactly, with the linear law of the model, so a model with the
+        nonlinear multipole update cannot train here. The model then deploys the same way.
+        """
+        # A ChargeFlowResponse has no law for the flag to read.
+        if bool(response.include_nonlinear_multipole_update) and not getattr(response, "flows", False):
+            raise ValueError("mode='direct' needs the linear multipole update: set "
+                             "include_nonlinear_multipole_update: false in every stage with an scf block")
+        response.deployment_direct = True
+        if not getattr(self, "_logged_coupled", False):
+            logging.info("%s mode=direct: the local amplitudes are read once at the field of the exact linear "
+                         "solution, and the multipoles follow them exactly; no SCF updates in training, "
+                         "validation and deployment", type(response).__name__)
+            self._logged_coupled = True
+        return evaluate_coupled(model, batch_dict, training=training,
+                                compute_force=self.output_args.get("forces", False),
+                                compute_stress=self.output_args.get("stress", False)
+                                or self.output_args.get("virials", False), mode="direct")
 
     def _forward_direct(self, model, batch_dict, training):
         local_state = model.local_part(

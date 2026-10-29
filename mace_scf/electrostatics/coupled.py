@@ -119,6 +119,8 @@ class CoupledResponse(nn.Module):
     include_nonlinear_multipole_update = False
     # The scf_tolerance of the last training stage; models saved without it take the calculator's.
     deployment_tolerance = None
+    # True when the last training stage was direct: the model then deploys without SCF updates.
+    deployment_direct = False
 
     def __setstate__(self, state):
         # Models saved as atomic_multipole_update='linear' or 'nonlinear' keep their update.
@@ -336,11 +338,13 @@ class ChargeFlowResponse(CoupledResponse):
     d_i = d0_i + dd_dE_i E_i. A flow leaves one atom and enters the other, so the charge of
     a group of atoms changes only through the bonds that leave it: molecules need no list
     and no charge constraint, and a bond that forms or breaks passes charge smoothly.
-    bias, c, dd_dE, fukui and d0 come from the geometry and Q, never from the field. In a
-    conductor the potential follows the biases one to one, so a bias read from the field
-    would feed its own input back with gain one. The multipoles are therefore an exact
-    affine map of the local amplitudes, solved once per batch, and the updates iterate
-    only the amplitudes, which the network reads from the field. fermi_dos, the local
+    c, dd_dE, fukui and d0 come from the geometry and Q. The biases are read once, at the
+    field of the exact linear solution with the biases of the geometry, and then held, as
+    in CoupledResponse: read at every update they would feed their own input back with
+    gain one, since in a conductor the potential follows the biases one to one. The
+    multipoles are therefore an exact affine map of the local amplitudes, solved once per
+    batch, and the updates iterate only the amplitudes, which the network reads from the
+    field. fermi_dos, the local
     density of states at the Fermi level that fukui normalizes, also gives the charging
     energy. include_nonlinear_multipole_update does not apply.
     """
@@ -392,6 +396,12 @@ class ChargeFlowResponse(CoupledResponse):
         raw = torch.cat((scalar[..., 2:], polar[..., 1:, :].flatten(-2)), -1)
         offset = torch.cat((torch.zeros_like(local[..., :1]), polar[..., 0, :], local-raw), -1)*mask[..., None]
         return torch.cat((offset, centering), -1), species_bias+scalar[..., 0], polar[..., 0, :]
+
+    def flow_biases(self, chemical, vector, potential, field, mask, centering, target, transport, species_bias):
+        """The biases of the flows, read from the environment at one sampled field; at zero field those of the geometry."""
+        invariants, _ = self._invariants(chemical, vector, potential, field, mask, centering[..., -2:], target,
+                                         transport)
+        return species_bias+self.scalar_out(self.shared(invariants))[..., 0]
 
 
 class CoupledGeometry:
@@ -753,7 +763,8 @@ def flow_solve(r, g, chemical, vector, transport, source, geometry_law, species_
     The response holds dq_dphi, the bond Laplacian, for the charges and dd_dE for the
     dipoles, and I + response K is inverted once per batch. No Fermi level is solved
     for: flows conserve charge, and the Fukui functions place the charge deficit of the
-    MACE charges. members is ignored.
+    MACE charges. The biases are read once, at the field of the exact solution with the
+    biases of the geometry, and held. members is ignored.
     """
     sigma, size, graphs = r.density_width, mask.shape[-1], mask.shape[0]
     fermi_dos = geometry_law[..., -1]*mask
@@ -780,15 +791,19 @@ def flow_solve(r, g, chemical, vector, transport, source, geometry_law, species_
         reference, bias, dipole = r.zero_field_outputs(chemical, vector, source, centering, mask, net, transport,
                                                        species_bias)
 
-        def offset_at(total, fixed):
-            """The exact flows and dipoles at total charge total in the fixed field."""
+        def offset_at(total, fixed, level):
+            """The exact flows and dipoles at total charge total in the fixed field, with the biases level."""
             charge_deficit = total-(p0[..., 0]*mask).sum(-1)
             charge = p0[..., 0]+fukui*charge_deficit[:, None]
             base = torch.cat((charge[..., None], p0[..., 1:4]/sigma+dipole), -1)*mask[..., None]
-            drive = fixed+torch.cat((bias[..., None], torch.zeros_like(dipole)), -1)*mask[..., None]
+            drive = fixed+torch.cat((level[..., None], torch.zeros_like(dipole)), -1)*mask[..., None]
             rhs = base.flatten(1)+(response@drive.flatten(1)[..., None]).squeeze(-1)
             return (inverse@rhs[..., None]).squeeze(-1)
-        offset = offset_at(net, applied(g.fixed[0]))
+        # The biases read once, at the field of the exact solution with the biases of the geometry.
+        linear = apply_screen_action(source, mask, net, sources, offset_at(net, applied(g.fixed[0]), bias))
+        potential, field = sample_spectrum(total_spectrum(linear, g.tensors, g.kernels, sigma, g.fixed[0]), g.tensors)
+        bias = r.flow_biases(chemical, vector, potential, field, mask, centering, net, transport, species_bias)
+        offset = offset_at(net, applied(g.fixed[0]), bias)
 
         def update(z, observe=False):
             potential, field = sample_spectrum(total_spectrum(z, g.tensors, g.kernels, sigma, g.fixed[0]), g.tensors)
@@ -801,7 +816,7 @@ def flow_solve(r, g, chemical, vector, transport, source, geometry_law, species_
             return proposal, potential, fermi_dos.sum(-1), fermi
         # The counter charge at exact linear response, the same at any amplitudes; zero without one.
         empty = torch.zeros_like(source)
-        shift = (apply_screen_action(empty, mask, target, sources, offset_at(target, applied(g.fixed[1])))
+        shift = (apply_screen_action(empty, mask, target, sources, offset_at(target, applied(g.fixed[1]), bias))
                  - apply_screen_action(empty, mask, net, sources, offset))
         # The seed: the exact multipoles at the net charge and the baseline amplitudes.
         return apply_screen_action(source, mask, net, sources, offset), update, shift
@@ -923,7 +938,7 @@ def prepare_coupled(model, data, local):
 
 
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, compute_stress=False,
-                     mode='unroll_scf', mixing=None, stability=False, tolerance=None):
+                     mode=None, mixing=None, stability=False, tolerance=None):
     """One electronic trajectory, one scalar energy and its derivatives.
 
     The energy is the DFT free energy at fixed total charge Q, counter charge
@@ -942,11 +957,24 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     MACE-SCF linear mixing. With a positive tolerance, steps is the maximum number of
     updates, and the solve stops once the largest change of the state in one update falls
     below tolerance (scf_steps).
+
+    mode='direct' makes one update from the exact linear solution: the network reads the
+    local amplitudes once at its field, and the multipoles follow them exactly. The amplitudes
+    complete the potential at the atoms, so the network predicts them in one shot instead of
+    iterating them. Nothing is mixed or converged: steps, mixing and tolerance are unused,
+    scf_steps is 1 and scf_residual 0. Without a mode, a model evaluates as it was trained
+    in its last stage (deployment_direct).
     """
     r = model.field_dependent_charges_map
+    if mode is None:
+        mode = 'direct' if getattr(r, 'deployment_direct', False) else 'unroll_scf'
+    direct = mode == 'direct'
     mixing = float(r.deployment_mixing) if mixing is None else float(mixing)
-    if mode not in ('unroll_scf', 'shortcut_scf') or int(steps) < 1 or not 0 < mixing <= 1:
+    if mode not in ('direct', 'unroll_scf', 'shortcut_scf') or (not direct and (int(steps) < 1
+                                                                              or not 0 < mixing <= 1)):
         raise ValueError('Invalid coupled SCF mode, step count or mixing')
+    if direct and stability:
+        raise ValueError('The direct mode has no fixed point to probe: drop fixedpoint_scf_stability')
     checkpointed, outer_grad = training and mode == 'shortcut_scf', torch.is_grad_enabled()
     with torch.enable_grad():
         data = dict(data)
@@ -971,9 +999,15 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         q = charge.reshape(-1).to(g.volume)
         members = None if getattr(r, 'flows', False) else electrolyte_molecules(model, data, local.positions)
         initial, update, shift = solve(q, members)
-        state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
-        proposal, potential, total_response, fermi = update(state, observe=True)
-        residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
+        if direct:
+            # One update from the exact linear solution, read once; the Fermi level readout comes
+            # from the hidden features of that same read.
+            state, potential, total_response, fermi = update(initial, observe=True)
+            residual, taken = torch.zeros_like(g.volume), 1
+        else:
+            state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
+            proposal, potential, total_response, fermi = update(state, observe=True)
+            residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
         probe = None
         if stability:
             # Finite difference along a random direction; a gain above one marks a map that swings.

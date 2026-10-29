@@ -222,17 +222,22 @@ def build_model(
         from mace_scf.electrostatics.coupled import initialize_coupled
         from mace_scf.electrostatics.potential import install_neutral_atoms
         from mace_scf.utils.foundation import condition_readouts
-        first = args.train_schedule[0]["fixed_point_training_options"].scf
-        response.deployment_mixing.fill_(first.mixing_parameter)
-        response.deployment_steps.fill_(int(first.num_scf_steps))
-        response.deployment_tolerance = float(first.scf_tolerance)
+        stages = [stage["fixed_point_training_options"] for stage in args.train_schedule]
+        first = stages[0].scf
+        # A direct stage has no SCF block; the model then deploys without SCF updates.
+        response.deployment_direct = stages[0].mode == "direct"
+        if first is not None:
+            response.deployment_mixing.fill_(first.mixing_parameter)
+            response.deployment_steps.fill_(int(first.num_scf_steps))
+            response.deployment_tolerance = float(first.scf_tolerance)
         # The multipole update belongs to the model: one choice for every stage and for deployment.
-        options = [stage["fixed_point_training_options"].scf for stage in args.train_schedule]
-        updates = {option.include_nonlinear_multipole_update for option in options if option is not None}
+        # A direct stage reads the amplitudes once with the linear law.
+        updates = {stage.scf.include_nonlinear_multipole_update for stage in stages if stage.scf is not None}
+        updates |= {False} if any(stage.mode == "direct" for stage in stages) else set()
         if len(updates) != 1:
             raise ValueError("fixed_point_training_options.scf.include_nonlinear_multipole_update differs between "
-                             "stages")
-        response.include_nonlinear_multipole_update = first.include_nonlinear_multipole_update
+                             "stages, or a direct stage meets the nonlinear update")
+        response.include_nonlinear_multipole_update = updates.pop()
         # A fresh electronic response starts at the foundation local E/F.
         # Its moment readouts remain trainable, in the correct species basis.
         with torch.no_grad():
