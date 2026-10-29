@@ -226,6 +226,13 @@ def build_model(
         response.deployment_mixing.fill_(first.mixing_parameter)
         response.deployment_steps.fill_(int(first.num_scf_steps))
         response.deployment_tolerance = float(first.scf_tolerance)
+        # The multipole update belongs to the model: one choice for every stage and for deployment.
+        options = [stage["fixed_point_training_options"].scf for stage in args.train_schedule]
+        updates = {option.include_nonlinear_multipole_update for option in options if option is not None}
+        if len(updates) != 1:
+            raise ValueError("fixed_point_training_options.scf.include_nonlinear_multipole_update differs between "
+                             "stages")
+        response.include_nonlinear_multipole_update = first.include_nonlinear_multipole_update
         # A fresh electronic response starts at the foundation local E/F.
         # Its moment readouts remain trainable, in the correct species basis.
         with torch.no_grad():

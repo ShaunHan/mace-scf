@@ -51,9 +51,6 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
   type: CoupledResponse
-  # Interband charge flow along bonds: range (A) and initial conductance offset.
-  bond_cutoff: 3.0
-  bond_offset: -2.0
 potential_amplitudes_smearing_width: 1.5
 batch_size: 8
 valid_batch_size: 8
@@ -114,6 +111,7 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 8
+        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -142,6 +140,7 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 8
+        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -169,6 +168,7 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 12
+        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -196,6 +196,7 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 20
+        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
@@ -223,6 +224,7 @@ train_schedule:
       mode: unroll_scf
       scf:
         num_scf_steps: 50
+        include_nonlinear_multipole_update: false
         constant_charge: true
         mixing_parameter: 0.5
         initial_density: local_guess
