@@ -37,8 +37,17 @@ from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
 from .potential import FORM_FACTOR_GRID, CounterCharge, attach_labels, reciprocal_grid
+from .reservoir import D_BLOCK
 
 RESPONSE_SCALE = .02
+# The response priors by element (install_species): fermi_dos and the conductances start at response_scale
+# on the d block and its bonds, the local density of states at the Fermi level of a metal atom, at
+# INSULATOR_FRACTION of it on the other elements and at COVALENT_FRACTION of it on their bonds.
+INSULATOR_FRACTION, COVALENT_FRACTION = 1.e-3, .03
+# The covalent bond envelope is one up to ENVELOPE_START of the reach of a pair and falls to zero at the reach.
+ENVELOPE_START = .75
+# An atom this close to a d-block atom belongs to the electrode in the diagnostics (describe_law).
+METAL_DISTANCE = 2.3
 # Parameters renamed to the MACE-SCF naming, former name: name.
 RENAMED = {'species_level': 'species_bias', 'dipole_hardness': 'dd_dE_readout', 'common_level': 'fermi_level_readout'}
 
@@ -128,6 +137,8 @@ class CoupledResponse(nn.Module):
     # Models saved before response_scale take fermi_dos and the conductances as softplus at RESPONSE_SCALE.
     log_response = False
     response_scale = RESPONSE_SCALE
+    # Models saved before response_priors start every response readout at zero.
+    response_priors = False
 
     def __setstate__(self, state):
         # Models saved as atomic_multipole_update='linear' or 'nonlinear' keep their update.
@@ -147,8 +158,10 @@ class CoupledResponse(nn.Module):
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def __init__(self, node_feats_irreps, charges_irreps, num_elements, density_width=1.5,
-                 field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, **kwargs):
+                 field_widths=(1.5, 3.), potential_amplitudes_smearing_width=1.5, width=64, response_priors=False,
+                 **kwargs):
         super().__init__()
+        self.response_priors = bool(response_priors)
         irreps = o3.Irreps(node_feats_irreps)
         if o3.Irreps(charges_irreps).dim != 4:
             raise ValueError('CoupledResponse uses monopoles and dipoles (atomic_multipoles_max_l=1)')
@@ -175,6 +188,8 @@ class CoupledResponse(nn.Module):
                                     nn.Linear(width, width), nn.SiLU())
         self.vector_out = nn.Linear(width, (1+self.source_channels)*self.vector_basis_size)
         self.species_bias = nn.Parameter(torch.zeros(num_elements))
+        # log fermi_dos by element over response_scale at a zero readout (install_species).
+        self.species_response = nn.Parameter(torch.zeros(num_elements))
         self.scalar_out = nn.Linear(width, 2+self.source_channels)
         self.dd_dE_readout = nn.Linear(width, 1)
         self.state_scalar = nn.Linear(self.field_channels, width, bias=False)
@@ -216,6 +231,32 @@ class CoupledResponse(nn.Module):
         if getattr(self, 'log_response', False):
             return self.response_scale*torch.exp(x.clamp(-12., 4.))
         return _positive(x)
+
+    def install_species(self, atomic_numbers):
+        """The priors of the response by element, from the atomic numbers of the model (response_priors).
+
+        fermi_dos starts at response_scale on the d block, the local density of states at the Fermi level
+        of a metal atom, and at INSULATOR_FRACTION of it on every other element. A flow response starts
+        its conductances at response_scale on the bonds with a d-block atom and at COVALENT_FRACTION of it
+        on the others, and takes the covalent radii of its bond envelope. The network moves every response
+        from there by decades on the log scale. Without response_priors nothing is installed.
+        """
+        if not getattr(self, 'response_priors', False):
+            return
+        from ase.data import covalent_radii
+        if not getattr(self, 'log_response', False):
+            raise ValueError('response_priors need the log scale of response_scale')
+        numbers = [int(z) for z in atomic_numbers]
+        metal = torch.tensor([z in D_BLOCK for z in numbers])
+        with torch.no_grad():
+            self.species_response.copy_(torch.where(metal, 0., math.log(INSULATOR_FRACTION)).to(self.species_response))
+            if hasattr(self, 'pair_response'):
+                bonded = metal[:, None] | metal[None, :]
+                self.pair_response.copy_(torch.where(bonded, 0., math.log(COVALENT_FRACTION)).to(self.pair_response))
+                radii = torch.tensor([float(covalent_radii[z]) for z in numbers])
+                self.covalent_radii.copy_(radii.to(self.covalent_radii))
+                if self.bond_envelope == 'covalent' and 2*self.bond_reach*float(radii.max()) > self.flow_cutoff:
+                    raise ValueError('flow_cutoff must reach bond_reach times the largest pair of covalent radii')
 
     def farfield_filter(self, k2):
         """Extra smoothing of the density to the far-field reference width."""
@@ -293,8 +334,11 @@ class CoupledResponse(nn.Module):
         local = torch.cat((attrs@self.species_source+self.local_source_scalar(hidden),
                            self.local_source_vector(vector.transpose(-1, -2)).transpose(-1, -2).flatten(-2)),
                           -1)*mask[..., None]
+        readout = initial[..., 1:2]
+        if getattr(self, 'response_priors', False):
+            readout = readout+(attrs@self.species_response)[..., None]
         law = torch.cat((_positive(self.dd_dE_readout(hidden)),
-                         species_bias[..., None]+initial[..., :1]+p0[..., :1], self.charge_response(initial[..., 1:2])), -1)
+                         species_bias[..., None]+initial[..., :1]+p0[..., :1], self.charge_response(readout)), -1)
         return local, law, species_bias
 
     def reference_offsets(self, chemical, vector, local, law, mask, target, transport):
@@ -367,37 +411,69 @@ class ChargeFlowResponse(CoupledResponse):
     energy. include_nonlinear_multipole_update does not apply.
     """
     flows = True
+    # Models saved before bond_envelope conduct along every pair closer than flow_cutoff.
+    bond_envelope = 'cutoff'
+    bond_reach = 1.35
 
-    def __init__(self, *args, flow_cutoff=4., **kwargs):
+    def __init__(self, *args, flow_cutoff=4., bond_envelope='cutoff', bond_reach=1.35, **kwargs):
         super().__init__(*args, **kwargs)
         if not 0 < float(flow_cutoff):
             raise ValueError('flow_cutoff must be positive')
+        if bond_envelope not in ('cutoff', 'covalent'):
+            raise ValueError("bond_envelope must be 'cutoff' (every pair closer than flow_cutoff) or 'covalent'")
+        if not float(bond_reach) > 0:
+            raise ValueError('bond_reach must be positive')
         width = self.chemical_scalar.out_features
-        self.flow_cutoff = float(flow_cutoff)
+        self.flow_cutoff, self.bond_envelope, self.bond_reach = float(flow_cutoff), bond_envelope, float(bond_reach)
         self.register_buffer('bond_frequencies', math.pi*torch.arange(1., 9.)/self.flow_cutoff)
         self.bond_conductance = nn.Sequential(nn.Linear(2*width+len(self.bond_frequencies), width), nn.SiLU(),
                                               nn.Linear(width, 1))
         nn.init.zeros_(self.bond_conductance[2].weight)
         nn.init.zeros_(self.bond_conductance[2].bias)
+        num_elements = self.species_bias.numel()
+        # log conductance by pair of elements over response_scale at a zero readout, and the covalent radii
+        # of the bond envelope (install_species).
+        self.pair_response = nn.Parameter(torch.zeros(num_elements, num_elements))
+        self.register_buffer('covalent_radii', torch.ones(num_elements))
 
     def bond_conductances(self, chemical, positions, edge_index, shifts, g):
-        """The bonds shorter than flow_cutoff and their conductances.
+        """The bonds and their conductances.
 
         Every bond enters once, from the MACE edges with sender < receiver; periodic images are
-        separate bonds. The conductance is symmetric in the two atoms and vanishes at flow_cutoff
-        with the polynomial cutoff of MACE (p = 6). Returns the graph, the two slots, the length
-        and the conductance of every bond.
+        separate bonds. The conductance is symmetric in the two atoms. With bond_envelope 'cutoff'
+        every pair closer than flow_cutoff is a bond and the conductance vanishes there with the
+        polynomial cutoff of MACE (p = 6). With 'covalent' charge moves along bonds alone: the
+        envelope is one up to ENVELOPE_START of the reach of the pair, bond_reach times the sum of
+        its covalent radii, and falls to zero at the reach as a half cosine. A hydrogen bond then
+        carries no charge, a molecule keeps its charge without any list, an electrode conducts
+        through its bonds, and a bond that forms or breaks passes charge smoothly. With
+        response_priors the readout starts at the prior of the pair of elements. Returns the graph,
+        the two slots, the length and the conductance of every bond.
         """
         sender, receiver = edge_index
         length = torch.linalg.vector_norm(positions[sender]-positions[receiver]-shifts.to(positions), dim=-1)
         keep = (length < self.flow_cutoff) & (sender < receiver)
+        species = g.attrs.argmax(-1)
+        covalent = getattr(self, 'bond_envelope', 'cutoff') == 'covalent'
+        if covalent:
+            reach = self.bond_reach*(self.covalent_radii[species[g.batch[sender], g.slot[sender]]]
+                                     + self.covalent_radii[species[g.batch[receiver], g.slot[receiver]]])
+            keep = keep & (length < reach)
+            reach = reach[keep]
         sender, receiver, length = sender[keep], receiver[keep], length[keep]
         graph, a, b = g.batch[sender], g.slot[sender], g.slot[receiver]
         first, second = chemical[graph, a], chemical[graph, b]
         basis = torch.sin(self.bond_frequencies*length[:, None])/length[:, None]
-        x = length/self.flow_cutoff
-        envelope = 1.-28.*x**6+48.*x**7-21.*x**8
+        if covalent:
+            u = ((length/reach-ENVELOPE_START)/(1.-ENVELOPE_START)).clamp(0., 1.)
+            envelope = .5*(1.+torch.cos(math.pi*u))
+        else:
+            x = length/self.flow_cutoff
+            envelope = 1.-28.*x**6+48.*x**7-21.*x**8
         raw = self.bond_conductance(torch.cat((first+second, first*second, basis), -1))[..., 0]
+        if getattr(self, 'response_priors', False):
+            za, zb = species[graph, a], species[graph, b]
+            raw = raw+.5*(self.pair_response[za, zb]+self.pair_response[zb, za])
         return graph, a, b, length, self.charge_response(raw)*envelope
 
     def bond_laplacian(self, chemical, positions, edge_index, shifts, g):
@@ -454,6 +530,13 @@ class VariationalResponse(CoupledResponse):
     """
     variational = True
 
+    def __init__(self, *args, response_scale=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if response_scale is not None:
+            if not float(response_scale) > 0:
+                raise ValueError('response_scale must be positive')
+            self.log_response, self.response_scale = True, float(response_scale)
+
 
 class VariationalFlowResponse(ChargeFlowResponse):
     """MACE-VOLT response in which charge moves along bonds and the bond flows minimize the energy.
@@ -491,6 +574,13 @@ class VariationalFlowResponse(ChargeFlowResponse):
     zero readout, on a log scale: 1 e/V is the metallic scale, the local density of states at the
     Fermi level of a transition metal atom, and the network lowers it by decades where the
     electrons are bound.
+
+    bond_envelope 'covalent' lets charge move along bonds alone, pairs closer than bond_reach times
+    the sum of their covalent radii, so that a hydrogen bond carries none: the electrolyte then
+    responds by its dipoles and its intramolecular flows, as a dielectric, and the electrode, a bonded
+    network, as a conductor. response_priors starts fermi_dos and the conductances at response_scale
+    on the d block and its bonds and three decades, respectively one and a half, below it elsewhere
+    (install_species), so that the charge deficit lands on the electrode from the first step.
     """
     variational = True
     # Models saved before field_input read the field of the neutral cell.
@@ -526,15 +616,24 @@ def describe_law(model, data):
         chemical, vector = r.geometry_features(scalar, vector)
         _, law, _ = r.prepare_reference(chemical, vector, g.attrs, p0, g.present)
         numbers = model.atomic_numbers[data['node_attrs'].argmax(-1)]
+        # The electrode of the diagnostics: the d-block atoms and their neighbours within METAL_DISTANCE.
+        metal = torch.tensor([int(z) in D_BLOCK for z in numbers.tolist()], device=numbers.device)
+        sender, receiver = data['edge_index']
+        length = torch.linalg.vector_norm(local.positions[sender]-local.positions[receiver]
+                                          - data['shifts'].to(local.positions), dim=-1)
+        electrode = metal.clone()
+        electrode[receiver[(length < METAL_DISTANCE) & metal[sender]]] = True
         result = {'numbers': numbers.cpu().numpy(), 'fermi_dos': g.unpack(law[..., 2]).cpu().numpy(),
                   'alpha': (FIELD_CONSTANT/(4*math.pi)*r.density_width**2*g.unpack(law[..., 0])).cpu().numpy(),
-                  'bias': g.unpack(law[..., 1]).cpu().numpy()}
+                  'bias': g.unpack(law[..., 1]).cpu().numpy(), 'electrode': electrode.cpu().numpy(),
+                  'q0': local.field_independent_charge_density[:, 0].cpu().numpy()}
         if getattr(r, 'flows', False):
             graph, a, b, length, conductance = r.bond_conductances(chemical, local.positions, data['edge_index'],
                                                                    data['shifts'], g)
             index = data['ptr'][:-1][graph]
-            result['bonds'] = (numbers[index+a].cpu().numpy(), numbers[index+b].cpu().numpy(), length.cpu().numpy(),
-                               conductance.cpu().numpy())
+            first, second = index+a, index+b
+            result['bonds'] = (numbers[first].cpu().numpy(), numbers[second].cpu().numpy(), length.cpu().numpy(),
+                               conductance.cpu().numpy(), first.cpu().numpy(), second.cpu().numpy())
     return result
 
 

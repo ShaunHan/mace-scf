@@ -315,6 +315,8 @@ class FixedPointCore(torch.nn.Module):
         )
         if getattr(lr_source_cls, 'coupled', False):
             self.register_buffer('readout_feature_units', torch.ones(num_interactions, hidden_irreps.dim))
+            # The priors of the response by element, from the atomic numbers of the model.
+            self.field_dependent_charges_map.install_species(atomic_numbers)
 
         # Local electron energy readout
         self.add_local_electron_energy = add_local_electron_energy
