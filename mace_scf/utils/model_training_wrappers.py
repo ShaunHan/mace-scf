@@ -133,6 +133,17 @@ class FixedPointWrapper:
             response = model.field_dependent_charges_map
             if getattr(response, "coupled", False):
                 from mace_scf.electrostatics.coupled import evaluate_coupled
+                if getattr(response, "variational", False):
+                    # One exact minimum in training, validation and deployment; the stage's mode is unused.
+                    if not getattr(self, "_logged_coupled", False):
+                        logging.info("%s: one exact minimum of the energy per structure, no SCF "
+                                     "updates; mode %s and its SCF settings do not apply", type(response).__name__,
+                                     self.mode)
+                        self._logged_coupled = True
+                    return evaluate_coupled(model, batch_dict, training=training,
+                                            compute_force=self.output_args.get("forces", False),
+                                            compute_stress=self.output_args.get("stress", False)
+                                            or self.output_args.get("virials", False))
                 if self.mode == "direct":
                     return self._forward_direct_coupled(model, batch_dict, training, response, evaluate_coupled)
                 if self.mode not in ("unroll_scf", "shortcut_scf") or not self.scf_options.constant_charge:

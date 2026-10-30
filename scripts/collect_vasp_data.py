@@ -266,11 +266,13 @@ def plugin_run(outdir, meta):
     return False
 
 
-def plugin_forces(outdir, forces):
-    """Forces of a plug-in run with the net force of its counter charge, in VASP's atom order.
+def plugin_forces(outdir, forces, normal):
+    """The forces of a plug-in run, -dE/dR of its energy, in VASP's atom order.
 
-    VASP removes the net force from the forces it writes. A fixed counter charge exerts a
-    real one, which the plug-in keeps as expected_forces; the two sets may differ only by it.
+    VASP removes the net force from the forces it writes. A planar counter charge exerts a real
+    one along the slab normal, which the plug-in keeps in expected_forces; the two sets may differ
+    only by a uniform force. Its part in the plane of the slab, which a planar counter charge
+    cannot exert, is VASP's numerical drift and stays removed, as in every run.
     """
     with np.load(outdir / "plugin_observables.npz") as observables:
         if "expected_forces" not in observables:
@@ -281,7 +283,7 @@ def plugin_forces(outdir, forces):
     difference = full - forces
     if np.abs(difference - difference.mean(0)).max() > PLUGIN_FORCE_TOL:
         raise ValueError(f"Plug-in and VASP forces differ by more than a net force: {outdir}")
-    return full
+    return forces + (difference.mean(0) @ normal) * normal
 
 
 def collect_job(outdir):
@@ -295,9 +297,11 @@ def collect_job(outdir):
     energy = atoms.get_potential_energy(force_consistent=True)
     if not np.isfinite(forces).all() or not np.isfinite(energy):
         raise ValueError(f"Nonfinite energy/forces: {outdir}")
-    # Without a plug-in there is no external source, and both force sets agree.
-    forces_with_net_force = plugin_forces(outdir, forces) if plugin else forces
-    if max(np.linalg.norm(f, axis=1).max() for f in (forces, forces_with_net_force)) > FMAX_TOL:
+    if plugin:
+        # The counter charge exerts a net force along the slab normal, which VASP removed.
+        normal = np.linalg.inv(atoms.cell.array)[:, meta["slab_axis"]]
+        forces = plugin_forces(outdir, forces, normal / np.linalg.norm(normal))
+    if np.linalg.norm(forces, axis=1).max() > FMAX_TOL:
         print(f"Skipping {outdir}: force exceeds FMAX_TOL")
         return None
 
@@ -340,7 +344,6 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
-    atoms.arrays["vasp_forces_with_net_force"] = forces_with_net_force
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),

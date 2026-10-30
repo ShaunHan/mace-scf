@@ -19,6 +19,10 @@ responses of the geometry, and needs no molecules. In both, the network reads th
 charge. Moving charge between the counter charge and the electrode then acts at exact
 linear response with every network output held, so along Q_cc = -Q the energy is a
 convex quadratic and the cell voltage rises linearly with Q.
+VariationalResponse has the law of CoupledResponse without molecules, updates or a Fermi level
+readout, and VariationalFlowResponse the bond flows of ChargeFlowResponse: their multipoles
+minimize the energy of the model, which holds the local energy of the law, so the Fermi level, the
+cell voltage, the dipole and the forces are derivatives of one minimum.
 Potentials are electron referenced (in V, equal to eV).
 """
 import logging
@@ -404,6 +408,65 @@ class ChargeFlowResponse(CoupledResponse):
         return species_bias+self.scalar_out(self.shared(invariants))[..., 0]
 
 
+class VariationalResponse(CoupledResponse):
+    """MACE-VOLT response whose multipoles minimize the energy of the model.
+
+    At total charge Q, counter charge Q_cc and applied field the energy is one minimum,
+
+        E = E_local + min over q, d with sum_i q_i = Q of
+            [E_electrostatic(q, d) + sum_i (q_i^2/(2 fermi_dos_i) - bias_i q_i + |d_i - d0_i|^2/(2 dd_dE_i))].
+
+    E_electrostatic holds the Coulomb energy of the Gaussian charges and dipoles, their energy in the
+    local potential amplitudes, in the counter charge and in the applied field, and the slab terms.
+    The network reads the cell at its integer net charge round(Q + Q_cc), without the counter
+    charge and the applied field: the biases at the field of the geometry law, as CoupledResponse
+    does, and the local amplitudes at the field of those biases. fermi_dos, dd_dE and d0 come from
+    the geometry. The minimum is the law of CoupledResponse with one Fermi level mu,
+
+        q_i = fermi_dos_i (bias_i + phi_i - mu),    d_i = d0_i + dd_dE_i E_i,
+
+    in the field of every charge, dipole, amplitude and source, solved exactly once. Since Q, Q_cc
+    and the applied field enter only this minimum, mu = -dE/dQ is its Lagrange multiplier, the
+    electrochemical potential of every atom that exchanges charge, dE/dQ_cc is the potential at
+    the counter charge, the cell voltage dE/dQ - dE/dQ_cc is the potential difference in the
+    model's own field, the dipole is -dE/dE_app, and the energy is a convex quadratic in Q and
+    Q_cc, so the cell voltage rises linearly with Q at fixed geometry. Forces are -dE/dR.
+    Charge goes where the states at the Fermi level are: atoms without them keep their charge and
+    polarize. There are no molecules, no SCF updates and no Fermi level readout.
+    """
+    variational = True
+
+
+class VariationalFlowResponse(ChargeFlowResponse):
+    """MACE-VOLT response in which charge moves along bonds and the bond flows minimize the energy.
+
+    Every atom keeps its MACE charge q0_i, the charge deficit Q - sum_j q0_j lands at the states of
+    the Fermi level with the Fukui functions fukui_i, and the bond flows p_ij and the dipoles d_i are
+    the minimum of the energy of the model,
+
+        E = E_local + min over p, d of
+            [ E_electrostatic(q, d) + sum_bonds p_ij^2/(2 c_ij) - sum_i bias_i (B p)_i
+              + sum_i |d_i - d0_i|^2/(2 dd_dE_i) ] - mu_cell Q,
+
+    with q = q0 + fukui (Q - sum q0) + B p, B the incidence of the bonds shorter than flow_cutoff
+    and c_ij their conductances. The minimum is the law of ChargeFlowResponse,
+
+        q_i = q0_i + fukui_i (Q - sum_j q0_j) + sum_j c_ij [(phi_i + bias_i) - (phi_j + bias_j)],
+        d_i = d0_i + dd_dE_i E_i,
+
+    solved exactly once. A flow leaves one atom and enters the other, so a group of atoms changes
+    its charge only through the bonds that leave it: a molecule keeps its charge without a list,
+    and an electrode, a dense network of bonds, conducts. The network reads the cell at its integer
+    net charge round(Q + Q_cc) without the counter charge and the applied field: the biases at the
+    field of the geometry biases and the local amplitudes, the Fermi level readout mu_cell and the
+    rest at the field of those biases. Q, Q_cc and the applied field enter only the minimum, so
+    mu = -dE/dQ is mu_cell plus the potential at the Fukui functions, dE/dQ_cc is the potential
+    at the counter charge, the cell voltage is the potential difference in the model's own field,
+    the dipole is -dE/dE_app and the energy is a convex quadratic in Q and Q_cc. Forces are -dE/dR.
+    """
+    variational = True
+
+
 class CoupledGeometry:
     """Per-forward Fourier operators on the support shared by response, observers and screening."""
 
@@ -482,6 +545,8 @@ class CoupledGeometry:
         self.tensors = tuple(selected(value) if i < 9 or i == 11 else value for i, value in enumerate(tensors))
         # The fixed fields of the neutral interface (applied) and of the solve (applied and counter charge).
         self.fixed = (self.tensors[8], self.tensors[8]+selected(torch.view_as_real(counter.potential)))
+        # The Coulomb field of the counter charge without its slab term, which VariationalResponse takes exactly.
+        self.counter_coulomb = selected(torch.view_as_real(-self.coulomb*counter.density))
         self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3,
                                            r.potential_amplitudes_smearing_width)
 
@@ -565,8 +630,12 @@ def moment_responses(law, mask):
     return (torch.cat((law[..., -1:], law[..., -3:-2].expand(-1, -1, 3)), -1)*mask[..., None]).flatten(-2)
 
 
-def moment_kernels(geometry, kernels, mask, sigma):
-    """Linear response of the sampled moment drive to moments and local amplitudes."""
+def moment_kernels(geometry, kernels, mask, sigma, slab=None):
+    """Linear response of the sampled moment drive to moments and local amplitudes.
+
+    With slab, the factor K/V of every graph, the boundary field of the normal dipole is the exact
+    gradient of (K/2V) D_n^2, so the moment kernel is the Hessian of the electrostatic energy.
+    """
     co, si, wave = geometry[:3]
     kr, ki = kernels
     source_re = (co[..., None]*kr[:, :, None, :]+si[..., None]*ki[:, :, None, :]).flatten(-2)
@@ -578,10 +647,13 @@ def moment_kernels(geometry, kernels, mask, sigma):
     matrix = matrix.reshape(*matrix.shape[:2], mask.shape[-1], kr.shape[-1])
     completion = -matrix[..., 4:].flatten(-2)
     # The slab boundary field of the normal dipole is rank one.
-    unit_v, unit_e = sample_spectrum(geometry[7], geometry)
-    observed = torch.cat((unit_v[..., :1], -sigma*unit_e[..., 0, :]), -1).flatten(-2)
     dipole = torch.cat((geometry[9][..., None], sigma*geometry[10][:, None, :].expand(-1, mask.shape[1], -1)),
                        -1).flatten(-2)
+    if slab is None:
+        unit_v, unit_e = sample_spectrum(geometry[7], geometry)
+        observed = torch.cat((unit_v[..., :1], -sigma*unit_e[..., 0, :]), -1).flatten(-2)
+    else:
+        observed = -slab[:, None]*dipole
     matrix = matrix[..., :4].flatten(-2)-observed[..., None]*dipole[:, None, :]
     present = mask[..., None].expand(-1, -1, 4).flatten(-2)
     return matrix*present[..., None]*present[:, None, :], completion
@@ -937,6 +1009,161 @@ def prepare_coupled(model, data, local):
     return g, solve
 
 
+def screen_drive_offset(action, factors, bias, reference, values, field, p0, target, mask, sigma):
+    """screen_offset for a fixed drive given at the atoms: its potential values (V) and field (V/A)."""
+    inverse, root = factors
+    base = torch.cat(((reference[..., -1]*(bias+values))[..., None],
+                      p0[..., 1:4]/sigma+reference[..., 1:4]-reference[..., -3:-2]*sigma*field), -1)
+    return (action@(base*mask[..., None]).flatten(1)[..., None]).squeeze(-1)+root*inverse[:, :-1, -1]*target[:, None]
+
+
+def variational_flow_state(model, data, local, charge, counter):
+    """The multipoles of a VariationalFlowResponse, the minimum of the energy over the bond flows and dipoles.
+
+    Returns the geometry, the state, the local energy of the flows and dipoles at the minimum with
+    their energy in the amplitudes and the charging work at the level of the cell, and mu, the level
+    of the cell plus the potential at the Fukui functions.
+    """
+    r = model.field_dependent_charges_map
+    g = CoupledGeometry(model, data, local.positions)
+    features = g.pack(local.all_layer_feats)
+    scalar = torch.cat([features[..., a:b] for a, b in r.scalar_slices], -1)
+    vector = (torch.cat([features[..., a:b].reshape(*features.shape[:2], -1, 3) for a, b in r.vector_slices], -2)
+              if r.vector_slices else features.new_zeros((*features.shape[:2], 0, 3)))
+    p0 = g.pack(local.field_independent_charge_density)
+    if not hasattr(model, 'foundation_element_map'):
+        vector, p0 = vector[..., [2, 0, 1]], p0[..., [0, 3, 1, 2]]
+    chemical, vector = r.geometry_features(scalar, vector)
+    mask, sigma = g.present, r.density_width
+    operator = angular_transport(local.positions, data['edge_index'], data['shifts'], g.batch, g.slot,
+                                 len(g.counts), g.size, float(model.r_max),
+                                 float(r.receiver_widths.max())).permute(0, 3, 1, 2)
+    transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
+    source, law, species_bias = r.prepare_reference(chemical, vector, g.attrs, p0, mask)
+    kernel, completion = moment_kernels(g.tensors, g.kernels, mask, sigma, slab=g.slab_factor)
+    if r.flow_cutoff > float(model.r_max):
+        raise ValueError('flow_cutoff must not exceed r_max, the range of the MACE edges')
+    laplacian = r.bond_laplacian(chemical, local.positions, data['edge_index'], data['shifts'], g)
+    size, graphs = mask.shape[-1], mask.shape[0]
+    fermi_dos = law[..., -1]*mask
+    fukui = fermi_dos/fermi_dos.sum(-1, keepdim=True)
+    centering = torch.cat((torch.zeros_like(law[..., :2]), law[..., -1:]), -1)
+    response = laplacian.new_zeros((graphs, size, 4, size, 4))
+    response[:, :, 0, :, 0] = laplacian
+    dd_dE = torch.cat((torch.zeros_like(law[..., :1]), law[..., :1].expand(-1, -1, 3)), -1)
+    response = response.reshape(graphs, 4*size, 4*size)+torch.diag_embed((dd_dE*mask[..., None]).flatten(1))
+    ensure_cuda_linalg(response.device)
+    inverse, info = torch.linalg.inv_ex(torch.eye(4*size, dtype=response.dtype, device=response.device)
+                                        + response@kernel)
+    if not bool(torch.isfinite(inverse).all() & (info == 0).all()):
+        raise SCFNumericalError('Singular or nonfinite bond flow operator')
+    sources = inverse@(response@completion)
+    q = charge.reshape(-1).to(g.volume)
+    formal = torch.round(q.detach()+counter.detach().reshape(-1).to(g.volume))
+    reference, bias, dipole = r.zero_field_outputs(chemical, vector, source, centering, mask, formal, transport,
+                                                   species_bias)
+
+    def placed(total):
+        """The fixed part of the state: the MACE charges with the deficit at the Fukui functions, the dipoles d0."""
+        charge = p0[..., 0]+fukui*(total-(p0[..., 0]*mask).sum(-1))[:, None]
+        return torch.cat((charge[..., None], p0[..., 1:4]/sigma+dipole), -1)*mask[..., None]
+
+    def offset_at(total, drive, level):
+        """The exact flows and dipoles at total charge total in the fixed drive, with the biases level."""
+        drive = drive+torch.cat((level[..., None], torch.zeros_like(dipole)), -1)*mask[..., None]
+        rhs = placed(total).flatten(1)+(response@drive.flatten(1)[..., None]).squeeze(-1)
+        return (inverse@rhs[..., None]).squeeze(-1)
+    quiet = torch.zeros((*mask.shape, 4), dtype=mask.dtype, device=mask.device)
+
+    def neutral_field(level):
+        """The field of the exact solution in the cell at its net charge, without sources."""
+        state = apply_screen_action(source, mask, formal, sources, offset_at(formal, quiet, level))
+        return sample_spectrum(total_spectrum(state, g.tensors, g.kernels, sigma, torch.zeros_like(g.fixed[0])),
+                               g.tensors)
+    bias = r.flow_biases(chemical, vector, *neutral_field(bias), mask, centering, formal, transport, species_bias)
+    amplitudes, hidden = r(chemical, vector, *neutral_field(bias), mask, formal, reference, transport)
+    # The level of the cell, the Fermi level readout of the same read: -mu_cell Q in the energy.
+    cell = r.fermi_level_readout((fukui[..., None]*hidden).sum(1)).squeeze(-1)+(fukui*species_bias).sum(-1)
+    # The counter charge and the applied field at the atoms; their slab terms are linear in z.
+    values, field = sample_spectrum(g.counter_coulomb, g.tensors)
+    slope = (g.external*g.normal).sum(-1)-g.slab_factor*g.counter_moment
+    values = values[..., 0]+slope[:, None]*g.tensors[9]
+    field = field[..., 0, :]-slope[:, None, None]*g.normal[:, None, :]
+    drive = torch.cat((values[..., None], -sigma*field), -1)*mask[..., None]
+    state = apply_screen_action(amplitudes, mask, q, sources, offset_at(q, drive, bias))
+    # The local energy at the minimum from its stationarity, without inverting the conductances.
+    moments = state[..., :4].flatten(1)
+    applied = (completion@amplitudes.flatten(1)[..., None]).squeeze(-1)
+    total = ((drive.flatten(1)+applied-(kernel@moments[..., None]).squeeze(-1)).reshape(*mask.shape, 4)
+             * mask[..., None])
+    level = torch.cat((bias[..., None], torch.zeros_like(dipole)), -1)*mask[..., None]
+    moved = (state[..., :4]-placed(q))*mask[..., None]
+    energy = .5*(moved*(total-level)).sum((-1, -2))-(moments*applied).sum(-1)-cell*q
+    return g, state, energy, cell+(fukui*total[..., 0]).sum(-1)
+
+
+def variational_state(model, data, local, charge, counter):
+    """The multipoles of a VariationalResponse, the minimum of the energy at total charge Q.
+
+    The network reads the cell at its integer net charge without sources: the biases at the
+    field of the geometry law, the local amplitudes at the field of those biases. The minimum
+    with every source then follows from one exact screened solve, with the slab terms exact.
+    Returns the geometry, the state, the local energy of the charges and dipoles with their
+    energy in the amplitudes, and the Fermi level, the Lagrange multiplier of the total charge.
+    """
+    r = model.field_dependent_charges_map
+    g = CoupledGeometry(model, data, local.positions)
+    features = g.pack(local.all_layer_feats)
+    scalar = torch.cat([features[..., a:b] for a, b in r.scalar_slices], -1)
+    vector = (torch.cat([features[..., a:b].reshape(*features.shape[:2], -1, 3) for a, b in r.vector_slices], -2)
+              if r.vector_slices else features.new_zeros((*features.shape[:2], 0, 3)))
+    p0 = g.pack(local.field_independent_charge_density)
+    if not hasattr(model, 'foundation_element_map'):
+        vector, p0 = vector[..., [2, 0, 1]], p0[..., [0, 3, 1, 2]]
+    chemical, vector = r.geometry_features(scalar, vector)
+    mask, sigma = g.present, r.density_width
+    operator = angular_transport(local.positions, data['edge_index'], data['shifts'], g.batch, g.slot,
+                                 len(g.counts), g.size, float(model.r_max),
+                                 float(r.receiver_widths.max())).permute(0, 3, 1, 2)
+    transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
+    source, law, species_bias = r.prepare_reference(chemical, vector, g.attrs, p0, mask)
+    response = moment_responses(law, mask)
+    kernel, completion = moment_kernels(g.tensors, g.kernels, mask, sigma, slab=g.slab_factor)
+    factors = screen_factors(response, kernel, mask)
+    action, sources = screen_action(completion, response, mask, factors)
+    q = charge.reshape(-1).to(g.volume)
+    formal = torch.round(q.detach()+counter.detach().reshape(-1).to(g.volume))
+    reference = r.reference_offsets(chemical, vector, source, law, mask, formal, transport)
+    quiet = torch.zeros_like(g.fixed[0])
+
+    def neutral(bias):
+        """The field of the exact solution in the cell at its net charge, without sources."""
+        offset = screen_offset(action, factors, bias, reference, quiet, g.tensors, p0, formal, mask, sigma)
+        state = apply_screen_action(source, mask, formal, sources, offset)
+        return sample_spectrum(total_spectrum(state, g.tensors, g.kernels, sigma, quiet), g.tensors)
+    bias = r.biases(chemical, vector, *neutral(reference[..., -2]), mask, reference, formal, transport, species_bias,
+                    p0)
+    amplitudes, _ = r(chemical, vector, *neutral(bias), mask, formal, reference, transport)
+    # The counter charge and the applied field at the atoms; their slab terms are linear in z.
+    values, field = sample_spectrum(g.counter_coulomb, g.tensors)
+    slope = (g.external*g.normal).sum(-1)-g.slab_factor*g.counter_moment
+    values = values[..., 0]+slope[:, None]*g.tensors[9]
+    field = field[..., 0, :]-slope[:, None, None]*g.normal[:, None, :]
+    offset = screen_drive_offset(action, factors, bias, reference, values, field, p0, q, mask, sigma)
+    state = apply_screen_action(amplitudes, mask, q, sources, offset)
+    # The local energy at the minimum from its stationarity, without dividing by a response.
+    moments = state[..., :4].flatten(1)
+    applied = (completion@amplitudes.flatten(1)[..., None]).squeeze(-1)
+    drive = (torch.cat((values[..., None], -sigma*field), -1).flatten(1)+applied
+             - (kernel@moments[..., None]).squeeze(-1)).reshape(*mask.shape, 4)*mask[..., None]
+    dos, charges = law[..., -1]*mask, state[..., 0]*mask
+    fermi = ((dos*(bias+drive[..., 0])).sum(-1)-charges.sum(-1))/dos.sum(-1)
+    induced = (state[..., 1:4]-p0[..., 1:4]/sigma-reference[..., 1:4])*mask[..., None]
+    energy = (.5*(charges*(drive[..., 0]-bias)).sum(-1)-.5*fermi*charges.sum(-1)
+              + .5*(induced*drive[..., 1:4]).sum((-1, -2))-(moments*applied).sum(-1))
+    return g, state, energy, fermi
+
+
 def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, compute_stress=False,
                      mode=None, mixing=None, stability=False, tolerance=None):
     """One electronic trajectory, one scalar energy and its derivatives.
@@ -964,6 +1191,11 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     iterating them. Nothing is mixed or converged: steps, mixing and tolerance are unused,
     scf_steps is 1 and scf_residual 0. Without a mode, a model evaluates as it was trained
     in its last stage (deployment_direct).
+
+    A VariationalResponse has one exact minimum instead (variational_state): mode, steps,
+    mixing, tolerance and stability do not apply, and its energy holds the local energy of the
+    law in place of the Fermi level readout. Its Lagrange multiplier is lagrange_fermi_level,
+    which equals -dE/dQ up to the constant fermi_level_offset and vacuum reference.
     """
     r = model.field_dependent_charges_map
     if mode is None:
@@ -973,8 +1205,9 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     if mode not in ('direct', 'unroll_scf', 'shortcut_scf') or (not direct and (int(steps) < 1
                                                                               or not 0 < mixing <= 1)):
         raise ValueError('Invalid coupled SCF mode, step count or mixing')
-    if direct and stability:
-        raise ValueError('The direct mode has no fixed point to probe: drop fixedpoint_scf_stability')
+    if (direct or getattr(r, 'variational', False)) and stability:
+        raise ValueError('The direct mode and VariationalResponse have no fixed point to probe: drop '
+                         'fixedpoint_scf_stability')
     checkpointed, outer_grad = training and mode == 'shortcut_scf', torch.is_grad_enabled()
     with torch.enable_grad():
         data = dict(data)
@@ -995,27 +1228,37 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
             edge_batch = data['batch'][data['edge_index'][0]]
             data['shifts'] = data['shifts']+torch.einsum('ni,nij->nj', data['shifts'], symmetric[edge_batch])
         local = model.local_part(data, compute_force=compute_force)
-        g, solve = prepare_coupled(model, data, local)
-        q = charge.reshape(-1).to(g.volume)
-        members = None if getattr(r, 'flows', False) else electrolyte_molecules(model, data, local.positions)
-        initial, update, shift = solve(q, members)
-        if direct:
-            # One update from the exact linear solution, read once; the Fermi level readout comes
-            # from the hidden features of that same read.
-            state, potential, total_response, fermi = update(initial, observe=True)
+        variational = getattr(r, 'variational', False)
+        probe = lagrange = None
+        if variational:
+            # One exact minimum: no updates, no molecules and no Fermi level readout.
+            if getattr(r, 'flows', False):
+                g, state, response_energy, lagrange = variational_flow_state(model, data, local, charge, counter)
+            else:
+                g, state, response_energy, lagrange = variational_state(model, data, local, charge, counter)
+            q = charge.reshape(-1).to(g.volume)
             residual, taken = torch.zeros_like(g.volume), 1
         else:
-            state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
-            proposal, potential, total_response, fermi = update(state, observe=True)
-            residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
-        probe = None
-        if stability:
-            # Finite difference along a random direction; a gain above one marks a map that swings.
-            direction = torch.randn_like(state)*g.present[..., None]
-            direction = direction*(1.e-4*state.detach().square().mean().sqrt().clamp_min(1.))
-            probe = (direction, update(state+direction)-proposal)
-        # The cell with its counter charge: the converged updates plus the exact response to the counter charge.
-        state = state+shift
+            g, solve = prepare_coupled(model, data, local)
+            q = charge.reshape(-1).to(g.volume)
+            members = None if getattr(r, 'flows', False) else electrolyte_molecules(model, data, local.positions)
+            initial, update, shift = solve(q, members)
+            if direct:
+                # One update from the exact linear solution, read once; the Fermi level readout comes
+                # from the hidden features of that same read.
+                state, potential, total_response, fermi = update(initial, observe=True)
+                residual, taken = torch.zeros_like(g.volume), 1
+            else:
+                state, taken = mixing_steps(update, initial, steps, mixing, checkpointed, tolerance)
+                proposal, potential, total_response, fermi = update(state, observe=True)
+                residual = ((proposal-state)*g.present[..., None]).abs().amax((1, 2))
+            if stability:
+                # Finite difference along a random direction; a gain above one marks a map that swings.
+                direction = torch.randn_like(state)*g.present[..., None]
+                direction = direction*(1.e-4*state.detach().square().mean().sqrt().clamp_min(1.))
+                probe = (direction, update(state+direction)-proposal)
+            # The cell with its counter charge: the converged updates plus the exact response to the counter charge.
+            state = state+shift
         potential, _ = sample_spectrum(total_spectrum(state, g.tensors, g.kernels, r.density_width, g.fixed[1]),
                                        g.tensors)
 
@@ -1034,8 +1277,12 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
         electrostatic = (.5*g.volume*(coarse.square().sum(-1)*g.coulomb).sum(-1)+.5*g.slab_factor*normal_dipole.square()
                          - (dipole*g.external).sum(-1)+counter_energy-model.fermi_level_offset*total_charge
                          - g.vacuum_reference*q)
-        # Charging work at the Fermi level readout, with the total response sum(fermi_dos).
-        electron = .5*q.square()/total_response-q*fermi
+        if variational:
+            # The local energy of the law at the minimum.
+            electron = response_energy
+        else:
+            # Charging work at the Fermi level readout, with the total response sum(fermi_dos).
+            electron = .5*q.square()/total_response-q*fermi
         energy = local.energies.sum(-1)+electrostatic+electron
         inputs = [charge, counter]+([positions] if compute_force else [])+([strain] if compute_stress else [])
         derivatives = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True,
@@ -1075,6 +1322,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
               'k_vectors': g.wave, 'k_vectors_mask': g.mask,
               'k_vectors_grid_shape': torch.tensor(g.shape, device=positions.device),
               'scf_residual': residual, 'scf_steps': positions.new_full((len(fermi_level),), float(taken)),
+              'lagrange_fermi_level': lagrange,
               'electrostatic_energy': electrostatic, 'electron_energy': electron, 'external_field': g.external,
               'esps': None, 'esps_dft': None, 'charges_history': density_coefficients[..., None],
               'electrostatic_features': g.unpack(potential)}
