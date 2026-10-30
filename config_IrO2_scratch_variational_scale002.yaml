@@ -11,7 +11,6 @@ heads:
       fermi_level: vasp_efermi
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
-      # The neutral atoms of the DFT runs, written by scripts/collect_vasp_data.py.
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
@@ -42,7 +41,10 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
-  type: CoupledResponse
+  type: VariationalFlowResponse
+  flow_cutoff: 4.0
+  field_input: none
+  response_scale: 0.02
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
@@ -89,15 +91,7 @@ train_schedule:
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
-      mode: unroll_scf
-      scf:
-        num_scf_steps: 8
-        include_nonlinear_multipole_update: false
-        constant_charge: true
-        mixing_parameter: 0.5
-        initial_density: local_guess
-        initial_fermi_level: zero
-        use_autograd_forces: true
+      mode: direct
     checkpoint_metric: rmse_wf_abs
   1:
     name: stage2
@@ -117,15 +111,7 @@ train_schedule:
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
-      mode: unroll_scf
-      scf:
-        num_scf_steps: 12
-        include_nonlinear_multipole_update: false
-        constant_charge: true
-        mixing_parameter: 0.5
-        initial_density: local_guess
-        initial_fermi_level: zero
-        use_autograd_forces: true
+      mode: direct
     checkpoint_metric: rmse_wf_abs
   2:
     name: stage3
@@ -145,15 +131,7 @@ train_schedule:
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
-      mode: unroll_scf
-      scf:
-        num_scf_steps: 20
-        include_nonlinear_multipole_update: false
-        constant_charge: true
-        mixing_parameter: 0.5
-        initial_density: local_guess
-        initial_fermi_level: zero
-        use_autograd_forces: true
+      mode: direct
     checkpoint_metric: rmse_wf_abs
   3:
     name: stage4
@@ -173,13 +151,5 @@ train_schedule:
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
-      mode: unroll_scf
-      scf:
-        num_scf_steps: 50
-        include_nonlinear_multipole_update: false
-        constant_charge: true
-        mixing_parameter: 0.5
-        initial_density: local_guess
-        initial_fermi_level: zero
-        use_autograd_forces: true
+      mode: direct
     checkpoint_metric: rmse_wf_abs

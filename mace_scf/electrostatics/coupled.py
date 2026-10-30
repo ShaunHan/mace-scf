@@ -125,6 +125,9 @@ class CoupledResponse(nn.Module):
     deployment_tolerance = None
     # True when the last training stage was direct: the model then deploys without SCF updates.
     deployment_direct = False
+    # Models saved before response_scale take fermi_dos and the conductances as softplus at RESPONSE_SCALE.
+    log_response = False
+    response_scale = RESPONSE_SCALE
 
     def __setstate__(self, state):
         # Models saved as atomic_multipole_update='linear' or 'nonlinear' keep their update.
@@ -203,6 +206,17 @@ class CoupledResponse(nn.Module):
         self.register_buffer('deployment_steps', torch.tensor(16))
         self.register_buffer('deployment_mixing', torch.tensor(.5))
 
+    def charge_response(self, x):
+        """fermi_dos or a conductance from its readout, in e/V.
+
+        With log_response it is response_scale exp(x), so that a metal and an insulator, which
+        differ by three decades, are a few units of the readout apart; otherwise the softplus
+        of RESPONSE_SCALE at zero of the saved models.
+        """
+        if getattr(self, 'log_response', False):
+            return self.response_scale*torch.exp(x.clamp(-12., 4.))
+        return _positive(x)
+
     def farfield_filter(self, k2):
         """Extra smoothing of the density to the far-field reference width."""
         return torch.exp(-.5*(self.density_reference_width**2-self.density_width**2)*k2)
@@ -280,7 +294,7 @@ class CoupledResponse(nn.Module):
                            self.local_source_vector(vector.transpose(-1, -2)).transpose(-1, -2).flatten(-2)),
                           -1)*mask[..., None]
         law = torch.cat((_positive(self.dd_dE_readout(hidden)),
-                         species_bias[..., None]+initial[..., :1]+p0[..., :1], _positive(initial[..., 1:2])), -1)
+                         species_bias[..., None]+initial[..., :1]+p0[..., :1], self.charge_response(initial[..., 1:2])), -1)
         return local, law, species_bias
 
     def reference_offsets(self, chemical, vector, local, law, mask, target, transport):
@@ -366,13 +380,13 @@ class ChargeFlowResponse(CoupledResponse):
         nn.init.zeros_(self.bond_conductance[2].weight)
         nn.init.zeros_(self.bond_conductance[2].bias)
 
-    def bond_laplacian(self, chemical, positions, edge_index, shifts, g):
-        """dq_dphi of the bond flows: the conductance weighted Laplacian of the bonds shorter than flow_cutoff.
+    def bond_conductances(self, chemical, positions, edge_index, shifts, g):
+        """The bonds shorter than flow_cutoff and their conductances.
 
-        Every bond enters once, from the MACE edges with sender < receiver; periodic
-        images are separate bonds. The conductance is symmetric in the two atoms and
-        vanishes at flow_cutoff with the polynomial cutoff of MACE (p = 6). Returns
-        (graphs, size, size).
+        Every bond enters once, from the MACE edges with sender < receiver; periodic images are
+        separate bonds. The conductance is symmetric in the two atoms and vanishes at flow_cutoff
+        with the polynomial cutoff of MACE (p = 6). Returns the graph, the two slots, the length
+        and the conductance of every bond.
         """
         sender, receiver = edge_index
         length = torch.linalg.vector_norm(positions[sender]-positions[receiver]-shifts.to(positions), dim=-1)
@@ -383,8 +397,12 @@ class ChargeFlowResponse(CoupledResponse):
         basis = torch.sin(self.bond_frequencies*length[:, None])/length[:, None]
         x = length/self.flow_cutoff
         envelope = 1.-28.*x**6+48.*x**7-21.*x**8
-        conductance = _positive(self.bond_conductance(torch.cat((first+second, first*second, basis), -1))[..., 0])
-        conductance = conductance*envelope
+        raw = self.bond_conductance(torch.cat((first+second, first*second, basis), -1))[..., 0]
+        return graph, a, b, length, self.charge_response(raw)*envelope
+
+    def bond_laplacian(self, chemical, positions, edge_index, shifts, g):
+        """dq_dphi of the bond flows: the conductance weighted Laplacian of the bonds (bond_conductances), (graphs, size, size)."""
+        graph, a, b, _, conductance = self.bond_conductances(chemical, positions, edge_index, shifts, g)
         size, graphs = g.size, len(g.counts)
         row, column = (graph*size+a)*size, (graph*size+b)*size
         index = torch.cat((row+a, column+b, row+b, column+a))
@@ -463,8 +481,61 @@ class VariationalFlowResponse(ChargeFlowResponse):
     mu = -dE/dQ is mu_cell plus the potential at the Fukui functions, dE/dQ_cc is the potential
     at the counter charge, the cell voltage is the potential difference in the model's own field,
     the dipole is -dE/dE_app and the energy is a convex quadratic in Q and Q_cc. Forces are -dE/dR.
+
+    field_input sets what the network reads. With 'none' it reads the geometry alone: the charges
+    q0, the dipoles d0, the biases, the local amplitudes, the level of the cell and every response
+    (fermi_dos, the conductances, dd_dE) are functions of the atoms and their neighbours, and the
+    whole response to the field, to Q and to the counter charge is the exact minimum. With
+    'neutral' the biases, the amplitudes and the level are read at the field of the neutral cell
+    instead, as the saved models do. response_scale is fermi_dos and the conductance, in e/V, at a
+    zero readout, on a log scale: 1 e/V is the metallic scale, the local density of states at the
+    Fermi level of a transition metal atom, and the network lowers it by decades where the
+    electrons are bound.
     """
     variational = True
+    # Models saved before field_input read the field of the neutral cell.
+    field_input = 'neutral'
+
+    def __init__(self, *args, field_input='none', response_scale=1., **kwargs):
+        super().__init__(*args, **kwargs)
+        if field_input not in ('none', 'neutral'):
+            raise ValueError("field_input must be 'none' (the geometry alone) or 'neutral' (the field of the neutral cell)")
+        if not float(response_scale) > 0:
+            raise ValueError('response_scale must be positive')
+        self.field_input = field_input
+        self.log_response, self.response_scale = True, float(response_scale)
+
+
+def describe_law(model, data):
+    """The geometry law and the bonds of a batch, for the diagnostics: numpy arrays in atom and bond order.
+
+    Returns numbers (atomic numbers), fermi_dos (e/V), alpha (A^3, the dipole per field with the
+    Gaussian width), bias (V) per atom, and for a flow response the bonds (Z_a, Z_b, length, conductance).
+    """
+    r = model.field_dependent_charges_map
+    with torch.no_grad():
+        local = model.local_part(dict(data), compute_force=False)
+        g = CoupledGeometry(model, data, local.positions)
+        features = g.pack(local.all_layer_feats)
+        scalar = torch.cat([features[..., a:b] for a, b in r.scalar_slices], -1)
+        vector = (torch.cat([features[..., a:b].reshape(*features.shape[:2], -1, 3) for a, b in r.vector_slices], -2)
+                  if r.vector_slices else features.new_zeros((*features.shape[:2], 0, 3)))
+        p0 = g.pack(local.field_independent_charge_density)
+        if not hasattr(model, 'foundation_element_map'):
+            vector, p0 = vector[..., [2, 0, 1]], p0[..., [0, 3, 1, 2]]
+        chemical, vector = r.geometry_features(scalar, vector)
+        _, law, _ = r.prepare_reference(chemical, vector, g.attrs, p0, g.present)
+        numbers = model.atomic_numbers[data['node_attrs'].argmax(-1)]
+        result = {'numbers': numbers.cpu().numpy(), 'fermi_dos': g.unpack(law[..., 2]).cpu().numpy(),
+                  'alpha': (FIELD_CONSTANT/(4*math.pi)*r.density_width**2*g.unpack(law[..., 0])).cpu().numpy(),
+                  'bias': g.unpack(law[..., 1]).cpu().numpy()}
+        if getattr(r, 'flows', False):
+            graph, a, b, length, conductance = r.bond_conductances(chemical, local.positions, data['edge_index'],
+                                                                   data['shifts'], g)
+            index = data['ptr'][:-1][graph]
+            result['bonds'] = (numbers[index+a].cpu().numpy(), numbers[index+b].cpu().numpy(), length.cpu().numpy(),
+                               conductance.cpu().numpy())
+    return result
 
 
 class CoupledGeometry:
@@ -1080,8 +1151,13 @@ def variational_flow_state(model, data, local, charge, counter):
         state = apply_screen_action(source, mask, formal, sources, offset_at(formal, quiet, level))
         return sample_spectrum(total_spectrum(state, g.tensors, g.kernels, sigma, torch.zeros_like(g.fixed[0])),
                                g.tensors)
-    bias = r.flow_biases(chemical, vector, *neutral_field(bias), mask, centering, formal, transport, species_bias)
-    amplitudes, hidden = r(chemical, vector, *neutral_field(bias), mask, formal, reference, transport)
+    if getattr(r, 'field_input', 'neutral') == 'none':
+        # The geometry alone: the biases and dipoles at zero field, the local amplitudes and the hidden
+        # features of the geometry.
+        amplitudes, hidden = source, r.geometry_reference_features(chemical, vector)
+    else:
+        bias = r.flow_biases(chemical, vector, *neutral_field(bias), mask, centering, formal, transport, species_bias)
+        amplitudes, hidden = r(chemical, vector, *neutral_field(bias), mask, formal, reference, transport)
     # The level of the cell, the Fermi level readout of the same read: -mu_cell Q in the energy.
     cell = r.fermi_level_readout((fukui[..., None]*hidden).sum(1)).squeeze(-1)+(fukui*species_bias).sum(-1)
     # The counter charge and the applied field at the atoms; their slab terms are linear in z.

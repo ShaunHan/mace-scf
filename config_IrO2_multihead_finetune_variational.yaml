@@ -11,7 +11,6 @@ heads:
       fermi_level: vasp_efermi
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
-      # The neutral atoms of the DFT runs, written by scripts/collect_vasp_data.py.
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
@@ -52,6 +51,8 @@ electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
   type: VariationalFlowResponse
   flow_cutoff: 4.0
+  field_input: none
+  response_scale: 1.0
 potential_amplitudes_smearing_width: 1.5
 batch_size: 8
 valid_batch_size: 8

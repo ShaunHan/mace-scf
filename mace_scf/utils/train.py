@@ -21,6 +21,7 @@ from mace.tools.utils import (
 )
 from mace.tools.scatter import scatter_sum
 from mace_scf.electrostatics.coupled import SCFNumericalError
+from mace_scf.utils.diagnostics import SlabDiagnostics
 from mace_scf.electrostatics.loss import (
     WeightedFermiLevel, WeightedVacuumPotential, WeightedWorkFunction, spectral_errors,
 )
@@ -360,12 +361,15 @@ def _evaluate(
     # Pooled numerators and denominators: one exact mean over the split per term.
     objective = {name: [0., 0.] for name, weight in loss_fn.loss_weights.items() if weight}
     scalars, fields, residuals, wf_rows, scf_steps = {}, {}, [], [], []
+    diagnostics = SlabDiagnostics(split) if logging.getLogger().isEnabledFor(logging.DEBUG) else None
     start_time = time.time()
     for batch in data_loader:
         batch = batch.to(device)
         output = model_eval_wrapper(model, batch.to_dict(), training=False, ema=ema)
         if hasattr(model, "batch_positions"):
             del model.batch_positions
+        if diagnostics is not None:
+            diagnostics.on_device(model, model_eval_wrapper, batch, output)
         # avoid memory leaks
         output = tensor_dict_to_device({key: value.detach() if isinstance(value, torch.Tensor) else value
                                         for key, value in output.items()}, device=torch.device("cpu"))
@@ -381,6 +385,8 @@ def _evaluate(
                     (weight.sum(), (weight*error).sum(), (weight*error.square()).sum())).double()
                 if function.key == 'work_function':
                     wf_rows.append(_dipole_step_rows(batch, output, error, weight))
+                    if diagnostics is not None:
+                        diagnostics.rows(batch, output, error, weight)
         for key, field in FIELD_ERRORS:
             if field+'_dft' in output:
                 label = 'fourier_potential' if field.endswith('potential') else 'fourier_density'
@@ -572,6 +578,8 @@ def _evaluate(
     rows = [row for chunk in wf_rows for row in chunk]
     if rows:
         _voltage_diagnostics(rows, split)
+    if diagnostics is not None:
+        diagnostics.log(objective, loss_fn.loss_weights)
     return avg_loss, aux
 
 

@@ -11,7 +11,6 @@ heads:
       fermi_level: vasp_efermi
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
-      # The neutral atoms of the DFT runs, written by scripts/collect_vasp_data.py.
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
       vacuum_zfrac: vacuum_zfrac
@@ -42,11 +41,14 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
-  type: CoupledResponse
+  type: VariationalFlowResponse
+  flow_cutoff: 4.0
+  field_input: none
+  response_scale: 0.1
 potential_amplitudes_smearing_width: 1.5
-batch_size: 8
-valid_batch_size: 8
-lr: 0.001
+batch_size: 16
+valid_batch_size: 16
+lr: 0.003
 optimizer: adamw
 scheduler: none
 weight_decay: 0.001
@@ -67,16 +69,15 @@ error_table: ElectrostaticRMSE
 valid_set_seed: 7777
 checkpoints_dir: checkpoints
 compute_forces: true
-foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 log_dir: logs
 results_dir: results
 model_dir: models
 train_schedule:
   0:
-    name: heads
+    name: stage1
     start: 0
-    end: 9
-    lr: 0.001
+    end: 49
+    lr: 0.003
     loss:
       energy_per_atom: 100
       forces: 500
@@ -91,29 +92,8 @@ train_schedule:
       fermi_level: 100
     fixed_point_training_options:
       mode: direct
-    freeze_foundation_backbone: true
     checkpoint_metric: rmse_wf_abs
   1:
-    name: stage1
-    start: 10
-    end: 49
-    lr: 0.001
-    loss:
-      energy_per_atom: 100
-      forces: 500
-      dipole: 10
-      fourier_density:
-        weight: 10
-        reference: farfield
-      fourier_potential:
-        weight: 100
-        reference: raw+smeared
-      vacuum_potential: 100
-      fermi_level: 100
-    fixed_point_training_options:
-      mode: direct
-    checkpoint_metric: rmse_wf_abs
-  2:
     name: stage2
     start: 50
     end: 149
@@ -133,7 +113,7 @@ train_schedule:
     fixed_point_training_options:
       mode: direct
     checkpoint_metric: rmse_wf_abs
-  3:
+  2:
     name: stage3
     start: 150
     end: 249
@@ -153,7 +133,7 @@ train_schedule:
     fixed_point_training_options:
       mode: direct
     checkpoint_metric: rmse_wf_abs
-  4:
+  3:
     name: stage4
     start: 250
     end: 300
