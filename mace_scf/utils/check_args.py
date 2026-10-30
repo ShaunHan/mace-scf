@@ -213,7 +213,7 @@ def fill_fixed_point_update_config(args):
             raise ValueError('fixed_point_update_config must be a mapping containing type')
 
     if args.fixed_point_update_config['type'] in ('CoupledResponse', 'ChargeFlowResponse', 'VariationalResponse',
-                                                  'VariationalFlowResponse'):
+                                                  'VariationalFlowResponse', 'BandResponse'):
         args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
                                                   getattr(args, 'potential_amplitudes_smearing_width', 1.5))
 

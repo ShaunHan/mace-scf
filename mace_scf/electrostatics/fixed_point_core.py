@@ -489,12 +489,19 @@ class FixedPointCore(torch.nn.Module):
             )
             energies.append(energy)
 
-            if not getattr(self.field_dependent_charges_map, "variational", False):
+            if (not getattr(self.field_dependent_charges_map, "variational", False)
+                    or getattr(self.field_dependent_charges_map, "permanent_charges", False)):
                 charge_sources = lr_source_map(
                     node_attrs=data["node_attrs"] if getattr(self.field_dependent_charges_map, "coupled", False) else backbone_attrs,
                     node_feats=readout_feats if getattr(self.field_dependent_charges_map, "coupled", False) else physical_feats,
                 )
                 charge_density += charge_sources.squeeze(-2)
+
+        if getattr(self.field_dependent_charges_map, "permanent_charges", False):
+            # The permanent charges of a structure sum to zero; its total charge is placed by the band law.
+            counts = scatter_sum(torch.ones_like(charge_density[:, 0]), data["batch"], dim=0, dim_size=num_graphs)
+            mean = scatter_sum(charge_density[:, 0], data["batch"], dim=0, dim_size=num_graphs)/counts.clamp_min(1.)
+            charge_density = torch.cat((charge_density[:, :1]-mean[data["batch"], None], charge_density[:, 1:]), -1)
 
         all_layer_feats = self.layer_feature_mixer(torch.stack(features, dim=0))
         if hasattr(self, "foundation_energy_scale"):

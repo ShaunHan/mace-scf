@@ -41,11 +41,9 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
-  type: VariationalFlowResponse
-  flow_cutoff: 4.0
-  bond_envelope: covalent
-  bond_reach: 1.35
-  response_priors: true
+  type: BandResponse
+  gap: 1.0
+  smearing: 0.2
   response_scale: 1.0
   field_input: none
 potential_amplitudes_smearing_width: 1.5
@@ -56,7 +54,7 @@ optimizer: adamw
 scheduler: none
 weight_decay: 0.001
 field_block_weight_decay: 0.01
-local_charges_weight_decay: 0.0
+local_charges_weight_decay: 0.05
 ema: true
 ema_decay: 0.99
 clip_grad: 10.0
@@ -90,7 +88,7 @@ train_schedule:
         reference: farfield
       fourier_potential:
         weight: 100
-        reference: smeared
+        reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
@@ -110,7 +108,7 @@ train_schedule:
         reference: farfield
       fourier_potential:
         weight: 100
-        reference: smeared
+        reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
@@ -130,7 +128,7 @@ train_schedule:
         reference: farfield
       fourier_potential:
         weight: 100
-        reference: smeared
+        reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:
@@ -150,7 +148,7 @@ train_schedule:
         reference: farfield
       fourier_potential:
         weight: 100
-        reference: smeared
+        reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
     fixed_point_training_options:

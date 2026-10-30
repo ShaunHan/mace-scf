@@ -19,7 +19,7 @@ heads:
       counter_charge_width: counter_charge_width
       counter_charge_zfrac: counter_charge_zfrac
       counter_charge_center: counter_charge_center
-seed: 1234
+seed: 7777
 device: cuda
 enable_cueq: true
 default_dtype: float64
@@ -41,13 +41,8 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
-  type: VariationalFlowResponse
-  flow_cutoff: 4.0
-  bond_envelope: covalent
-  bond_reach: 1.35
-  response_priors: true
+  type: VariationalResponse
   response_scale: 1.0
-  field_input: none
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
