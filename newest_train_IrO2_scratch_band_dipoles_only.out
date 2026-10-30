@@ -1,0 +1,856 @@
+2026-10-30 21:39:37.874 INFO: MACE version: 0.3.16
+2026-10-30 21:39:38.147 INFO: CUDA version: 12.8, CUDA device: 0
+2026-10-30 21:39:38.147 INFO: Configuration: Namespace(config='config.yaml', name='fit_0', seed=7777, work_dir='.', log_dir='logs', model_dir='models', checkpoints_dir='checkpoints', results_dir='results', downloads_dir='./downloads', device='cuda', default_dtype='float64', distributed=False, launcher='slurm', log_level='INFO', plot=True, plot_frequency=0, plot_interaction_e=False, r_max=6.0, radial_type='bessel', num_radial_basis=8, num_cutoff_basis=5, pair_repulsion=False, distance_transform='None', apply_cutoff=True, use_last_readout_only=False, use_embedding_readout=False, interaction='RealAgnosticResidualInteractionBlock', interaction_first='RealAgnosticResidualInteractionBlock', max_ell=3, correlation=3, use_reduced_cg=False, use_so3=False, use_agnostic_product=False, num_interactions=2, MLP_irreps='64x0e', radial_MLP='[64, 64, 64]', hidden_irreps='64x0e + 64x1o', edge_irreps=None, use_edge_irreps_first=False, num_channels=None, max_L=None, gate='silu', num_recursion_steps=1, field_si=False, add_local_electron_energy=False, fixedpoint_update_config=None, scaling='rms_forces_scaling', avg_num_neighbors=1, compute_avg_num_neighbors=True, compute_stress=False, compute_forces=True, train_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_2462_vasp_sp_train_raw.xyz', valid_file='/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_2462_vasp_sp_valid_raw.xyz', valid_fraction=0.1, test_file=None, test_dir=None, multi_processed_test=False, num_workers=0, pin_memory=True, atomic_numbers=None, mean=None, std=None, statistics_file=None, les_arguments=None, E0s='{1: -1.20639624, 8: -1.98686083, 77: -1.75921356}', pseudolabel_replay=False, pseudolabel_replay_compute_stress=False, foundation_filter_elements=True, multiheads_finetuning=False, foundation_head=None, weight_pt_head=1.0, real_pt_data_ratio_threshold=0.1, num_samples_pt=10000, force_mh_ft_lr=False, subselect_pt='random', filter_type_pt='none', allow_random_padding_pt=True, pt_train_file=None, pt_valid_file=None, foundation_model_elements=False, keep_isolated_atoms=False, lora=False, lora_rank=4, lora_alpha=1.0, energy_key=None, forces_key=None, virials_key=None, stress_key=None, dipole_key=None, polarizability_key=None, head_key=None, charges_key=None, elec_temp_key=None, total_spin_key=None, total_charge_key=None, embedding_specs=None, skip_evaluate_heads='pt_head', forces_weight=100.0, swa_forces_weight=100.0, energy_weight=1.0, swa_energy_weight=1000.0, virials_weight=1.0, swa_virials_weight=10.0, stress_weight=1.0, swa_stress_weight=10.0, dipole_weight=1.0, swa_dipole_weight=1.0, swa_polarizability_weight=1.0, polarizability_weight=1.0, config_type_weights={'slab': 1.0, 'bulk': 1.0}, huber_delta=0.01, beta=0.9, beta1_schedulefree=0.9, beta2_schedulefree=0.98, batch_size=16, valid_batch_size=16, lr=0.003, swa_lr=0.001, weight_decay=0.001, lr_params_factors='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}', freeze=None, scheduler='none', lr_factor=0.8, scheduler_patience=50, lr_scheduler_gamma=0.9993, swa=False, start_swa=None, lbfgs=False, ema=True, ema_decay=0.99, max_num_epochs=301, patience=1000, foundation_model=None, foundation_model_kwargs='{}', foundation_model_readout=True, eval_interval=5, keep_checkpoints=True, save_all_checkpoints=True, save_cpu=True, clip_grad=10.0, dry_run=False, enable_cueq=True, only_cueq=False, enable_oeq=False, wandb=False, wandb_dir=None, wandb_project='', wandb_entity='', wandb_name='', wandb_log_hypers=['num_channels', 'max_L', 'correlation', 'lr', 'swa_lr', 'weight_decay', 'batch_size', 'max_num_epochs', 'start_swa', 'energy_weight', 'forces_weight'], amsgrad=False, atomic_multipoles_key=None, electrostatic_potentials_key=None, external_field_key=None, fermi_level_key=None, include_local_electron_energy=False, atomic_multipoles_max_l=1, atomic_multipoles_smearing_width=1.5, potential_amplitudes_smearing_width=1.5, kspace_cutoff_factor=1.0, atomic_formal_charges='{}', formal_charges_from_data=False, field_feature_max_l=1, field_feature_widths='[1.5, 3.0]', dont_include_pbc_corrections=False, include_electrostatic_self_interaction=True, valid_set_seed=7777, quadrupole_feature_corrections=False, electrostatic_pbc_method='mixed_periodic', static_bond_transfer_block='OxidationDependentSymmetricPredictionSourceBlock', oxidation_state_mixer='SumOxidationStateMixer', return_electrostatic_potentials=False, train_schedule=[{'name': 'stage1', 'start': 0, 'end': 49, 'lr': 0.003, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 10}, 'fourier_density': {'weight': 10, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100, 'reference': 'raw+smeared'}, 'vacuum_potential': {'weight': 100}, 'fermi_level': {'weight': 100}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='direct', scf=None, linear_solve='inverse', fixedpoint_scf_stability=False), 'checkpoint_metric': 'rmse_wf_abs'}, {'name': 'stage2', 'start': 50, 'end': 149, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 100}, 'forces': {'weight': 500}, 'dipole': {'weight': 100}, 'fourier_density': {'weight': 100, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100, 'reference': 'raw+smeared'}, 'vacuum_potential': {'weight': 100}, 'fermi_level': {'weight': 100}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='direct', scf=None, linear_solve='inverse', fixedpoint_scf_stability=False), 'checkpoint_metric': 'rmse_wf_abs'}, {'name': 'stage3', 'start': 150, 'end': 249, 'lr': 0.001, 'loss': {'energy_per_atom': {'weight': 500}, 'forces': {'weight': 500}, 'dipole': {'weight': 500}, 'fourier_density': {'weight': 100, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100, 'reference': 'raw+smeared'}, 'vacuum_potential': {'weight': 100}, 'fermi_level': {'weight': 100}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='direct', scf=None, linear_solve='inverse', fixedpoint_scf_stability=False), 'checkpoint_metric': 'rmse_wf_abs'}, {'name': 'stage4', 'start': 250, 'end': 300, 'lr': 0.0005, 'loss': {'energy_per_atom': {'weight': 1000}, 'forces': {'weight': 500}, 'dipole': {'weight': 500}, 'fourier_density': {'weight': 100, 'reference': 'farfield'}, 'fourier_potential': {'weight': 100, 'reference': 'raw+smeared'}, 'vacuum_potential': {'weight': 100}, 'fermi_level': {'weight': 100}}, 'fixed_point_training_options': FixedPointTrainingOptions(mode='direct', scf=None, linear_solve='inverse', fixedpoint_scf_stability=False), 'checkpoint_metric': 'rmse_wf_abs'}], fixed_point_update_config={'type': <class 'mace_scf.electrostatics.coupled.BandResponse'>, 'gap': 1.0, 'smearing': 0.2, 'response_scale': 1.0, 'field_input': 'none', 'permanent_charges': False, 'potential_amplitudes_smearing_width': 1.5}, field_readout_config={'type': <class 'mace_scf.electrostatics.field_blocks.StrictQuadraticFieldEnergyReadout'>}, field_block_weight_decay=0.01, local_charges_weight_decay=0.0, field_feature_norms='None', fermi_level_offset=None, field_norm_factor=1.0, oxidation_state_range='(-6.0, 6.0)', polarizable_charges=False, beta_two=0.999, log_on_test_sets=False, scf_convergence_summary=False, use_linear_final_readout=False, include_field_si=False, use_linear_local_charges=False, atom_density_scaling='None', allow_low_density_pbc=False, override_pbc_checks=False, low_density_pbc_max_volume_per_atom=100.0, wandb_watch='off', wandb_watch_log_freq=50, debug_log_grad_summary=False, fixedpoint_initial_charge_head_scale=0.01, heads={'default': {'arrays_keys': {'forces': 'vasp_forces'}, 'info_keys': {'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted', 'fourier_potential': 'vasp_phi_fftn_shifted', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'counter_charge': 'counter_charge', 'counter_charge_width': 'counter_charge_width', 'counter_charge_zfrac': 'counter_charge_zfrac', 'counter_charge_center': 'counter_charge_center', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'counter_charge_xfrac': 'counter_charge_xfrac', 'counter_charge_yfrac': 'counter_charge_yfrac', 'stress': 'none', 'head': 'head'}}}, error_table='ElectrostaticRMSE', compute_polarizability=True, restart_latest=False, replay_interval=1, model='FixedPoint', optimizer='adamw', qeq_charges='autograd', train_hardness=False, read_enegs=False, read_hardness=False, enegs_key=None, default_hardness=2.0, replay_head={})
+2026-10-30 21:39:38.147 INFO: Using the key specifications to parse data:
+2026-10-30 21:39:38.147 INFO: KeySpecification(info_keys={'dipole': 'vasp_dipole', 'dipole_correction_zfrac': 'dipole_correction_zfrac', 'dipole_weight': 'config_dipole_weight', 'energy': 'vasp_free_energy', 'external_field': 'external_field', 'fermi_level': 'vasp_efermi', 'fourier_density': 'vasp_rho_fftn_shifted', 'fourier_potential': 'vasp_phi_fftn_shifted', 'fourier_proto_potential': 'vasp_proto_phi_fftn_shifted', 'total_charge': 'total_charge', 'vacuum_zfrac': 'vacuum_zfrac', 'vacuum_potential': 'vacuum_potential', 'counter_charge': 'counter_charge', 'counter_charge_width': 'counter_charge_width', 'counter_charge_zfrac': 'counter_charge_zfrac', 'counter_charge_center': 'counter_charge_center', 'vacuum_xfrac': 'vacuum_xfrac', 'vacuum_yfrac': 'vacuum_yfrac', 'dipole_correction_xfrac': 'dipole_correction_xfrac', 'dipole_correction_yfrac': 'dipole_correction_yfrac', 'counter_charge_xfrac': 'counter_charge_xfrac', 'counter_charge_yfrac': 'counter_charge_yfrac', 'stress': 'none', 'head': 'head'}, arrays_keys={'forces': 'vasp_forces'})
+2026-10-30 21:43:28.513 DEBUG: Loading training file: /fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/data/IrO2OH_110_0_2462_vasp_sp_train_raw.xyz
+2026-10-30 21:45:00.955 INFO: Training set 1/1 [dipole components: 1897, dipole_correction_zfrac: 1897, dipole_weight: 1970, energy: 1970, external_field: 1970, fermi_level: 1897, fourier_density: 1970, fourier_potential: 1970, fourier_proto_potential: 1970, total_charge: 1970, vacuum_zfrac: 1897, vacuum_potential: 1897, counter_charge: 1970, counter_charge_width: 583, counter_charge_zfrac: 583, counter_charge_center: 0, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, counter_charge_xfrac: 0, counter_charge_yfrac: 0, stress: 0, head: 1970, forces: 1970]
+2026-10-30 21:45:00.986 INFO: Total Training set [dipole components: 1897, dipole_correction_zfrac: 1897, dipole_weight: 1970, energy: 1970, external_field: 1970, fermi_level: 1897, fourier_density: 1970, fourier_potential: 1970, fourier_proto_potential: 1970, total_charge: 1970, vacuum_zfrac: 1897, vacuum_potential: 1897, counter_charge: 1970, counter_charge_width: 583, counter_charge_zfrac: 583, counter_charge_center: 0, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, counter_charge_xfrac: 0, counter_charge_yfrac: 0, stress: 0, head: 1970, forces: 1970]
+2026-10-30 21:45:24.974 INFO: Validation set 1/1 [dipole components: 469, dipole_correction_zfrac: 469, dipole_weight: 493, energy: 493, external_field: 493, fermi_level: 469, fourier_density: 493, fourier_potential: 493, fourier_proto_potential: 493, total_charge: 493, vacuum_zfrac: 469, vacuum_potential: 469, counter_charge: 493, counter_charge_width: 146, counter_charge_zfrac: 146, counter_charge_center: 0, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, counter_charge_xfrac: 0, counter_charge_yfrac: 0, stress: 0, head: 493, forces: 493]
+2026-10-30 21:45:24.975 INFO: Total Validation set [dipole components: 469, dipole_correction_zfrac: 469, dipole_weight: 493, energy: 493, external_field: 493, fermi_level: 469, fourier_density: 493, fourier_potential: 493, fourier_proto_potential: 493, total_charge: 493, vacuum_zfrac: 469, vacuum_potential: 469, counter_charge: 493, counter_charge_width: 146, counter_charge_zfrac: 146, counter_charge_center: 0, vacuum_xfrac: 0, vacuum_yfrac: 0, dipole_correction_xfrac: 0, dipole_correction_yfrac: 0, counter_charge_xfrac: 0, counter_charge_yfrac: 0, stress: 0, head: 493, forces: 493]
+2026-10-30 21:45:24.975 INFO: Total number of configurations: train=1970, valid=493, tests=[]
+2026-10-30 21:45:25.288 INFO: Neutral atoms of [1, 8, 77] from 32 proto spectra to 2.31/A (relative residual 2.3e-04); potential integrals [-28.92, -74.43, -226.7] eV A^3
+2026-10-30 21:45:25.396 INFO: AtomicNumberTable: (np.int64(1), np.int64(8), np.int64(77))
+2026-10-30 21:45:25.397 INFO: Isolated Atomic Energies (E0s) not in training file, using command line argument
+2026-10-30 21:45:48.677 INFO: Atomic energies: [-1.20639624, -1.98686083, -1.75921356]
+2026-10-30 21:45:50.263 INFO: Average number of neighbors: 76.15822638624572
+2026-10-30 21:45:50.284 INFO: computed DFT Fermi-level initialization -1.348340379546653
+2026-10-30 21:45:50.285 INFO: using Fermi level offset -1.348340379546653
+2026-10-30 21:45:50.285 INFO: using normalization for field features None
+2026-10-30 21:45:50.285 INFO: using atom density scaling factors [1. 1. 1.]
+2026-10-30 21:45:50.285 INFO: Building model
+2026-10-30 21:45:50.285 INFO: Hidden irreps: 64x0e + 64x1o
+2026-10-30 21:45:51.139 INFO: Rescaled initial FixedPoint charge heads by 0.01 to keep initial charge predictions small
+2026-10-30 21:45:52.547 DEBUG: Fixed training-geometry readout units by layer/irrep: [[1.05704069426273, 1.0000026298336075], [1.02028961768906, 1.0000013116268145]]; initial energy function preserved by inverse weight transformation
+2026-10-30 21:45:53.246 INFO: Coupled response: 2 local potential channels, Gaussian receiver widths [1.5, 3.0]
+2026-10-30 21:45:53.521 INFO: SCF CUDA linear algebra: cuSOLVER selected (process-wide)
+2026-10-30 21:45:56.492 DEBUG: Training-only total-energy reference: 4.12867 -> 0.0356327 eV/atom on 64 graphs
+2026-10-30 21:45:56.495 DEBUG: Normalized paths for operand 2 in uv,iu,iv operands=[(64, 64)],[(1, 64)],[(1, 64)] paths=[op0[0]*op1[0]*op2[0]*1.]: got uv,iu,iv operands=[(64, 64)],[(1, 64)],[(1, 64)] paths=[op0[0]*op1[0]*op2[0]*0.12]
+2026-10-30 21:45:56.505 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+2026-10-30 21:45:56.505 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1
+2026-10-30 21:45:56.506 DEBUG: Squeezed uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1 to u,u,,u sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64
+2026-10-30 21:45:56.507 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1
+2026-10-30 21:45:56.508 DEBUG: Squeezed uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1 to u,u,,u sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64
+2026-10-30 21:45:56.530 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=16384,1024,1024 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=64 v=64: got uv,iu,iv sizes=16384,1024,1024 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=64 v=64
+2026-10-30 21:45:56.548 DEBUG: Normalized paths for operand 3 in uvw,iu,jv,kw+ijk sizes=12288,64,3,256 num_segments=1,1,1,2 num_paths=1 i=1 j=1 k={1, 3} u=64 v=3 w=64: got uvw,iu,jv,kw+ijk sizes=12288,64,3,256 num_segments=1,1,1,2 num_paths=1 i=1 j=1 k={1, 3} u=64 v=3 w=64
+2026-10-30 21:45:57.579 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(23,)],[(16,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 23, 1) c.nnz=276]: got ,,,, sizes=23,16,16,16,1 num_segments=23,16,16,16,1 num_paths=276
+2026-10-30 21:45:57.582 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(4,)],[(16,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 4, 1) c.nnz=16]: got ,,, sizes=4,16,16,1 num_segments=4,16,16,1 num_paths=16
+2026-10-30 21:45:57.583 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(1,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 1) c.nnz=1]: got ,, sizes=1,16,1 num_segments=1,16,1 num_paths=1
+2026-10-30 21:45:57.630 DEBUG: Flattened abciu in u,a,b,c,i+abcui operands=[(51,)],[(16,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*op4[0]*c c.shape=(16, 16, 16, 51, 3) c.nnz=1554]: got ,,,, sizes=51,16,16,16,3 num_segments=51,16,16,16,3 num_paths=1554
+2026-10-30 21:45:57.639 DEBUG: Flattened abiu in u,a,b,i+abui operands=[(6,)],[(16,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*op3[0]*c c.shape=(16, 16, 6, 3) c.nnz=70]: got ,,, sizes=6,16,16,3 num_segments=6,16,16,3 num_paths=70
+2026-10-30 21:45:57.640 DEBUG: Flattened aiu in u,a,i+aui operands=[(1,)],[(16,)],[(3,)] paths=[op0[0]*op1[0]*op2[0]*c c.shape=(16, 1, 3) c.nnz=3]: got ,, sizes=1,16,3 num_segments=1,16,3 num_paths=3
+2026-10-30 21:45:57.966 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.967 DEBUG: Normalized paths for operand 2 in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1
+2026-10-30 21:45:57.968 DEBUG: Flattened aiw in w,a,i+aiw sizes=2,16,4 num_segments=2,1,2 num_paths=2 a=16 i={1, 3} w=1: got ,, sizes=2,16,4 num_segments=2,16,4 num_paths=4
+2026-10-30 21:45:57.968 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
+2026-10-30 21:45:57.968 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.968 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.970 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.970 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.971 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.971 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.972 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.972 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.976 DEBUG: Normalized paths for operand 3 in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}
+2026-10-30 21:45:57.977 DEBUG: Flattened abiw in w,a,b,i+abiw sizes=7,16,16,4 num_segments=2,1,1,2 num_paths=2 a=16 b=16 i={1, 3} w={3, 4}: got ,,, sizes=7,16,16,4 num_segments=7,16,16,4 num_paths=86
+2026-10-30 21:45:57.978 DEBUG: _reduced_tensor_product_basis (0e+1o+2e+3o, 0e+1o+2e+3o, 0e+1o+2e+3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o}), use _optimized_reduced_symmetric_tensor_product_basis
+2026-10-30 21:45:57.978 DEBUG: _reduced_tensor_product_basis (0e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-30 21:45:57.979 DEBUG: _reduced_tensor_product_basis (0e, 0e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.979 DEBUG: _reduced_tensor_product_basis (0e, 0e, 0e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.980 DEBUG: _reduced_tensor_product_basis (1o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-30 21:45:57.980 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.982 DEBUG: _reduced_tensor_product_basis (1o, 1o, 1o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.982 DEBUG: _reduced_tensor_product_basis (1o, 1o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 1e, 2e, 1o})
+2026-10-30 21:45:57.984 DEBUG: _reduced_tensor_product_basis (2e,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-30 21:45:57.984 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.986 DEBUG: _reduced_tensor_product_basis (2e, 2e, 2e), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.986 DEBUG: _reduced_tensor_product_basis (2e, 2e), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3o, 1o, 2o, 2e})
+2026-10-30 21:45:57.988 DEBUG: _reduced_tensor_product_basis (3o,), frozenset({(1, (0,))}), keep_ir=frozenset({0e, 2o, 7o, 3o, 2e, 4e, 3e, 5o, 6e, 1e, 6o, 1o, 5e, 4o, 0o})
+2026-10-30 21:45:57.988 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({0e, 2o, 3o, 2e, 3e, 1e, 1o, 4e})
+2026-10-30 21:45:57.990 DEBUG: _reduced_tensor_product_basis (3o, 3o, 3o), frozenset({(1, (0, 1, 2)), (1, (1, 0, 2)), (1, (2, 0, 1)), (1, (1, 2, 0)), (1, (0, 2, 1)), (1, (2, 1, 0))}), keep_ir=frozenset({0e, 1o})
+2026-10-30 21:45:57.990 DEBUG: _reduced_tensor_product_basis (3o, 3o), frozenset({(1, (0, 1)), (1, (1, 0))}), keep_ir=frozenset({3e, 3o, 2e, 4e})
+2026-10-30 21:45:58.042 DEBUG: Normalized paths for operand 4 in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}
+2026-10-30 21:45:58.063 DEBUG: Flattened abciw in w,a,b,c,i+abciw sizes=20,16,16,16,4 num_segments=2,1,1,1,2 num_paths=2 a=16 b=16 c=16 i={1, 3} w={8, 12}: got ,,,, sizes=20,16,16,16,4 num_segments=20,16,16,16,4 num_paths=1949
+2026-10-30 21:45:58.415 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64: got uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+2026-10-30 21:45:58.426 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64: got uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+2026-10-30 21:45:58.438 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+2026-10-30 21:45:58.439 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1
+2026-10-30 21:45:58.441 DEBUG: Squeezed uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1 to u,u,,u sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64
+2026-10-30 21:45:58.443 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1
+2026-10-30 21:45:58.445 DEBUG: Squeezed uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1 to u,u,,u sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64
+2026-10-30 21:45:58.467 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=40960,2560,1024 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=64 v=64: got uv,iu,iv sizes=40960,2560,1024 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=64 v=64
+2026-10-30 21:45:58.503 DEBUG: Normalized paths for operand 3 in uvw,iu,jv,kw+ijk sizes=24576,256,3,256 num_segments=2,2,1,2 num_paths=2 i={1, 3} j=1 k={1, 3} u=64 v=3 w=64: got uvw,iu,jv,kw+ijk sizes=24576,256,3,256 num_segments=2,2,1,2 num_paths=2 i={1, 3} j=1 k={1, 3} u=64 v=3 w=64
+2026-10-30 21:45:58.533 DEBUG: Normalized paths for operand 2 in uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64: got uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.layer2.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.layer0.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.layer3.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.0.linear_up.weight after adapting shape (4096,) → (1, 4096) -> torch.Size([1, 4096])
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.1.linear_up.weight after adapting shape (8192,) → (1, 8192) -> torch.Size([1, 8192])
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.0.linear.weight after adapting shape (16384,) → (1, 16384) -> torch.Size([1, 16384])
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.1.skip_tp.weight after adapting shape (24576,) → (1, 24576) -> torch.Size([1, 24576])
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.layer3.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.1.linear.weight after adapting shape (40960,) → (1, 40960) -> torch.Size([1, 40960])
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.0.conv_tp_weights.layer1.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring key products.1.linear.weight after adapting shape (8192,) → (1, 8192) -> torch.Size([1, 8192])
+2026-10-30 21:45:58.545 DEBUG: Transferring key interactions.0.skip_tp.weight after adapting shape (12288,) → (1, 12288) -> torch.Size([1, 12288])
+2026-10-30 21:45:58.545 DEBUG: Transferring key products.0.linear.weight after adapting shape (8192,) → (1, 8192) -> torch.Size([1, 8192])
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.layer0.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.layer2.weight
+2026-10-30 21:45:58.545 DEBUG: Transferring additional key: interactions.1.conv_tp_weights.layer1.weight
+2026-10-30 21:45:58.547 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+2026-10-30 21:45:58.548 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=256,64,16,1024 num_segments=4,1,4,4 num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1
+2026-10-30 21:45:58.549 DEBUG: Squeezed uv,u,v,uv sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64 v=1 to u,u,,u sizes=256,64,16,1024 num_segments=4,1,16,16 num_paths=16 u=64
+2026-10-30 21:45:58.552 DEBUG: Normalized paths for operand 3 in uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+2026-10-30 21:45:58.553 DEBUG: Flattened ijk in uv,iu,jv,kuv+ijk sizes=640,256,16,2560 num_segments=10,2,4,10 num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1: got uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1
+2026-10-30 21:45:58.555 DEBUG: Squeezed uv,u,v,uv sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64 v=1 to u,u,,u sizes=640,256,16,2560 num_segments=10,4,16,40 num_paths=86 u=64
+2026-10-30 21:45:58.557 INFO: CuEquivariance ACTIVE: 2 interaction/product layers, O3_e3nn, ir_mul, fused CUDA convolution=True; electronic response/readouts retain their original coordinates
+2026-10-30 21:45:58.558 INFO: Fourier losses and RMSEs use common model/label support with model cutoff 1.84672 Angstrom^-1. Raw denotes unsmoothed retained modes; DFT modes outside this support are not included.
+2026-10-30 21:45:58.562 INFO: No external LR schedule: the learning rate follows the explicit training stages.
+2026-10-30 21:45:58.563 INFO: restart_latest is False; starting from initialized model and optimizer.
+2026-10-30 21:45:58.563 INFO: FixedPointCore(
+  (node_embedding): LinearNodeEmbeddingBlock(
+    (linear): Linear(3x0e -> 64x0e | 192 weights)
+  )
+  (radial_embedding): RadialEmbeddingBlock(
+    (bessel_fn): BesselBasis(r_max=6.0, num_basis=8, trainable=False)
+    (cutoff_fn): PolynomialCutoff(p=5, r_max=6.0)
+  )
+  (spherical_harmonics): SphericalHarmonics()
+  (atomic_energies_fn): AtomicEnergiesBlock(energies=[[-4.1889, -6.3790, -7.2413]])
+  (interactions): ModuleList(
+    (0): RealAgnosticResidualInteractionBlock(
+      (linear_up): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=4096
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[4096:1⨯(64,64)] b=[64:1⨯(1,64)] -> C=[64:1⨯(1,64)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=1 i=1 u=64 v=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(64, 64)],[(1, 64)],[(1, 64)] paths=[op0[0]*op1[0]*op2[0]*0.12]
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv operands=[(64, 64)],[(1, 64)],[(1, 64)] paths=[op0[0]*op1[0]*op2[0]*0.12]
+            )
+          )
+        )
+      )
+      (conv_tp): FusedConvolution(
+        (fused): ╭ a=[256:4⨯(64)] b=[64:1⨯(64)] c=[16:16⨯()] -> D=[1024:16⨯(64)]
+        ╰─ []·a[u]·b[u]·c[]➜D[u] ─ num_paths=16 u=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+        (unfused): ChannelWiseTensorProduct(
+          shared_weights=False, internal_weights=False, weight_numel=256
+          (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (f): ╭ a=[256:4⨯(64,1)] b=[64:1⨯(1,64)] c=[16:(1,1)+(3,1)+(5,1)+...] -> D=[1024:(1,64,1)+(3,64,1)+...]
+          ╰─ [ijk]·a[uv]·b[iu]·c[jv]➜D[kuv] ─ num_paths=4 i=1 j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+          SegmentedPolynomial(
+            (m): SegmentedPolynomialFromUniform1dJit()
+            (fallback): SegmentedPolynomialFromUniform1dJit()
+          )
+        )
+      )
+      (conv_tp_weights): FullyConnectedNet[8, 64, 64, 64, 256]
+      (linear): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=16384
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[16384:4⨯(64,64)] b=[1024:(1,64)+(3,64)+(5,64)+...] -> C=[1024:(1,64)+(3,64)+(5,64)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=4 i={1, 3, 5, 7} u=64 v=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=16384,1024,1024 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=64 v=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=16384,1024,1024 num_segments=4,4,4 num_paths=4 i={1, 3, 5, 7} u=64 v=64
+            )
+          )
+        )
+      )
+      (skip_tp): FullyConnectedTensorProduct(
+        shared_weights=True, internal_weights=True, weight_numel=12288
+        (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[12288:1⨯(64,3,64)] b=[64:1⨯(1,64)] c=[3:1⨯(1,3)] -> D=[256:(1,64)+(3,64)]
+        ╰─ [ijk]·a[uvw]·b[iu]·c[jv]➜D[kw] ─ num_paths=1 i=1 j=1 k={1, 3} u=64 v=3 w=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uvw,iu,jv,kw+ijk sizes=12288,64,3,256 num_segments=1,1,1,2 num_paths=1 i=1 j=1 k={1, 3} u=64 v=3 w=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uvw,iu,jv,kw+ijk sizes=12288,64,3,256 num_segments=1,1,1,2 num_paths=1 i=1 j=1 k={1, 3} u=64 v=3 w=64
+            )
+          )
+        )
+      )
+      (reshape): reshape_irreps()
+    )
+    (1): RealAgnosticResidualInteractionBlock(
+      (linear_up): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=8192
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[8192:2⨯(64,64)] b=[256:(1,64)+(3,64)] -> C=[256:(1,64)+(3,64)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3} u=64 v=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+            )
+          )
+        )
+      )
+      (conv_tp): FusedConvolution(
+        (fused): ╭ a=[640:10⨯(64)] b=[256:4⨯(64)] c=[16:16⨯()] -> D=[2560:40⨯(64)]
+        ╰─ []·a[u]·b[u]·c[]➜D[u] ─ num_paths=86 u=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+        (unfused): ChannelWiseTensorProduct(
+          shared_weights=False, internal_weights=False, weight_numel=640
+          (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+          (f): ╭ a=[640:10⨯(64,1)] b=[256:(1,64)+(3,64)] c=[16:(1,1)+(3,1)+(5,1)+...] -> D=[2560:(1,64,1)+(1,64,1)+...]
+          ╰─ [ijk]·a[uv]·b[iu]·c[jv]➜D[kuv] ─ num_paths=10 i={1, 3} j={1, 3, 5, 7} k={1, 3, 5, 7} u=64 v=1
+          SegmentedPolynomial(
+            (m): SegmentedPolynomialFromUniform1dJit()
+            (fallback): SegmentedPolynomialFromUniform1dJit()
+          )
+        )
+      )
+      (conv_tp_weights): FullyConnectedNet[8, 64, 64, 64, 640]
+      (linear): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=40960
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[40960:10⨯(64,64)] b=[2560:(1,64)+(1,64)+(3,64)+...] -> C=[1024:(1,64)+(3,64)+(5,64)+...]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=10 i={1, 3, 5, 7} u=64 v=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=40960,2560,1024 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=64 v=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=40960,2560,1024 num_segments=10,10,4 num_paths=10 i={1, 3, 5, 7} u=64 v=64
+            )
+          )
+        )
+      )
+      (skip_tp): FullyConnectedTensorProduct(
+        shared_weights=True, internal_weights=True, weight_numel=24576
+        (transpose_in1): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_in2): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[24576:2⨯(64,3,64)] b=[256:(1,64)+(3,64)] c=[3:1⨯(1,3)] -> D=[256:(1,64)+(3,64)]
+        ╰─ [ijk]·a[uvw]·b[iu]·c[jv]➜D[kw] ─ num_paths=2 i={1, 3} j=1 k={1, 3} u=64 v=3 w=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uvw,iu,jv,kw+ijk sizes=24576,256,3,256 num_segments=2,2,1,2 num_paths=2 i={1, 3} j=1 k={1, 3} u=64 v=3 w=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uvw,iu,jv,kw+ijk sizes=24576,256,3,256 num_segments=2,2,1,2 num_paths=2 i={1, 3} j=1 k={1, 3} u=64 v=3 w=64
+            )
+          )
+        )
+      )
+      (reshape): reshape_irreps()
+    )
+  )
+  (products): ModuleList(
+    (0-1): 2 x EquivariantProductBasisBlock(
+      (symmetric_contractions): SymmetricContraction(
+        contraction_degree=3, weight_shape=(86, 64)
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[1856:29⨯(64)] b=[1024:16⨯(64)] -> C=[256:4⨯(64)]
+        │  []·a[u]·b[u]➜C[u] ─────────── num_paths=4 u=64
+        │  []·a[u]·b[u]·b[u]➜C[u] ────── num_paths=86 u=64
+        ╰─ []·a[u]·b[u]·b[u]·b[u]➜C[u] ─ num_paths=1949 u=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialFromUniform1dJit()
+          (fallback): SegmentedPolynomialFromUniform1dJit()
+        )
+      )
+      (linear): Linear(
+        shared_weights=True, internal_weights=True, weight_numel=8192
+        (transpose_in): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (transpose_out): TransposeIrrepsLayout((irrep,mul) -> (irrep,mul))
+        (f): ╭ a=[8192:2⨯(64,64)] b=[256:(1,64)+(3,64)] -> C=[256:(1,64)+(3,64)]
+        ╰─ []·a[uv]·b[iu]➜C[iv] ─ num_paths=2 i={1, 3} u=64 v=64
+        SegmentedPolynomial(
+          (m): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+            )
+          )
+          (fallback): SegmentedPolynomialNaive(
+            (graphs): ModuleList(
+              (0): uv,iu,iv sizes=8192,256,256 num_segments=2,2,2 num_paths=2 i={1, 3} u=64 v=64
+            )
+          )
+        )
+      )
+    )
+  )
+  (readouts): ModuleList(
+    (0): LinearReadoutBlock(
+      (linear): Linear(64x0e+64x1o -> 1x0e | 64 weights)
+    )
+    (1): NonLinearReadoutBlock(
+      (linear_1): Linear(64x0e+64x1o -> 64x0e | 4096 weights)
+      (non_linearity): Activation [x] (64x0e -> 64x0e)
+      (linear_2): Linear(64x0e -> 1x0e | 64 weights)
+    )
+  )
+  (electric_potential_descriptor): GTOElectrostaticFeatures(
+    (density_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (feature_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (self_interaction_terms): GTOSelfInteractionBlock()
+    (realspace_features): RealSpaceFiniteDifferenceElectrostaticFeatures(
+      (self_interaction): GTOSelfInteractionBlock()
+    )
+    (non_periodic_correction_terms): NonPeriodicFeatureCorrections(
+      (self_field): CorrectivePotentialBlock()
+      (displaced_interactions): GTOInternalFieldtoFeaturesBlock()
+    )
+  )
+  (lr_source_maps): ModuleList(
+    (0-1): 2 x GeneralNonLinearBiasReadoutBlock(
+      (equivariant_nonlin): Gate (64x0e -> 64x0e)
+      (linear_1): Linear(64x0e+64x1o -> 64x0e | 4096 weights)
+      (linear_mid): Linear(64x0e -> 64x0e | 4096 weights)
+      (linear_2): Linear(64x0e -> 1x0e+1x1o | 64 weights)
+    )
+  )
+  (field_dependent_charges_map): BandResponse(
+    (chemical_scalar): Linear(in_features=64, out_features=64, bias=True)
+    (chemical_vector): Linear(in_features=64, out_features=16, bias=False)
+    (shared): Sequential(
+      (0): Linear(in_features=96, out_features=64, bias=True)
+      (1): SiLU()
+      (2): Linear(in_features=64, out_features=64, bias=True)
+      (3): SiLU()
+    )
+    (vector_out): Linear(in_features=64, out_features=96, bias=True)
+    (scalar_out): Linear(in_features=64, out_features=4, bias=True)
+    (dd_dE_readout): Linear(in_features=64, out_features=1, bias=True)
+    (state_scalar): Linear(in_features=2, out_features=64, bias=False)
+    (state_vector): Linear(in_features=2, out_features=16, bias=False)
+    (neighbor_scalar): Linear(in_features=2, out_features=64, bias=False)
+    (neighbor_vector): Linear(in_features=2, out_features=16, bias=False)
+    (neighbor_divergence): Linear(in_features=2, out_features=64, bias=False)
+    (neighbor_gradient): Linear(in_features=2, out_features=16, bias=False)
+    (fermi_level_readout): Linear(in_features=64, out_features=1, bias=False)
+    (local_source_scalar): Linear(in_features=64, out_features=2, bias=False)
+    (local_source_vector): Linear(in_features=16, out_features=2, bias=False)
+    (gap_readout): Linear(in_features=64, out_features=2, bias=True)
+  )
+  (local_electron_energy): Identity()
+  (external_field_contribution): DisplacedGTOExternalFieldBlock()
+  (external_field_contribution_internal): GTOInternalFieldtoFeaturesBlock()
+  (coulomb_energy): GTOElectrostaticEnergy(
+    (density_basis): GTOBasis(
+      (radial_spline): RadialIntegralDirect()
+      (spherical_harmonics): SphericalHarmonics()
+    )
+    (self_interaction_terms): GTOSelfInteractionBlock()
+    (realspace_energy): RealSpaceFiniteDiffereneEnergy(
+      (self_interaction): GTOSelfInteractionBlock()
+    )
+    (monopole_dipole_correction): MonopoleDipoleCorrectionBlock()
+  )
+  (layer_feature_mixer): MultiLayerFeatureMixer(
+    (linears): ModuleList(
+      (0-1): 2 x Linear(64x0e+64x1o -> 64x0e+64x1o | 8192 weights)
+    )
+  )
+)
+2026-10-30 21:45:58.565 INFO: Number of parameters: 290931
+2026-10-30 21:45:58.566 INFO: Optimizer: AdamW (
+Parameter Group 0
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: embedding
+    weight_decay: 0.0
+
+Parameter Group 1
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: interactions_decay
+    weight_decay: 0.001
+
+Parameter Group 2
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: interactions_no_decay
+    weight_decay: 0.0
+
+Parameter Group 3
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: products
+    weight_decay: 0.001
+
+Parameter Group 4
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: readouts
+    weight_decay: 0.0
+
+Parameter Group 5
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: lr_source_maps
+    weight_decay: 0.0
+
+Parameter Group 6
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: field_dependent_charges_map
+    weight_decay: 0.01
+
+Parameter Group 7
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: electronic_references
+    weight_decay: 0.0
+
+Parameter Group 8
+    amsgrad: False
+    betas: (0.9, 0.999)
+    capturable: False
+    decoupled_weight_decay: True
+    differentiable: False
+    eps: 1e-08
+    foreach: None
+    fused: None
+    lr: 0.003
+    maximize: False
+    name: layer_feature_mixer
+    weight_decay: 0.001
+)
+2026-10-30 21:45:58.566 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=10, fourier_density_weight=10, fourier_density_reference=farfield, fourier_potential_weight=100, fourier_potential_reference=raw+smeared, vacuum_potential_weight=100, fermi_level_weight=100, )
+2026-10-30 21:45:58.566 INFO: FixedPointWrapper: mode=direct, scf_options=None, linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-30 21:45:58.566 INFO: Stage stage1 learning rates after checkpoint restore: [0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003] (requested [0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003])
+2026-10-30 21:45:58.577 INFO: BandResponse: one exact minimum of the energy per structure, no SCF updates; mode direct and its SCF settings do not apply
+2026-10-30 21:49:34.150 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=592.89 mV, correlation with WF residual=-0.854542
+2026-10-30 21:49:34.160 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.04524, forces=66.4, dipole=0.1436, fourier_density=0.0827, fourier_potential=28.39, vacuum_potential=10.85, fermi_level=27.95
+2026-10-30 21:49:34.160 DEBUG: validation Newton steps of the band law per batch: mean 12.3, max 13
+2026-10-30 21:49:34.161 DEBUG: validation all slabs (n=469): RMSE WF 693.0, EF 528.7, vacuum 329.4 meV, mean WF error +14.1 meV; dipole step 592.9 mV, correlation with the WF error -0.855
+2026-10-30 21:49:34.161 DEBUG: validation electrolyte slabs (n=142): RMSE WF 387.3, EF 442.8, vacuum 238.3 meV, mean WF error +292.0 meV; dipole step 388.9 mV, correlation with the WF error -0.876
+2026-10-30 21:49:34.161 DEBUG: validation neutral slab slabs (n=53): RMSE WF 592.4, EF 468.1, vacuum 262.8 meV, mean WF error -327.4 meV; dipole step 419.2 mV, correlation with the WF error -0.885
+2026-10-30 21:49:34.161 DEBUG: validation slab in a field slabs (n=128): RMSE WF 611.9, EF 440.1, vacuum 309.0 meV, mean WF error -311.3 meV; dipole step 538.6 mV, correlation with the WF error -0.857
+2026-10-30 21:49:34.161 DEBUG: validation counter charge slabs (n=146): RMSE WF 970.1, EF 676.6, vacuum 429.5 meV, mean WF error +153.0 meV; dipole step 796.0 mV, correlation with the WF error -0.914
+2026-10-30 21:49:34.162 DEBUG: validation counter charge slabs: WF error = 2.217 V/e x Q -0.349 V, residual RMSE 762.1 meV (a slope is a charging response the model lacks)
+2026-10-30 21:49:34.162 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:232 -6:485 -4:728 -2:778 +0:778 +2:763 +4:769 +8:824 +15:934, vacuum:834
+2026-10-30 21:49:34.162 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.01 | -0.02, inner water +0.07 | +0.22, sheet +-2 A +0.69 | +0.50, beyond +0.26 | +0.30; RMS model - DFT per slab: electrode 0.070 e, inner water 0.100 e, sheet +-2 A 0.083 e, beyond 0.032 e
+2026-10-30 21:49:34.162 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.39 V/e, dmu/dQ -0.81 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.22, double layer 0.54, outer electrolyte 0.25; its centroid in the electrode 10.50 A below the counter charge
+2026-10-30 21:49:34.162 DEBUG: validation per slab dV/dQ: 2.02 6.45 3.59 1.52
+2026-10-30 21:49:34.163 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0101 e, mean +0.0039 e, largest |net| 0.070 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0101 e
+2026-10-30 21:49:34.163 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.2139 (0.2136..0.2140) e/V, gap v 3.66 (3.66..3.66) c 0.16 (0.16..0.16) eV, q0 +0.000+-0.000 e, alpha 0.92 A^3, bias -2.37+-0.00 V; H in the electrolyte: fermi_dos 0.2136 (0.2131..0.2145) e/V, gap v 3.66 (3.65..3.67) c 0.16 (0.16..0.16) eV, q0 +0.000+-0.000 e, alpha 0.92 A^3, bias -2.37+-0.00 V; O at the electrode: fermi_dos 0.1767 (0.1766..0.1779) e/V, gap v 4.34 (4.32..4.34) c 0.09 (0.09..0.09) eV, q0 +0.000+-0.000 e, alpha 1.01 A^3, bias -2.89+-0.00 V; O in the electrolyte: fermi_dos 0.1777 (0.1774..0.1784) e/V, gap v 4.32 (4.32..4.33) c 0.09 (0.09..0.09) eV, q0 +0.000+-0.000 e, alpha 1.01 A^3, bias -2.88+-0.00 V; Ir: fermi_dos 0.2423 (0.2409..0.2426) e/V, gap v 3.36 (3.35..3.37) c 0.20 (0.20..0.20) eV, q0 +0.000+-0.000 e, alpha 0.89 A^3, bias -2.14+-0.00 V
+2026-10-30 21:49:34.163 DEBUG: validation water molecule of the law: alpha O 1.01 + 2 x H 0.92 = 2.86 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 21:49:34.165 INFO: Epoch 0: loss=133.86, RMSE_E_per_atom=21.2705 meV, RMSE_F=364.4119 meV/A, RMSE_dip_per_atom=1.4047 meA, RMSE_rho(raw/smeared/farfield)=4.3163/0.5269/0.0909 me/A^3, RMSE_EF=528.6852 meV, RMSE_ESP(raw/smeared)=421.4014/326.0822 mV, RMSE_ESPvac=329.3725 mV, RMSE_WF=692.9991 meV
+2026-10-30 21:49:34.188 DEBUG: Optimizer epoch 0: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=1902.5, clipped=124/124
+2026-10-30 21:49:34.188 DEBUG: Epoch timing: train=182.360s, validation=33.262s, updates=124, train/update=1.47065s, peak allocated=14676.3 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 21:49:34.188 INFO: Checkpoint selection epoch 0: rmse_wf_abs=0.69299908, best=0.69299908, improved=True
+2026-10-30 21:49:34.236 DEBUG: Training epoch 0, online RMSE (base units): {'rmse_e_per_atom': 0.045624296035486636, 'rmse_f': 0.6167343055754062, 'rmse_mu_per_atom': 0.0037643948491135584, 'rmse_rho': 0.004956388737796462, 'rmse_esp': 0.8793871120757129, 'rmse_wf_abs': 1.4696708112258092, 'rmse_rho_smooth': 0.0005801279793818701, 'rmse_rho_farfield_smooth': 0.00011646082491198393, 'rmse_esp_smooth': 0.660402481096471}
+2026-10-30 21:51:04.523 DEBUG: Training epoch 1, online RMSE (base units): {'rmse_e_per_atom': 0.08303667366169236, 'rmse_f': 0.3436966899258218, 'rmse_mu_per_atom': 0.001770448495236853, 'rmse_rho': 0.004549777509069407, 'rmse_esp': 0.45544303909995476, 'rmse_wf_abs': 0.7465499166701031, 'rmse_rho_smooth': 0.000580870994561859, 'rmse_rho_farfield_smooth': 0.00010081296604603106, 'rmse_esp_smooth': 0.35558658654789904}
+2026-10-30 21:52:31.722 DEBUG: Training epoch 2, online RMSE (base units): {'rmse_e_per_atom': 0.048472755776953806, 'rmse_f': 0.25075469231262904, 'rmse_mu_per_atom': 0.0015901166917473937, 'rmse_rho': 0.004538180617814032, 'rmse_esp': 0.4024890879857199, 'rmse_wf_abs': 0.5350852730881976, 'rmse_rho_smooth': 0.0006136496959275834, 'rmse_rho_farfield_smooth': 0.00011245297578859228, 'rmse_esp_smooth': 0.30651773948106875}
+2026-10-30 21:54:00.328 DEBUG: Training epoch 3, online RMSE (base units): {'rmse_e_per_atom': 0.061864737248520776, 'rmse_f': 0.22401063400645194, 'rmse_mu_per_atom': 0.0014724909764335435, 'rmse_rho': 0.004080768275930897, 'rmse_esp': 0.3878039503927328, 'rmse_wf_abs': 0.527368874665162, 'rmse_rho_smooth': 0.000554387553009187, 'rmse_rho_farfield_smooth': 0.00010820282031804196, 'rmse_esp_smooth': 0.29969008243489537}
+2026-10-30 21:55:28.816 DEBUG: Training epoch 4, online RMSE (base units): {'rmse_e_per_atom': 0.04566840728773577, 'rmse_f': 0.1940677828869984, 'rmse_mu_per_atom': 0.0014476713070430709, 'rmse_rho': 0.004057518091648591, 'rmse_esp': 0.3636957073871587, 'rmse_wf_abs': 0.5122650753782172, 'rmse_rho_smooth': 0.0005349301207397136, 'rmse_rho_farfield_smooth': 0.0001092536666640233, 'rmse_esp_smooth': 0.28354112236913304}
+2026-10-30 21:57:19.607 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=363.898 mV, correlation with WF residual=-0.963911
+2026-10-30 21:57:19.614 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.04452, forces=14.11, dipole=0.05924, fourier_density=0.1298, fourier_potential=12.28, vacuum_potential=3.959, fermi_level=4.351
+2026-10-30 21:57:19.614 DEBUG: validation Newton steps of the band law per batch: mean 12.0, max 12
+2026-10-30 21:57:19.615 DEBUG: validation all slabs (n=469): RMSE WF 365.8, EF 208.6, vacuum 199.0 meV, mean WF error +70.4 meV; dipole step 363.9 mV, correlation with the WF error -0.964
+2026-10-30 21:57:19.615 DEBUG: validation electrolyte slabs (n=142): RMSE WF 167.6, EF 122.6, vacuum 89.2 meV, mean WF error +37.9 meV; dipole step 172.1 mV, correlation with the WF error -0.621
+2026-10-30 21:57:19.615 DEBUG: validation neutral slab slabs (n=53): RMSE WF 321.1, EF 138.0, vacuum 204.5 meV, mean WF error +59.4 meV; dipole step 331.8 mV, correlation with the WF error -0.982
+2026-10-30 21:57:19.615 DEBUG: validation slab in a field slabs (n=128): RMSE WF 395.6, EF 176.0, vacuum 236.6 meV, mean WF error +75.1 meV; dipole step 394.8 mV, correlation with the WF error -0.982
+2026-10-30 21:57:19.615 DEBUG: validation counter charge slabs (n=146): RMSE WF 477.3, EF 301.8, vacuum 234.9 meV, mean WF error +102.0 meV; dipole step 468.0 mV, correlation with the WF error -0.998
+2026-10-30 21:57:19.615 DEBUG: validation counter charge slabs: WF error = 0.271 V/e x Q +0.041 V, residual RMSE 460.9 meV (a slope is a charging response the model lacks)
+2026-10-30 21:57:19.616 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:153 -6:548 -4:744 -2:686 +0:618 +2:582 +4:564 +8:527 +15:504, vacuum:522
+2026-10-30 21:57:19.616 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode +0.08 | -0.02, inner water -0.01 | +0.22, sheet +-2 A +0.62 | +0.50, beyond +0.32 | +0.30; RMS model - DFT per slab: electrode 0.115 e, inner water 0.157 e, sheet +-2 A 0.054 e, beyond 0.021 e
+2026-10-30 21:57:19.616 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 2.74 V/e, dmu/dQ -0.44 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.23, double layer 0.55, outer electrolyte 0.22; its centroid in the electrode 8.32 A below the counter charge
+2026-10-30 21:57:19.616 DEBUG: validation per slab dV/dQ: 1.56 4.78 2.97 1.65
+2026-10-30 21:57:19.616 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0135 e, mean +0.0040 e, largest |net| 0.151 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0135 e
+2026-10-30 21:57:19.617 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.3134 (0.3133..0.3142) e/V, gap v 4.36 (4.35..4.38) c 1.07 (1.06..1.07) eV, q0 +0.000+-0.000 e, alpha 1.01 A^3, bias -2.17+-0.01 V; H in the electrolyte: fermi_dos 0.3143 (0.3112..0.3155) e/V, gap v 4.38 (4.32..4.40) c 1.06 (1.05..1.08) eV, q0 +0.000+-0.000 e, alpha 1.01 A^3, bias -2.18+-0.01 V; O at the electrode: fermi_dos 0.5752 (0.3544..0.5909) e/V, gap v 7.26 (4.49..7.39) c 0.21 (0.19..0.91) eV, q0 +0.000+-0.000 e, alpha 2.47 A^3, bias -3.88+-0.27 V; O in the electrolyte: fermi_dos 0.3481 (0.3177..0.4390) e/V, gap v 4.37 (3.42..5.86) c 0.96 (0.48..1.31) eV, q0 +0.000+-0.000 e, alpha 1.10 A^3, bias -2.24+-0.12 V; Ir: fermi_dos 0.3205 (0.3203..0.3206) e/V, gap v 3.10 (3.09..3.11) c 1.41 (1.40..1.41) eV, q0 +0.000+-0.000 e, alpha 0.70 A^3, bias -1.32+-0.00 V
+2026-10-30 21:57:19.617 DEBUG: validation water molecule of the law: alpha O 1.10 + 2 x H 1.01 = 3.13 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 21:57:19.619 INFO: Epoch 5: loss=34.9407, RMSE_E_per_atom=21.0991 meV, RMSE_F=168.0072 meV/A, RMSE_dip_per_atom=0.9846 meA, RMSE_rho(raw/smeared/farfield)=3.9146/0.5092/0.1139 me/A^3, RMSE_EF=208.5933 meV, RMSE_ESP(raw/smeared)=277.4271/214.1824 mV, RMSE_ESPvac=198.9676 mV, RMSE_WF=365.7726 meV
+2026-10-30 21:57:19.640 DEBUG: Optimizer epoch 5: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=534.65, clipped=124/124
+2026-10-30 21:57:19.641 DEBUG: Epoch timing: train=89.022s, validation=21.756s, updates=124, train/update=0.71792s, peak allocated=14671.6 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 21:57:19.641 INFO: Checkpoint selection epoch 5: rmse_wf_abs=0.36577264, best=0.36577264, improved=True
+2026-10-30 21:57:19.687 DEBUG: Training epoch 5, online RMSE (base units): {'rmse_e_per_atom': 0.06240577201575864, 'rmse_f': 0.17713744547656532, 'rmse_mu_per_atom': 0.0013957644387228893, 'rmse_rho': 0.004001825586081071, 'rmse_esp': 0.3509495260376404, 'rmse_wf_abs': 0.5087641727636671, 'rmse_rho_smooth': 0.0005321623778843326, 'rmse_rho_farfield_smooth': 0.00012265413213273746, 'rmse_esp_smooth': 0.27317602075253233}
+2026-10-30 21:58:49.242 DEBUG: Training epoch 6, online RMSE (base units): {'rmse_e_per_atom': 0.10411815520368783, 'rmse_f': 0.16930024139064925, 'rmse_mu_per_atom': 0.0012375969920088953, 'rmse_rho': 0.003856806472013431, 'rmse_esp': 0.31338346948166207, 'rmse_wf_abs': 0.5169141190365752, 'rmse_rho_smooth': 0.0004892565365574817, 'rmse_rho_farfield_smooth': 0.00012028372652985867, 'rmse_esp_smooth': 0.246865597520816}
+2026-10-30 22:00:19.465 DEBUG: Training epoch 7, online RMSE (base units): {'rmse_e_per_atom': 0.06086905700445741, 'rmse_f': 0.16412163210738093, 'rmse_mu_per_atom': 0.0012805978009196605, 'rmse_rho': 0.00379715921261832, 'rmse_esp': 0.3050910441067374, 'rmse_wf_abs': 0.4548397131221975, 'rmse_rho_smooth': 0.00045576258128920836, 'rmse_rho_farfield_smooth': 0.00010994261080455288, 'rmse_esp_smooth': 0.2353302402006352}
+2026-10-30 22:01:48.986 DEBUG: Training epoch 8, online RMSE (base units): {'rmse_e_per_atom': 0.06609191216804977, 'rmse_f': 0.14924624085323984, 'rmse_mu_per_atom': 0.0012030083543266479, 'rmse_rho': 0.0037510755213231877, 'rmse_esp': 0.29144036216624325, 'rmse_wf_abs': 0.4583489420058007, 'rmse_rho_smooth': 0.000422594476167868, 'rmse_rho_farfield_smooth': 9.724617355494914e-05, 'rmse_esp_smooth': 0.22640230473009712}
+2026-10-30 22:03:17.322 DEBUG: Training epoch 9, online RMSE (base units): {'rmse_e_per_atom': 0.041323311271798786, 'rmse_f': 0.14124117780577233, 'rmse_mu_per_atom': 0.0013301638894085, 'rmse_rho': 0.0037416404970920573, 'rmse_esp': 0.2916377656393458, 'rmse_wf_abs': 0.45343139909528324, 'rmse_rho_smooth': 0.0004120545378829298, 'rmse_rho_farfield_smooth': 9.609926446213947e-05, 'rmse_esp_smooth': 0.22989550096662187}
+2026-10-30 22:05:07.960 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=287.742 mV, correlation with WF residual=-0.964098
+2026-10-30 22:05:07.968 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.03943, forces=8.146, dipole=0.03944, fourier_density=0.07151, fourier_potential=7.205, vacuum_potential=2.967, fermi_level=2.288
+2026-10-30 22:05:07.968 DEBUG: validation Newton steps of the band law per batch: mean 12.0, max 13
+2026-10-30 22:05:07.969 DEBUG: validation all slabs (n=469): RMSE WF 287.5, EF 151.3, vacuum 172.2 meV, mean WF error +42.9 meV; dipole step 287.7 mV, correlation with the WF error -0.964
+2026-10-30 22:05:07.969 DEBUG: validation electrolyte slabs (n=142): RMSE WF 150.1, EF 120.4, vacuum 66.0 meV, mean WF error +42.9 meV; dipole step 128.2 mV, correlation with the WF error -0.658
+2026-10-30 22:05:07.969 DEBUG: validation neutral slab slabs (n=53): RMSE WF 259.0, EF 97.2, vacuum 174.7 meV, mean WF error +43.6 meV; dipole step 268.2 mV, correlation with the WF error -0.982
+2026-10-30 22:05:07.969 DEBUG: validation slab in a field slabs (n=128): RMSE WF 348.1, EF 142.9, vacuum 216.3 meV, mean WF error +35.0 meV; dipole step 352.9 mV, correlation with the WF error -0.984
+2026-10-30 22:05:07.969 DEBUG: validation counter charge slabs (n=146): RMSE WF 336.1, EF 195.1, vacuum 197.4 meV, mean WF error +49.7 meV; dipole step 337.6 mV, correlation with the WF error -0.996
+2026-10-30 22:05:07.970 DEBUG: validation counter charge slabs: WF error = 0.079 V/e x Q +0.032 V, residual RMSE 331.8 meV (a slope is a charging response the model lacks)
+2026-10-30 22:05:07.970 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:89 -6:332 -4:469 -2:450 +0:411 +2:385 +4:371 +8:349 +15:347, vacuum:375
+2026-10-30 22:05:07.970 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode +0.02 | -0.02, inner water +0.13 | +0.22, sheet +-2 A +0.54 | +0.50, beyond +0.32 | +0.30; RMS model - DFT per slab: electrode 0.070 e, inner water 0.082 e, sheet +-2 A 0.030 e, beyond 0.019 e
+2026-10-30 22:05:07.970 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.32 V/e, dmu/dQ -0.56 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.49, outer electrolyte 0.26; its centroid in the electrode 7.94 A below the counter charge
+2026-10-30 22:05:07.970 DEBUG: validation per slab dV/dQ: 1.92 4.64 3.40 3.34
+2026-10-30 22:05:07.970 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0359 e, mean +0.0051 e, largest |net| 0.462 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0359 e
+2026-10-30 22:05:07.971 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 1.0640 (1.0627..1.0642) e/V, gap v 4.74 (4.73..4.74) c 1.57 (1.57..1.58) eV, q0 +0.000+-0.000 e, alpha 0.89 A^3, bias -2.27+-0.00 V; H in the electrolyte: fermi_dos 1.0638 (1.0561..1.0685) e/V, gap v 4.75 (4.69..4.80) c 1.57 (1.55..1.61) eV, q0 +0.000+-0.000 e, alpha 0.89 A^3, bias -2.27+-0.01 V; O at the electrode: fermi_dos 1.6672 (1.0122..1.9674) e/V, gap v 7.98 (4.12..9.26) c 0.29 (0.13..1.87) eV, q0 +0.000+-0.000 e, alpha 3.01 A^3, bias -3.73+-0.25 V; O in the electrolyte: fermi_dos 1.0984 (0.9567..1.8313) e/V, gap v 4.92 (3.18..8.70) c 1.52 (0.18..2.11) eV, q0 +0.000+-0.000 e, alpha 1.04 A^3, bias -2.31+-0.20 V; Ir: fermi_dos 0.9595 (0.9572..0.9601) e/V, gap v 3.23 (3.17..3.25) c 2.08 (2.08..2.10) eV, q0 +0.000+-0.000 e, alpha 0.50 A^3, bias -1.38+-0.01 V
+2026-10-30 22:05:07.971 DEBUG: validation water molecule of the law: alpha O 1.04 + 2 x H 0.89 = 2.82 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:05:07.973 INFO: Epoch 10: loss=20.7564, RMSE_E_per_atom=19.8569 meV, RMSE_F=127.6435 meV/A, RMSE_dip_per_atom=0.8404 meA, RMSE_rho(raw/smeared/farfield)=3.6801/0.3877/0.0846 me/A^3, RMSE_EF=151.2613 meV, RMSE_ESP(raw/smeared)=216.3812/158.8259 mV, RMSE_ESPvac=172.2478 mV, RMSE_WF=287.4988 meV
+2026-10-30 22:05:07.995 DEBUG: Optimizer epoch 10: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=338.66, clipped=124/124
+2026-10-30 22:05:07.995 DEBUG: Epoch timing: train=88.758s, validation=21.868s, updates=124, train/update=0.71579s, peak allocated=14417.3 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:05:07.995 INFO: Checkpoint selection epoch 10: rmse_wf_abs=0.28749882, best=0.28749882, improved=True
+2026-10-30 22:05:08.047 DEBUG: Training epoch 10, online RMSE (base units): {'rmse_e_per_atom': 0.03994523713143266, 'rmse_f': 0.14809116661045746, 'rmse_mu_per_atom': 0.0012136344616237808, 'rmse_rho': 0.0037064574880018367, 'rmse_esp': 0.2753475095163752, 'rmse_wf_abs': 0.40871690998428006, 'rmse_rho_smooth': 0.00040274137195035623, 'rmse_rho_farfield_smooth': 9.115822655754928e-05, 'rmse_esp_smooth': 0.21249118240797948}
+2026-10-30 22:06:35.329 DEBUG: Training epoch 11, online RMSE (base units): {'rmse_e_per_atom': 0.029820842254359454, 'rmse_f': 0.1356557473940261, 'rmse_mu_per_atom': 0.001085964944368972, 'rmse_rho': 0.003756024941145654, 'rmse_esp': 0.27740863770583213, 'rmse_wf_abs': 0.4000164800311707, 'rmse_rho_smooth': 0.00039727941564055377, 'rmse_rho_farfield_smooth': 8.430424794124541e-05, 'rmse_esp_smooth': 0.20670464849967107}
+2026-10-30 22:08:01.876 DEBUG: Training epoch 12, online RMSE (base units): {'rmse_e_per_atom': 0.042039335996780544, 'rmse_f': 0.12936033848763756, 'rmse_mu_per_atom': 0.0010137857640200156, 'rmse_rho': 0.0037528648474843967, 'rmse_esp': 0.2586332737253991, 'rmse_wf_abs': 0.37072302761701764, 'rmse_rho_smooth': 0.0003929051458952866, 'rmse_rho_farfield_smooth': 8.290909222828081e-05, 'rmse_esp_smooth': 0.19390099613461526}
+2026-10-30 22:09:27.848 DEBUG: Training epoch 13, online RMSE (base units): {'rmse_e_per_atom': 0.07955404385986582, 'rmse_f': 0.12702045012104932, 'rmse_mu_per_atom': 0.0009168029800546618, 'rmse_rho': 0.0037330025270389602, 'rmse_esp': 0.2503058623246743, 'rmse_wf_abs': 0.33265564392656927, 'rmse_rho_smooth': 0.0003800816697684402, 'rmse_rho_farfield_smooth': 7.527232412916217e-05, 'rmse_esp_smooth': 0.18247283778189732}
+2026-10-30 22:10:53.695 DEBUG: Training epoch 14, online RMSE (base units): {'rmse_e_per_atom': 0.05895688158525235, 'rmse_f': 0.12045062867990096, 'rmse_mu_per_atom': 0.0009534361677437079, 'rmse_rho': 0.0038114523224000068, 'rmse_esp': 0.2661103871550769, 'rmse_wf_abs': 0.3789316716842917, 'rmse_rho_smooth': 0.00039109386102363896, 'rmse_rho_farfield_smooth': 7.762757101950857e-05, 'rmse_esp_smooth': 0.19419536976078852}
+2026-10-30 22:12:39.435 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=255.798 mV, correlation with WF residual=-0.964853
+2026-10-30 22:12:39.441 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.03706, forces=5.496, dipole=0.02681, fourier_density=0.04327, fourier_potential=5.302, vacuum_potential=2.249, fermi_level=1.809
+2026-10-30 22:12:39.441 DEBUG: validation Newton steps of the band law per batch: mean 11.1, max 12
+2026-10-30 22:12:39.442 DEBUG: validation all slabs (n=469): RMSE WF 252.8, EF 134.5, vacuum 150.0 meV, mean WF error +17.7 meV; dipole step 255.8 mV, correlation with the WF error -0.965
+2026-10-30 22:12:39.442 DEBUG: validation electrolyte slabs (n=142): RMSE WF 122.2, EF 102.6, vacuum 48.4 meV, mean WF error +27.9 meV; dipole step 90.8 mV, correlation with the WF error -0.625
+2026-10-30 22:12:39.442 DEBUG: validation neutral slab slabs (n=53): RMSE WF 149.6, EF 68.7, vacuum 96.7 meV, mean WF error +14.8 meV; dipole step 169.6 mV, correlation with the WF error -0.951
+2026-10-30 22:12:39.443 DEBUG: validation slab in a field slabs (n=128): RMSE WF 297.9, EF 122.9, vacuum 183.8 meV, mean WF error +2.4 meV; dipole step 310.2 mV, correlation with the WF error -0.978
+2026-10-30 22:12:39.443 DEBUG: validation counter charge slabs (n=146): RMSE WF 323.9, EF 181.5, vacuum 192.3 meV, mean WF error +22.2 meV; dipole step 326.4 mV, correlation with the WF error -0.996
+2026-10-30 22:12:39.443 DEBUG: validation counter charge slabs: WF error = 0.142 V/e x Q -0.010 V, residual RMSE 321.0 meV (a slope is a charging response the model lacks)
+2026-10-30 22:12:39.443 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:94 -6:276 -4:381 -2:386 +0:362 +2:340 +4:321 +8:294 +15:287, vacuum:323
+2026-10-30 22:12:39.443 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode +0.01 | -0.02, inner water +0.16 | +0.22, sheet +-2 A +0.51 | +0.50, beyond +0.32 | +0.30; RMS model - DFT per slab: electrode 0.042 e, inner water 0.047 e, sheet +-2 A 0.021 e, beyond 0.019 e
+2026-10-30 22:12:39.443 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.40 V/e, dmu/dQ -0.56 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.49, outer electrolyte 0.26; its centroid in the electrode 7.39 A below the counter charge
+2026-10-30 22:12:39.444 DEBUG: validation per slab dV/dQ: 2.14 4.34 3.19 3.94
+2026-10-30 22:12:39.444 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0400 e, mean +0.0053 e, largest |net| 0.522 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0400 e
+2026-10-30 22:12:39.444 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.7179 (0.7172..0.7209) e/V, gap v 4.56 (4.55..4.58) c 1.64 (1.63..1.64) eV, q0 +0.000+-0.000 e, alpha 0.80 A^3, bias -2.50+-0.01 V; H in the electrolyte: fermi_dos 0.7141 (0.6965..0.7245) e/V, gap v 4.55 (4.40..4.63) c 1.66 (1.62..1.72) eV, q0 +0.000+-0.000 e, alpha 0.79 A^3, bias -2.49+-0.02 V; O at the electrode: fermi_dos 1.3874 (0.5327..2.7597) e/V, gap v 7.01 (3.35..9.40) c 0.37 (0.04..2.33) eV, q0 +0.000+-0.000 e, alpha 3.07 A^3, bias -3.75+-0.31 V; O in the electrolyte: fermi_dos 0.6448 (0.4915..2.6580) e/V, gap v 4.58 (2.74..9.43) c 1.88 (0.05..2.45) eV, q0 +0.000+-0.000 e, alpha 0.82 A^3, bias -2.41+-0.24 V; Ir: fermi_dos 0.5188 (0.5037..0.5249) e/V, gap v 3.10 (2.89..3.19) c 2.37 (2.35..2.42) eV, q0 +0.000+-0.000 e, alpha 0.35 A^3, bias -1.43+-0.04 V
+2026-10-30 22:12:39.444 DEBUG: validation water molecule of the law: alpha O 0.82 + 2 x H 0.79 = 2.39 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:12:39.446 INFO: Epoch 15: loss=14.9636, RMSE_E_per_atom=19.2511 meV, RMSE_F=104.8383 meV/A, RMSE_dip_per_atom=0.7150 meA, RMSE_rho(raw/smeared/farfield)=3.6713/0.3554/0.0658 me/A^3, RMSE_EF=134.5103 meV, RMSE_ESP(raw/smeared)=187.7497/133.3113 mV, RMSE_ESPvac=149.9817 mV, RMSE_WF=252.8371 meV
+2026-10-30 22:12:39.467 DEBUG: Optimizer epoch 15: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=197.42, clipped=124/124
+2026-10-30 22:12:39.467 DEBUG: Epoch timing: train=85.025s, validation=20.703s, updates=124, train/update=0.68569s, peak allocated=14410.7 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:12:39.467 INFO: Checkpoint selection epoch 15: rmse_wf_abs=0.25283705, best=0.25283705, improved=True
+2026-10-30 22:12:39.511 DEBUG: Training epoch 15, online RMSE (base units): {'rmse_e_per_atom': 0.030729968311376782, 'rmse_f': 0.11271055530858616, 'rmse_mu_per_atom': 0.0007981065228159248, 'rmse_rho': 0.0036698787449297543, 'rmse_esp': 0.2201279884674294, 'rmse_wf_abs': 0.29906204060326147, 'rmse_rho_smooth': 0.00036192536485829606, 'rmse_rho_farfield_smooth': 6.869938541842751e-05, 'rmse_esp_smooth': 0.15910676596166326}
+2026-10-30 22:14:04.818 DEBUG: Training epoch 16, online RMSE (base units): {'rmse_e_per_atom': 0.03039698235330321, 'rmse_f': 0.11012330504737503, 'rmse_mu_per_atom': 0.0007979076339597995, 'rmse_rho': 0.0037202940554366994, 'rmse_esp': 0.2428245810425425, 'rmse_wf_abs': 0.3390259990704754, 'rmse_rho_smooth': 0.0003712447723518656, 'rmse_rho_farfield_smooth': 7.18444706914991e-05, 'rmse_esp_smooth': 0.17736737612190076}
+2026-10-30 22:15:29.777 DEBUG: Training epoch 17, online RMSE (base units): {'rmse_e_per_atom': 0.04553416791875232, 'rmse_f': 0.11113730382266421, 'rmse_mu_per_atom': 0.0007177212725006025, 'rmse_rho': 0.0036473944412150224, 'rmse_esp': 0.22094972192705709, 'rmse_wf_abs': 0.3152039413814013, 'rmse_rho_smooth': 0.00036447966727414297, 'rmse_rho_farfield_smooth': 7.027690822601096e-05, 'rmse_esp_smooth': 0.15880202259283532}
+2026-10-30 22:16:54.627 DEBUG: Training epoch 18, online RMSE (base units): {'rmse_e_per_atom': 0.031327941886243736, 'rmse_f': 0.11346751715246159, 'rmse_mu_per_atom': 0.0007524482750687309, 'rmse_rho': 0.003628349823689668, 'rmse_esp': 0.21074464155817849, 'rmse_wf_abs': 0.27972065744786245, 'rmse_rho_smooth': 0.0003512798190463467, 'rmse_rho_farfield_smooth': 6.432013051539558e-05, 'rmse_esp_smooth': 0.15288801874546748}
+2026-10-30 22:18:18.618 DEBUG: Training epoch 19, online RMSE (base units): {'rmse_e_per_atom': 0.028369956575410225, 'rmse_f': 0.09981838301704697, 'rmse_mu_per_atom': 0.0006711231490706312, 'rmse_rho': 0.0036067094400826184, 'rmse_esp': 0.20198524115502445, 'rmse_wf_abs': 0.2771629207358976, 'rmse_rho_smooth': 0.00034389545056890157, 'rmse_rho_farfield_smooth': 6.127976997351463e-05, 'rmse_esp_smooth': 0.14372788968460357}
+2026-10-30 22:20:03.263 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=226.163 mV, correlation with WF residual=-0.957816
+2026-10-30 22:20:03.277 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.02932, forces=4.116, dipole=0.02076, fourier_density=0.03649, fourier_potential=3.935, vacuum_potential=1.771, fermi_level=1.506
+2026-10-30 22:20:03.278 DEBUG: validation Newton steps of the band law per batch: mean 10.8, max 11
+2026-10-30 22:20:03.278 DEBUG: validation all slabs (n=469): RMSE WF 225.7, EF 122.7, vacuum 133.1 meV, mean WF error +22.9 meV; dipole step 226.2 mV, correlation with the WF error -0.958
+2026-10-30 22:20:03.278 DEBUG: validation electrolyte slabs (n=142): RMSE WF 117.7, EF 104.6, vacuum 40.4 meV, mean WF error +38.6 meV; dipole step 75.8 mV, correlation with the WF error -0.535
+2026-10-30 22:20:03.279 DEBUG: validation neutral slab slabs (n=53): RMSE WF 125.6, EF 60.6, vacuum 79.4 meV, mean WF error +16.0 meV; dipole step 143.1 mV, correlation with the WF error -0.934
+2026-10-30 22:20:03.279 DEBUG: validation slab in a field slabs (n=128): RMSE WF 249.3, EF 105.3, vacuum 152.9 meV, mean WF error +6.7 meV; dipole step 260.5 mV, correlation with the WF error -0.974
+2026-10-30 22:20:03.279 DEBUG: validation counter charge slabs (n=146): RMSE WF 299.9, EF 163.4, vacuum 180.3 meV, mean WF error +24.3 meV; dipole step 301.8 mV, correlation with the WF error -0.996
+2026-10-30 22:20:03.279 DEBUG: validation counter charge slabs: WF error = 0.160 V/e x Q -0.012 V, residual RMSE 295.9 meV (a slope is a charging response the model lacks)
+2026-10-30 22:20:03.279 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:81 -6:221 -4:314 -2:339 +0:329 +2:313 +4:296 +8:272 +15:263, vacuum:297
+2026-10-30 22:20:03.280 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.00 | -0.02, inner water +0.19 | +0.22, sheet +-2 A +0.50 | +0.50, beyond +0.32 | +0.30; RMS model - DFT per slab: electrode 0.035 e, inner water 0.035 e, sheet +-2 A 0.020 e, beyond 0.018 e
+2026-10-30 22:20:03.280 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.27 V/e, dmu/dQ -0.53 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.54 A below the counter charge
+2026-10-30 22:20:03.280 DEBUG: validation per slab dV/dQ: 2.10 4.54 2.93 3.51
+2026-10-30 22:20:03.280 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0396 e, mean +0.0053 e, largest |net| 0.516 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0396 e
+2026-10-30 22:20:03.281 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.3937 (0.3912..0.3984) e/V, gap v 4.33 (4.30..4.37) c 1.55 (1.52..1.56) eV, q0 +0.000+-0.000 e, alpha 0.77 A^3, bias -2.58+-0.01 V; H in the electrolyte: fermi_dos 0.3922 (0.3798..0.4033) e/V, gap v 4.30 (3.64..4.44) c 1.56 (1.48..1.65) eV, q0 +0.000+-0.000 e, alpha 0.75 A^3, bias -2.55+-0.04 V; O at the electrode: fermi_dos 0.6209 (0.3268..1.0097) e/V, gap v 6.69 (2.84..8.88) c 0.31 (0.03..2.21) eV, q0 +0.000+-0.000 e, alpha 3.44 A^3, bias -3.89+-0.36 V; O in the electrolyte: fermi_dos 0.3468 (0.3174..1.0684) e/V, gap v 4.39 (2.46..9.09) c 1.90 (0.03..2.27) eV, q0 +0.000+-0.000 e, alpha 0.73 A^3, bias -2.47+-0.23 V; Ir: fermi_dos 0.3321 (0.3294..0.3366) e/V, gap v 2.95 (2.62..3.14) c 2.20 (2.18..2.25) eV, q0 +0.000+-0.000 e, alpha 0.30 A^3, bias -1.44+-0.07 V
+2026-10-30 22:20:03.281 DEBUG: validation water molecule of the law: alpha O 0.73 + 2 x H 0.75 = 2.23 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:20:03.283 INFO: Epoch 20: loss=11.4136, RMSE_E_per_atom=17.1232 meV, RMSE_F=90.7281 meV/A, RMSE_dip_per_atom=0.5799 meA, RMSE_rho(raw/smeared/farfield)=3.6211/0.3446/0.0604 me/A^3, RMSE_EF=122.7172 meV, RMSE_ESP(raw/smeared)=161.6029/115.0219 mV, RMSE_ESPvac=133.0680 mV, RMSE_WF=225.6809 meV
+2026-10-30 22:20:03.304 DEBUG: Optimizer epoch 20: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=273.63, clipped=124/124
+2026-10-30 22:20:03.304 DEBUG: Epoch timing: train=84.430s, validation=20.211s, updates=124, train/update=0.68089s, peak allocated=14647.7 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:20:03.304 INFO: Checkpoint selection epoch 20: rmse_wf_abs=0.22568088, best=0.22568088, improved=True
+2026-10-30 22:20:03.359 DEBUG: Training epoch 20, online RMSE (base units): {'rmse_e_per_atom': 0.035318102817003746, 'rmse_f': 0.11365766410728571, 'rmse_mu_per_atom': 0.00069169522118893, 'rmse_rho': 0.00363246340959771, 'rmse_esp': 0.21411924312365957, 'rmse_wf_abs': 0.30584152442366985, 'rmse_rho_smooth': 0.0003549936013390355, 'rmse_rho_farfield_smooth': 6.516866920945091e-05, 'rmse_esp_smooth': 0.15763649818787362}
+2026-10-30 22:21:27.253 DEBUG: Training epoch 21, online RMSE (base units): {'rmse_e_per_atom': 0.03010749207815904, 'rmse_f': 0.09763408890303324, 'rmse_mu_per_atom': 0.0006252389771293694, 'rmse_rho': 0.003596611569219993, 'rmse_esp': 0.19245067263531027, 'rmse_wf_abs': 0.2708348186914631, 'rmse_rho_smooth': 0.00034842898421734263, 'rmse_rho_farfield_smooth': 5.734835724243263e-05, 'rmse_esp_smooth': 0.13898048098496082}
+2026-10-30 22:22:50.676 DEBUG: Training epoch 22, online RMSE (base units): {'rmse_e_per_atom': 0.029187658517952138, 'rmse_f': 0.09475955521185069, 'rmse_mu_per_atom': 0.0006014356363087092, 'rmse_rho': 0.0035629408188363604, 'rmse_esp': 0.1803095762030478, 'rmse_wf_abs': 0.2516934284306452, 'rmse_rho_smooth': 0.0003399914071433748, 'rmse_rho_farfield_smooth': 5.510592397114111e-05, 'rmse_esp_smooth': 0.12996638715406594}
+2026-10-30 22:24:13.435 DEBUG: Training epoch 23, online RMSE (base units): {'rmse_e_per_atom': 0.025561729609168412, 'rmse_f': 0.09334607779309255, 'rmse_mu_per_atom': 0.0006126180755630661, 'rmse_rho': 0.003551448263697725, 'rmse_esp': 0.17708818818272157, 'rmse_wf_abs': 0.2433099163959013, 'rmse_rho_smooth': 0.00033731354344051996, 'rmse_rho_farfield_smooth': 5.3909386515256055e-05, 'rmse_esp_smooth': 0.12484164736707436}
+2026-10-30 22:25:36.747 DEBUG: Training epoch 24, online RMSE (base units): {'rmse_e_per_atom': 0.03131791311365422, 'rmse_f': 0.09161265228192103, 'rmse_mu_per_atom': 0.0006477604729967861, 'rmse_rho': 0.0036126890059446468, 'rmse_esp': 0.1814771884149813, 'rmse_wf_abs': 0.2556986594314076, 'rmse_rho_smooth': 0.0003408076140314353, 'rmse_rho_farfield_smooth': 5.1544891587397126e-05, 'rmse_esp_smooth': 0.13045198912720835}
+2026-10-30 22:27:19.887 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=184.399 mV, correlation with WF residual=-0.951899
+2026-10-30 22:27:19.893 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.02292, forces=3.119, dipole=0.01398, fourier_density=0.02239, fourier_potential=2.663, vacuum_potential=1.297, fermi_level=0.9425
+2026-10-30 22:27:19.893 DEBUG: validation Newton steps of the band law per batch: mean 10.6, max 11
+2026-10-30 22:27:19.894 DEBUG: validation all slabs (n=469): RMSE WF 185.8, EF 97.1, vacuum 113.9 meV, mean WF error +19.1 meV; dipole step 184.4 mV, correlation with the WF error -0.952
+2026-10-30 22:27:19.894 DEBUG: validation electrolyte slabs (n=142): RMSE WF 100.6, EF 93.2, vacuum 27.5 meV, mean WF error +30.3 meV; dipole step 53.2 mV, correlation with the WF error -0.461
+2026-10-30 22:27:19.894 DEBUG: validation neutral slab slabs (n=53): RMSE WF 116.2, EF 47.7, vacuum 76.9 meV, mean WF error +39.5 meV; dipole step 120.3 mV, correlation with the WF error -0.950
+2026-10-30 22:27:19.894 DEBUG: validation slab in a field slabs (n=128): RMSE WF 188.3, EF 81.4, vacuum 113.2 meV, mean WF error +21.7 meV; dipole step 193.5 mV, correlation with the WF error -0.969
+2026-10-30 22:27:19.894 DEBUG: validation counter charge slabs (n=146): RMSE WF 255.1, EF 123.2, vacuum 166.0 meV, mean WF error -1.6 meV; dipole step 259.7 mV, correlation with the WF error -0.994
+2026-10-30 22:27:19.894 DEBUG: validation counter charge slabs: WF error = 0.077 V/e x Q -0.019 V, residual RMSE 254.3 meV (a slope is a charging response the model lacks)
+2026-10-30 22:27:19.894 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:77 -6:182 -4:248 -2:265 +0:251 +2:236 +4:223 +8:208 +15:211, vacuum:255
+2026-10-30 22:27:19.895 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.02 | -0.02, inner water +0.24 | +0.22, sheet +-2 A +0.48 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.041 e, inner water 0.043 e, sheet +-2 A 0.017 e, beyond 0.018 e
+2026-10-30 22:27:19.895 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.40 V/e, dmu/dQ -0.56 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.24, double layer 0.53, outer electrolyte 0.24; its centroid in the electrode 7.66 A below the counter charge
+2026-10-30 22:27:19.895 DEBUG: validation per slab dV/dQ: 2.13 4.93 2.79 3.77
+2026-10-30 22:27:19.895 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0426 e, mean +0.0058 e, largest |net| 0.556 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0426 e
+2026-10-30 22:27:19.896 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.2175 (0.2159..0.2185) e/V, gap v 4.20 (4.14..4.26) c 1.59 (1.57..1.59) eV, q0 +0.000+-0.000 e, alpha 0.68 A^3, bias -2.67+-0.03 V; H in the electrolyte: fermi_dos 0.2172 (0.2131..0.2419) e/V, gap v 4.16 (3.42..4.31) c 1.61 (1.49..1.67) eV, q0 +0.000+-0.000 e, alpha 0.66 A^3, bias -2.64+-0.04 V; O at the electrode: fermi_dos 0.2498 (0.1875..0.3001) e/V, gap v 6.32 (2.39..8.64) c 0.18 (0.01..2.06) eV, q0 +0.000+-0.000 e, alpha 3.36 A^3, bias -4.04+-0.41 V; O in the electrolyte: fermi_dos 0.2014 (0.1824..0.3059) e/V, gap v 4.21 (2.14..9.18) c 1.95 (0.00..2.12) eV, q0 +0.000+-0.000 e, alpha 0.69 A^3, bias -2.57+-0.27 V; Ir: fermi_dos 0.2325 (0.2140..0.2677) e/V, gap v 2.75 (2.36..3.04) c 2.04 (2.03..2.06) eV, q0 +0.000+-0.000 e, alpha 0.29 A^3, bias -1.46+-0.09 V
+2026-10-30 22:27:19.896 DEBUG: validation water molecule of the law: alpha O 0.69 + 2 x H 0.66 = 2.00 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:27:19.898 INFO: Epoch 25: loss=8.0809, RMSE_E_per_atom=15.1382 meV, RMSE_F=78.9862 meV/A, RMSE_dip_per_atom=0.4023 meA, RMSE_rho(raw/smeared/farfield)=3.5257/0.3265/0.0473 me/A^3, RMSE_EF=97.0801 meV, RMSE_ESP(raw/smeared)=134.5803/92.2780 mV, RMSE_ESPvac=113.8872 mV, RMSE_WF=185.7946 meV
+2026-10-30 22:27:19.915 DEBUG: Optimizer epoch 25: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=171.84, clipped=124/124
+2026-10-30 22:27:19.915 DEBUG: Epoch timing: train=83.216s, validation=19.890s, updates=124, train/update=0.67110s, peak allocated=14530.6 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:27:19.915 INFO: Checkpoint selection epoch 25: rmse_wf_abs=0.18579456, best=0.18579456, improved=True
+2026-10-30 22:27:19.973 DEBUG: Training epoch 25, online RMSE (base units): {'rmse_e_per_atom': 0.03984080798931101, 'rmse_f': 0.0889102521726772, 'rmse_mu_per_atom': 0.0005560329191626321, 'rmse_rho': 0.003515471160534944, 'rmse_esp': 0.16887362724232677, 'rmse_wf_abs': 0.23380721608484106, 'rmse_rho_smooth': 0.0003299618254046887, 'rmse_rho_farfield_smooth': 4.90410169810679e-05, 'rmse_esp_smooth': 0.12187277901554479}
+2026-10-30 22:28:43.262 DEBUG: Training epoch 26, online RMSE (base units): {'rmse_e_per_atom': 0.026801010324331284, 'rmse_f': 0.09148735481706585, 'rmse_mu_per_atom': 0.0005561212300463562, 'rmse_rho': 0.0035687995371472088, 'rmse_esp': 0.1787406540709922, 'rmse_wf_abs': 0.268219446641653, 'rmse_rho_smooth': 0.00033841309362627945, 'rmse_rho_farfield_smooth': 5.183558451958482e-05, 'rmse_esp_smooth': 0.13106991960475795}
+2026-10-30 22:30:06.692 DEBUG: Training epoch 27, online RMSE (base units): {'rmse_e_per_atom': 0.0251828661693233, 'rmse_f': 0.09625301702634684, 'rmse_mu_per_atom': 0.000578153230608631, 'rmse_rho': 0.003542719037199956, 'rmse_esp': 0.17914906972502279, 'rmse_wf_abs': 0.26088416742516296, 'rmse_rho_smooth': 0.00033694550277462364, 'rmse_rho_farfield_smooth': 5.161187754281428e-05, 'rmse_esp_smooth': 0.13077168033813796}
+2026-10-30 22:31:29.498 DEBUG: Training epoch 28, online RMSE (base units): {'rmse_e_per_atom': 0.0244025401858055, 'rmse_f': 0.09375669299243353, 'rmse_mu_per_atom': 0.0005172636630253022, 'rmse_rho': 0.0035018290139163318, 'rmse_esp': 0.1671751990314091, 'rmse_wf_abs': 0.23943708889297985, 'rmse_rho_smooth': 0.00033038551245835704, 'rmse_rho_farfield_smooth': 5.322104291579678e-05, 'rmse_esp_smooth': 0.12047709127069875}
+2026-10-30 22:32:52.263 DEBUG: Training epoch 29, online RMSE (base units): {'rmse_e_per_atom': 0.030200878865631248, 'rmse_f': 0.0873686304783455, 'rmse_mu_per_atom': 0.0005106876233782622, 'rmse_rho': 0.0034895967304730594, 'rmse_esp': 0.16343190901134955, 'rmse_wf_abs': 0.21974440095294578, 'rmse_rho_smooth': 0.0003268044440774744, 'rmse_rho_farfield_smooth': 5.099341710360887e-05, 'rmse_esp_smooth': 0.11461106103621373}
+2026-10-30 22:34:34.371 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=171.114 mV, correlation with WF residual=-0.952807
+2026-10-30 22:34:34.380 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.01955, forces=2.703, dipole=0.01151, fourier_density=0.02371, fourier_potential=2.207, vacuum_potential=1.139, fermi_level=0.749
+2026-10-30 22:34:34.380 DEBUG: validation Newton steps of the band law per batch: mean 10.5, max 11
+2026-10-30 22:34:34.381 DEBUG: validation all slabs (n=469): RMSE WF 170.8, EF 86.5, vacuum 106.7 meV, mean WF error +18.1 meV; dipole step 171.1 mV, correlation with the WF error -0.953
+2026-10-30 22:34:34.381 DEBUG: validation electrolyte slabs (n=142): RMSE WF 88.2, EF 83.8, vacuum 26.7 meV, mean WF error +32.6 meV; dipole step 50.2 mV, correlation with the WF error -0.381
+2026-10-30 22:34:34.381 DEBUG: validation neutral slab slabs (n=53): RMSE WF 102.2, EF 40.6, vacuum 69.1 meV, mean WF error +24.9 meV; dipole step 108.1 mV, correlation with the WF error -0.949
+2026-10-30 22:34:34.381 DEBUG: validation slab in a field slabs (n=128): RMSE WF 167.9, EF 74.2, vacuum 99.2 meV, mean WF error +18.7 meV; dipole step 171.8 mV, correlation with the WF error -0.972
+2026-10-30 22:34:34.381 DEBUG: validation counter charge slabs (n=146): RMSE WF 240.0, EF 108.6, vacuum 159.7 meV, mean WF error +0.9 meV; dipole step 246.7 mV, correlation with the WF error -0.994
+2026-10-30 22:34:34.381 DEBUG: validation counter charge slabs: WF error = -0.000 V/e x Q +0.001 V, residual RMSE 240.0 meV (a slope is a charging response the model lacks)
+2026-10-30 22:34:34.382 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:61 -6:144 -4:213 -2:236 +0:220 +2:205 +4:193 +8:183 +15:196, vacuum:242
+2026-10-30 22:34:34.382 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.03 | -0.02, inner water +0.24 | +0.22, sheet +-2 A +0.48 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.040 e, inner water 0.041 e, sheet +-2 A 0.018 e, beyond 0.018 e
+2026-10-30 22:34:34.382 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.52 V/e, dmu/dQ -0.60 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.68 A below the counter charge
+2026-10-30 22:34:34.382 DEBUG: validation per slab dV/dQ: 2.15 5.12 2.74 4.06
+2026-10-30 22:34:34.382 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0448 e, mean +0.0060 e, largest |net| 0.581 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0448 e
+2026-10-30 22:34:34.383 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1602 (0.1546..0.1637) e/V, gap v 4.06 (4.01..4.11) c 1.67 (1.64..1.67) eV, q0 +0.000+-0.000 e, alpha 0.69 A^3, bias -2.78+-0.02 V; H in the electrolyte: fermi_dos 0.1550 (0.1354..0.1712) e/V, gap v 4.02 (3.00..4.19) c 1.66 (1.54..1.79) eV, q0 +0.000+-0.000 e, alpha 0.67 A^3, bias -2.74+-0.05 V; O at the electrode: fermi_dos 0.1314 (0.1187..0.2741) e/V, gap v 5.87 (2.08..7.89) c 0.12 (0.01..1.77) eV, q0 +0.000+-0.000 e, alpha 3.18 A^3, bias -4.21+-0.46 V; O in the electrolyte: fermi_dos 0.1486 (0.1295..0.2825) e/V, gap v 4.12 (2.00..8.89) c 1.90 (0.00..2.14) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -2.70+-0.31 V; Ir: fermi_dos 0.1904 (0.1573..0.2435) e/V, gap v 2.57 (2.20..2.98) c 1.64 (1.61..1.73) eV, q0 +0.000+-0.000 e, alpha 0.40 A^3, bias -1.49+-0.11 V
+2026-10-30 22:34:34.383 DEBUG: validation water molecule of the law: alpha O 0.71 + 2 x H 0.67 = 2.05 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:34:34.385 INFO: Epoch 30: loss=6.85289, RMSE_E_per_atom=13.9811 meV, RMSE_F=73.5282 meV/A, RMSE_dip_per_atom=0.3433 meA, RMSE_rho(raw/smeared/farfield)=3.5093/0.3265/0.0487 me/A^3, RMSE_EF=86.5467 meV, RMSE_ESP(raw/smeared)=122.7162/83.7480 mV, RMSE_ESPvac=106.7050 mV, RMSE_WF=170.7761 meV
+2026-10-30 22:34:34.401 DEBUG: Optimizer epoch 30: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=177.76, clipped=124/124
+2026-10-30 22:34:34.401 DEBUG: Epoch timing: train=82.417s, validation=19.678s, updates=124, train/update=0.66465s, peak allocated=14501.5 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:34:34.401 INFO: Checkpoint selection epoch 30: rmse_wf_abs=0.17077615, best=0.17077615, improved=True
+2026-10-30 22:34:34.454 DEBUG: Training epoch 30, online RMSE (base units): {'rmse_e_per_atom': 0.02263383043603724, 'rmse_f': 0.08447327282041792, 'rmse_mu_per_atom': 0.0005337320981852175, 'rmse_rho': 0.0035240073696709024, 'rmse_esp': 0.16043015088444856, 'rmse_wf_abs': 0.23810118643598946, 'rmse_rho_smooth': 0.0003337346980734773, 'rmse_rho_farfield_smooth': 5.146450123334517e-05, 'rmse_esp_smooth': 0.11668022543504276}
+2026-10-30 22:35:56.560 DEBUG: Training epoch 31, online RMSE (base units): {'rmse_e_per_atom': 0.019792788855166926, 'rmse_f': 0.07892700219769708, 'rmse_mu_per_atom': 0.0004576951876462704, 'rmse_rho': 0.0034539670356221477, 'rmse_esp': 0.1529770180787945, 'rmse_wf_abs': 0.21352248663818893, 'rmse_rho_smooth': 0.0003247012275935845, 'rmse_rho_farfield_smooth': 5.096768011177939e-05, 'rmse_esp_smooth': 0.11067604971224772}
+2026-10-30 22:37:18.598 DEBUG: Training epoch 32, online RMSE (base units): {'rmse_e_per_atom': 0.020261678870097836, 'rmse_f': 0.08203815186733512, 'rmse_mu_per_atom': 0.0004964984223890679, 'rmse_rho': 0.0034260089174063795, 'rmse_esp': 0.1561256883088619, 'rmse_wf_abs': 0.21618624601873074, 'rmse_rho_smooth': 0.00032475574738091267, 'rmse_rho_farfield_smooth': 4.978077560287028e-05, 'rmse_esp_smooth': 0.11053233569311474}
+2026-10-30 22:38:39.382 DEBUG: Training epoch 33, online RMSE (base units): {'rmse_e_per_atom': 0.02059682585059912, 'rmse_f': 0.07822614814693818, 'rmse_mu_per_atom': 0.0004487261537580932, 'rmse_rho': 0.0033887513559464587, 'rmse_esp': 0.14697595461987467, 'rmse_wf_abs': 0.20824652653452425, 'rmse_rho_smooth': 0.0003208010823986571, 'rmse_rho_farfield_smooth': 4.845676044111066e-05, 'rmse_esp_smooth': 0.10598861109986948}
+2026-10-30 22:40:00.329 DEBUG: Training epoch 34, online RMSE (base units): {'rmse_e_per_atom': 0.021431962316011854, 'rmse_f': 0.08158982698271353, 'rmse_mu_per_atom': 0.0004893997450515967, 'rmse_rho': 0.003375247682882843, 'rmse_esp': 0.14355124672084132, 'rmse_wf_abs': 0.2024321741683069, 'rmse_rho_smooth': 0.00031963100400355055, 'rmse_rho_farfield_smooth': 4.826883099881954e-05, 'rmse_esp_smooth': 0.10220592910724167}
+2026-10-30 22:41:40.535 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=162.757 mV, correlation with WF residual=-0.959379
+2026-10-30 22:41:40.543 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.01639, forces=2.327, dipole=0.01021, fourier_density=0.02172, fourier_potential=1.897, vacuum_potential=1.025, fermi_level=0.6643
+2026-10-30 22:41:40.543 DEBUG: validation Newton steps of the band law per batch: mean 10.3, max 11
+2026-10-30 22:41:40.544 DEBUG: validation all slabs (n=469): RMSE WF 162.4, EF 81.5, vacuum 101.3 meV, mean WF error +17.7 meV; dipole step 162.8 mV, correlation with the WF error -0.959
+2026-10-30 22:41:40.544 DEBUG: validation electrolyte slabs (n=142): RMSE WF 82.9, EF 79.0, vacuum 23.4 meV, mean WF error +43.0 meV; dipole step 43.6 mV, correlation with the WF error -0.382
+2026-10-30 22:41:40.544 DEBUG: validation neutral slab slabs (n=53): RMSE WF 85.3, EF 33.3, vacuum 58.5 meV, mean WF error +18.0 meV; dipole step 91.5 mV, correlation with the WF error -0.966
+2026-10-30 22:41:40.544 DEBUG: validation slab in a field slabs (n=128): RMSE WF 150.9, EF 68.7, vacuum 86.7 meV, mean WF error +13.5 meV; dipole step 154.5 mV, correlation with the WF error -0.976
+2026-10-30 22:41:40.544 DEBUG: validation counter charge slabs (n=146): RMSE WF 235.5, EF 103.6, vacuum 156.7 meV, mean WF error -3.3 meV; dipole step 242.1 mV, correlation with the WF error -0.994
+2026-10-30 22:41:40.544 DEBUG: validation counter charge slabs: WF error = -0.009 V/e x Q -0.001 V, residual RMSE 235.5 meV (a slope is a charging response the model lacks)
+2026-10-30 22:41:40.544 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:55 -6:129 -4:197 -2:220 +0:206 +2:193 +4:183 +8:178 +15:190, vacuum:237
+2026-10-30 22:41:40.545 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.03 | -0.02, inner water +0.25 | +0.22, sheet +-2 A +0.48 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.040 e, inner water 0.042 e, sheet +-2 A 0.018 e, beyond 0.018 e
+2026-10-30 22:41:40.545 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.67 V/e, dmu/dQ -0.65 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.60 A below the counter charge
+2026-10-30 22:41:40.545 DEBUG: validation per slab dV/dQ: 2.21 5.08 2.92 4.48
+2026-10-30 22:41:40.545 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0454 e, mean +0.0064 e, largest |net| 0.588 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0454 e
+2026-10-30 22:41:40.546 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1143 (0.1130..0.1175) e/V, gap v 3.94 (3.90..4.00) c 1.69 (1.66..1.73) eV, q0 +0.000+-0.000 e, alpha 0.68 A^3, bias -2.89+-0.02 V; H in the electrolyte: fermi_dos 0.1148 (0.0981..0.1269) e/V, gap v 3.90 (2.99..4.10) c 1.67 (1.49..1.85) eV, q0 +0.000+-0.000 e, alpha 0.67 A^3, bias -2.85+-0.05 V; O at the electrode: fermi_dos 0.0947 (0.0808..0.2500) e/V, gap v 5.69 (1.90..7.57) c 0.08 (0.00..1.75) eV, q0 +0.000+-0.000 e, alpha 2.93 A^3, bias -4.45+-0.50 V; O in the electrolyte: fermi_dos 0.1131 (0.0822..0.2536) e/V, gap v 4.04 (1.79..9.00) c 1.94 (0.00..2.79) eV, q0 +0.000+-0.000 e, alpha 0.66 A^3, bias -2.83+-0.36 V; Ir: fermi_dos 0.1493 (0.1118..0.2041) e/V, gap v 2.34 (1.98..2.85) c 1.59 (1.51..1.73) eV, q0 +0.000+-0.000 e, alpha 0.43 A^3, bias -1.47+-0.12 V
+2026-10-30 22:41:40.546 DEBUG: validation water molecule of the law: alpha O 0.66 + 2 x H 0.67 = 1.99 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:41:40.548 INFO: Epoch 35: loss=5.96136, RMSE_E_per_atom=12.8015 meV, RMSE_F=68.2151 meV/A, RMSE_dip_per_atom=0.3105 meA, RMSE_rho(raw/smeared/farfield)=3.3787/0.3180/0.0466 me/A^3, RMSE_EF=81.5054 meV, RMSE_ESP(raw/smeared)=113.5114/77.9876 mV, RMSE_ESPvac=101.2617 mV, RMSE_WF=162.4367 meV
+2026-10-30 22:41:40.574 DEBUG: Optimizer epoch 35: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=164.92, clipped=124/124
+2026-10-30 22:41:40.575 DEBUG: Epoch timing: train=80.830s, validation=19.364s, updates=124, train/update=0.65185s, peak allocated=14593.6 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:41:40.575 INFO: Checkpoint selection epoch 35: rmse_wf_abs=0.16243669, best=0.16243669, improved=True
+2026-10-30 22:41:40.619 DEBUG: Training epoch 35, online RMSE (base units): {'rmse_e_per_atom': 0.018401993837820364, 'rmse_f': 0.07583758555143025, 'rmse_mu_per_atom': 0.0004394325748580043, 'rmse_rho': 0.0033694189613947627, 'rmse_esp': 0.14363447704096177, 'rmse_wf_abs': 0.2169729740394333, 'rmse_rho_smooth': 0.00032212635062094894, 'rmse_rho_farfield_smooth': 4.921516516633194e-05, 'rmse_esp_smooth': 0.10253742044631449}
+2026-10-30 22:43:01.472 DEBUG: Training epoch 36, online RMSE (base units): {'rmse_e_per_atom': 0.021758392434900655, 'rmse_f': 0.07569516927362917, 'rmse_mu_per_atom': 0.00046904878254141574, 'rmse_rho': 0.003348031453007764, 'rmse_esp': 0.1453005195170096, 'rmse_wf_abs': 0.19618931839008233, 'rmse_rho_smooth': 0.0003250686910863772, 'rmse_rho_farfield_smooth': 5.012984188341053e-05, 'rmse_esp_smooth': 0.1057281804964058}
+2026-10-30 22:44:22.204 DEBUG: Training epoch 37, online RMSE (base units): {'rmse_e_per_atom': 0.016879016071511217, 'rmse_f': 0.07653197750604553, 'rmse_mu_per_atom': 0.0004674851285297712, 'rmse_rho': 0.0033583231388145526, 'rmse_esp': 0.14341922293872306, 'rmse_wf_abs': 0.20413856637501349, 'rmse_rho_smooth': 0.0003230881490106792, 'rmse_rho_farfield_smooth': 4.889178118296072e-05, 'rmse_esp_smooth': 0.10331746869188144}
+2026-10-30 22:45:43.441 DEBUG: Training epoch 38, online RMSE (base units): {'rmse_e_per_atom': 0.029783366864413335, 'rmse_f': 0.0807749977180652, 'rmse_mu_per_atom': 0.0005205687928468173, 'rmse_rho': 0.003303917932226593, 'rmse_esp': 0.14448268338224587, 'rmse_wf_abs': 0.20512016289304075, 'rmse_rho_smooth': 0.0003171762416025982, 'rmse_rho_farfield_smooth': 5.045033544946937e-05, 'rmse_esp_smooth': 0.1057342335517909}
+2026-10-30 22:47:04.622 DEBUG: Training epoch 39, online RMSE (base units): {'rmse_e_per_atom': 0.017855787598214073, 'rmse_f': 0.07217428302677201, 'rmse_mu_per_atom': 0.00044000713683143666, 'rmse_rho': 0.003310511040867959, 'rmse_esp': 0.1423769111846382, 'rmse_wf_abs': 0.20796241659076145, 'rmse_rho_smooth': 0.0003182770697426107, 'rmse_rho_farfield_smooth': 4.9161760945880464e-05, 'rmse_esp_smooth': 0.10212595926997878}
+2026-10-30 22:48:44.855 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=157.39 mV, correlation with WF residual=-0.962527
+2026-10-30 22:48:44.855 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.0141, forces=2.071, dipole=0.009377, fourier_density=0.02135, fourier_potential=1.733, vacuum_potential=0.9628, fermi_level=0.5866
+2026-10-30 22:48:44.856 DEBUG: validation Newton steps of the band law per batch: mean 10.4, max 11
+2026-10-30 22:48:44.856 DEBUG: validation all slabs (n=469): RMSE WF 156.3, EF 76.6, vacuum 98.1 meV, mean WF error +10.9 meV; dipole step 157.4 mV, correlation with the WF error -0.963
+2026-10-30 22:48:44.856 DEBUG: validation electrolyte slabs (n=142): RMSE WF 74.9, EF 69.7, vacuum 20.0 meV, mean WF error +32.6 meV; dipole step 36.9 mV, correlation with the WF error -0.399
+2026-10-30 22:48:44.856 DEBUG: validation neutral slab slabs (n=53): RMSE WF 69.0, EF 27.7, vacuum 48.1 meV, mean WF error +10.6 meV; dipole step 74.2 mV, correlation with the WF error -0.952
+2026-10-30 22:48:44.857 DEBUG: validation slab in a field slabs (n=128): RMSE WF 138.7, EF 64.3, vacuum 78.6 meV, mean WF error +4.2 meV; dipole step 143.7 mV, correlation with the WF error -0.971
+2026-10-30 22:48:44.857 DEBUG: validation counter charge slabs (n=146): RMSE WF 233.3, EF 101.1, vacuum 155.8 meV, mean WF error -4.3 meV; dipole step 239.9 mV, correlation with the WF error -0.993
+2026-10-30 22:48:44.857 DEBUG: validation counter charge slabs: WF error = 0.011 V/e x Q -0.007 V, residual RMSE 233.2 meV (a slope is a charging response the model lacks)
+2026-10-30 22:48:44.857 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:52 -6:121 -4:188 -2:213 +0:198 +2:184 +4:175 +8:172 +15:187, vacuum:234
+2026-10-30 22:48:44.857 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.03 | -0.02, inner water +0.25 | +0.22, sheet +-2 A +0.47 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.040 e, inner water 0.042 e, sheet +-2 A 0.018 e, beyond 0.018 e
+2026-10-30 22:48:44.858 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.67 V/e, dmu/dQ -0.65 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.24, double layer 0.52, outer electrolyte 0.24; its centroid in the electrode 7.54 A below the counter charge
+2026-10-30 22:48:44.858 DEBUG: validation per slab dV/dQ: 2.22 5.06 2.85 4.53
+2026-10-30 22:48:44.858 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0460 e, mean +0.0065 e, largest |net| 0.596 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0460 e
+2026-10-30 22:48:44.858 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1138 (0.1117..0.1167) e/V, gap v 3.88 (3.83..3.95) c 1.79 (1.76..1.80) eV, q0 +0.000+-0.000 e, alpha 0.69 A^3, bias -2.97+-0.03 V; H in the electrolyte: fermi_dos 0.1145 (0.0898..0.1252) e/V, gap v 3.83 (3.00..4.03) c 1.76 (1.50..1.91) eV, q0 +0.000+-0.000 e, alpha 0.68 A^3, bias -2.92+-0.05 V; O at the electrode: fermi_dos 0.0794 (0.0661..0.2511) e/V, gap v 5.32 (1.73..6.87) c 0.07 (0.00..1.78) eV, q0 +0.000+-0.000 e, alpha 2.60 A^3, bias -4.55+-0.51 V; O in the electrolyte: fermi_dos 0.1032 (0.0663..0.2445) e/V, gap v 3.88 (1.69..8.42) c 1.89 (0.00..2.80) eV, q0 +0.000+-0.000 e, alpha 0.63 A^3, bias -2.92+-0.39 V; Ir: fermi_dos 0.1422 (0.1043..0.1950) e/V, gap v 2.23 (1.89..2.80) c 1.60 (1.50..1.74) eV, q0 +0.000+-0.000 e, alpha 0.47 A^3, bias -1.50+-0.13 V
+2026-10-30 22:48:44.859 DEBUG: validation water molecule of the law: alpha O 0.63 + 2 x H 0.68 = 1.99 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:48:44.860 INFO: Epoch 40: loss=5.39802, RMSE_E_per_atom=11.8724 meV, RMSE_F=64.3621 meV/A, RMSE_dip_per_atom=0.2930 meA, RMSE_rho(raw/smeared/farfield)=3.3278/0.3139/0.0462 me/A^3, RMSE_EF=76.5875 meV, RMSE_ESP(raw/smeared)=108.3263/74.7781 mV, RMSE_ESPvac=98.1200 mV, RMSE_WF=156.3015 meV
+2026-10-30 22:48:44.881 DEBUG: Optimizer epoch 40: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=120.71, clipped=124/124
+2026-10-30 22:48:44.881 DEBUG: Epoch timing: train=80.813s, validation=19.402s, updates=124, train/update=0.65172s, peak allocated=15293.7 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:48:44.881 INFO: Checkpoint selection epoch 40: rmse_wf_abs=0.15630147, best=0.15630147, improved=True
+2026-10-30 22:48:44.926 DEBUG: Training epoch 40, online RMSE (base units): {'rmse_e_per_atom': 0.018557715546012626, 'rmse_f': 0.07452053602869443, 'rmse_mu_per_atom': 0.00043111622765309483, 'rmse_rho': 0.0033360128418288885, 'rmse_esp': 0.13026159054031783, 'rmse_wf_abs': 0.18364983462847267, 'rmse_rho_smooth': 0.00031849774733352877, 'rmse_rho_farfield_smooth': 4.8424111507145324e-05, 'rmse_esp_smooth': 0.0919263372254727}
+2026-10-30 22:50:05.864 DEBUG: Training epoch 41, online RMSE (base units): {'rmse_e_per_atom': 0.019527145453894768, 'rmse_f': 0.07966593077613109, 'rmse_mu_per_atom': 0.000434213835141913, 'rmse_rho': 0.0033082267252815853, 'rmse_esp': 0.1368048132362, 'rmse_wf_abs': 0.18848636021760876, 'rmse_rho_smooth': 0.0003158789932547901, 'rmse_rho_farfield_smooth': 4.8357887253355745e-05, 'rmse_esp_smooth': 0.09639746844709038}
+2026-10-30 22:51:26.444 DEBUG: Training epoch 42, online RMSE (base units): {'rmse_e_per_atom': 0.020004665908101633, 'rmse_f': 0.0712283996614155, 'rmse_mu_per_atom': 0.0004023677640016044, 'rmse_rho': 0.0033139762380653658, 'rmse_esp': 0.13283107598916316, 'rmse_wf_abs': 0.20351499122093475, 'rmse_rho_smooth': 0.0003176820237364796, 'rmse_rho_farfield_smooth': 4.8614485713666836e-05, 'rmse_esp_smooth': 0.09398345826608366}
+2026-10-30 22:52:46.699 DEBUG: Training epoch 43, online RMSE (base units): {'rmse_e_per_atom': 0.01723218887748837, 'rmse_f': 0.06993959973363877, 'rmse_mu_per_atom': 0.0003870296222474257, 'rmse_rho': 0.0033073225182657703, 'rmse_esp': 0.1293646170735909, 'rmse_wf_abs': 0.17587327132198854, 'rmse_rho_smooth': 0.00031398537186558024, 'rmse_rho_farfield_smooth': 4.789880946468054e-05, 'rmse_esp_smooth': 0.09231532039757873}
+2026-10-30 22:54:07.011 DEBUG: Training epoch 44, online RMSE (base units): {'rmse_e_per_atom': 0.02015631651614518, 'rmse_f': 0.0717316097951438, 'rmse_mu_per_atom': 0.00040132165671203154, 'rmse_rho': 0.003286168350039321, 'rmse_esp': 0.13237269116033146, 'rmse_wf_abs': 0.1903849490226899, 'rmse_rho_smooth': 0.0003129069703202093, 'rmse_rho_farfield_smooth': 4.7608713532135946e-05, 'rmse_esp_smooth': 0.09248377346367034}
+2026-10-30 22:55:46.912 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=157.662 mV, correlation with WF residual=-0.962524
+2026-10-30 22:55:47.256 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.01245, forces=1.869, dipole=0.009393, fourier_density=0.02018, fourier_potential=1.636, vacuum_potential=0.9745, fermi_level=0.59
+2026-10-30 22:55:47.257 DEBUG: validation Newton steps of the band law per batch: mean 10.3, max 11
+2026-10-30 22:55:47.257 DEBUG: validation all slabs (n=469): RMSE WF 157.0, EF 76.8, vacuum 98.7 meV, mean WF error +16.4 meV; dipole step 157.7 mV, correlation with the WF error -0.963
+2026-10-30 22:55:47.258 DEBUG: validation electrolyte slabs (n=142): RMSE WF 76.3, EF 72.8, vacuum 21.0 meV, mean WF error +34.7 meV; dipole step 39.7 mV, correlation with the WF error -0.419
+2026-10-30 22:55:47.258 DEBUG: validation neutral slab slabs (n=53): RMSE WF 74.1, EF 28.8, vacuum 50.5 meV, mean WF error +15.2 meV; dipole step 76.2 mV, correlation with the WF error -0.964
+2026-10-30 22:55:47.258 DEBUG: validation slab in a field slabs (n=128): RMSE WF 140.3, EF 64.7, vacuum 79.8 meV, mean WF error +18.5 meV; dipole step 144.0 mV, correlation with the WF error -0.971
+2026-10-30 22:55:47.258 DEBUG: validation counter charge slabs (n=146): RMSE WF 233.0, EF 99.1, vacuum 156.1 meV, mean WF error -2.7 meV; dipole step 239.6 mV, correlation with the WF error -0.994
+2026-10-30 22:55:47.258 DEBUG: validation counter charge slabs: WF error = 0.008 V/e x Q -0.005 V, residual RMSE 233.0 meV (a slope is a charging response the model lacks)
+2026-10-30 22:55:47.258 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:49 -6:114 -4:182 -2:206 +0:193 +2:181 +4:172 +8:169 +15:186, vacuum:235
+2026-10-30 22:55:47.259 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.03 | -0.02, inner water +0.25 | +0.22, sheet +-2 A +0.48 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.042 e, inner water 0.042 e, sheet +-2 A 0.017 e, beyond 0.017 e
+2026-10-30 22:55:47.259 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.64 V/e, dmu/dQ -0.64 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.49 A below the counter charge
+2026-10-30 22:55:47.259 DEBUG: validation per slab dV/dQ: 2.17 5.08 2.85 4.47
+2026-10-30 22:55:47.259 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0451 e, mean +0.0063 e, largest |net| 0.596 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0451 e
+2026-10-30 22:55:47.260 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1126 (0.1102..0.1159) e/V, gap v 3.80 (3.75..3.88) c 1.82 (1.80..1.83) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -3.02+-0.03 V; H in the electrolyte: fermi_dos 0.1144 (0.0847..0.1269) e/V, gap v 3.77 (2.99..3.97) c 1.82 (1.53..2.12) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -2.97+-0.05 V; O at the electrode: fermi_dos 0.0719 (0.0642..0.2448) e/V, gap v 5.09 (1.69..6.57) c 0.07 (0.00..1.80) eV, q0 +0.000+-0.000 e, alpha 2.34 A^3, bias -4.66+-0.55 V; O in the electrolyte: fermi_dos 0.1019 (0.0756..0.2355) e/V, gap v 3.83 (1.63..7.80) c 1.93 (0.00..2.84) eV, q0 +0.000+-0.000 e, alpha 0.60 A^3, bias -3.04+-0.39 V; Ir: fermi_dos 0.1373 (0.1039..0.1832) e/V, gap v 2.13 (1.83..2.69) c 1.62 (1.52..1.74) eV, q0 +0.000+-0.000 e, alpha 0.51 A^3, bias -1.53+-0.12 V
+2026-10-30 22:55:47.260 DEBUG: validation water molecule of the law: alpha O 0.60 + 2 x H 0.71 = 2.02 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 22:55:47.262 INFO: Epoch 45: loss=5.11078, RMSE_E_per_atom=11.1600 meV, RMSE_F=61.1314 meV/A, RMSE_dip_per_atom=0.2883 meA, RMSE_rho(raw/smeared/farfield)=3.2902/0.3097/0.0449 me/A^3, RMSE_EF=76.8138 meV, RMSE_ESP(raw/smeared)=104.6867/73.4652 mV, RMSE_ESPvac=98.7190 mV, RMSE_WF=157.0258 meV
+2026-10-30 22:55:47.416 DEBUG: Optimizer epoch 45: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=150.8, clipped=124/124
+2026-10-30 22:55:47.416 DEBUG: Epoch timing: train=80.553s, validation=19.805s, updates=124, train/update=0.64962s, peak allocated=14111.7 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 22:55:47.416 INFO: Checkpoint selection epoch 45: rmse_wf_abs=0.15702581, best=0.15630147, improved=False
+2026-10-30 22:55:47.519 DEBUG: Training epoch 45, online RMSE (base units): {'rmse_e_per_atom': 0.019428056675906274, 'rmse_f': 0.07034356889540871, 'rmse_mu_per_atom': 0.00043145374276130487, 'rmse_rho': 0.0032809698615975874, 'rmse_esp': 0.13600596558656644, 'rmse_wf_abs': 0.19200870276459053, 'rmse_rho_smooth': 0.0003140953020249199, 'rmse_rho_farfield_smooth': 4.66781548624825e-05, 'rmse_esp_smooth': 0.09692441601369085}
+2026-10-30 22:57:07.963 DEBUG: Training epoch 46, online RMSE (base units): {'rmse_e_per_atom': 0.01818264323008285, 'rmse_f': 0.07281820691024186, 'rmse_mu_per_atom': 0.00039332411187456334, 'rmse_rho': 0.0032631751023943925, 'rmse_esp': 0.12929267644856296, 'rmse_wf_abs': 0.17892849070543018, 'rmse_rho_smooth': 0.0003110246862007618, 'rmse_rho_farfield_smooth': 4.66991282307375e-05, 'rmse_esp_smooth': 0.09109726092255555}
+2026-10-30 22:58:28.653 DEBUG: Training epoch 47, online RMSE (base units): {'rmse_e_per_atom': 0.0168983183869712, 'rmse_f': 0.07050342734828072, 'rmse_mu_per_atom': 0.0003848596879362719, 'rmse_rho': 0.003239766551898181, 'rmse_esp': 0.1253815821178553, 'rmse_wf_abs': 0.1785489323955531, 'rmse_rho_smooth': 0.00030810800608645716, 'rmse_rho_farfield_smooth': 4.718858885247417e-05, 'rmse_esp_smooth': 0.08925176200905448}
+2026-10-30 22:59:49.251 DEBUG: Training epoch 48, online RMSE (base units): {'rmse_e_per_atom': 0.01792057939075431, 'rmse_f': 0.0766338365519751, 'rmse_mu_per_atom': 0.0003783387712274907, 'rmse_rho': 0.0032675216416715135, 'rmse_esp': 0.12331349392270681, 'rmse_wf_abs': 0.17429925079378913, 'rmse_rho_smooth': 0.00031050766249118893, 'rmse_rho_farfield_smooth': 4.681770110119655e-05, 'rmse_esp_smooth': 0.08630733772872247}
+2026-10-30 23:01:28.997 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=152.851 mV, correlation with WF residual=-0.962013
+2026-10-30 23:01:29.005 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.01114, forces=1.736, dipole=0.008783, fourier_density=0.01997, fourier_potential=1.532, vacuum_potential=0.9258, fermi_level=0.5134
+2026-10-30 23:01:29.005 DEBUG: validation Newton steps of the band law per batch: mean 10.3, max 11
+2026-10-30 23:01:29.006 DEBUG: validation all slabs (n=469): RMSE WF 150.7, EF 71.6, vacuum 96.2 meV, mean WF error +1.1 meV; dipole step 152.9 mV, correlation with the WF error -0.962
+2026-10-30 23:01:29.006 DEBUG: validation electrolyte slabs (n=142): RMSE WF 66.2, EF 63.8, vacuum 20.6 meV, mean WF error +20.2 meV; dipole step 37.4 mV, correlation with the WF error -0.372
+2026-10-30 23:01:29.006 DEBUG: validation neutral slab slabs (n=53): RMSE WF 64.4, EF 23.6, vacuum 45.9 meV, mean WF error +1.3 meV; dipole step 69.2 mV, correlation with the WF error -0.967
+2026-10-30 23:01:29.006 DEBUG: validation slab in a field slabs (n=128): RMSE WF 126.9, EF 58.9, vacuum 72.1 meV, mean WF error +5.1 meV; dipole step 132.9 mV, correlation with the WF error -0.966
+2026-10-30 23:01:29.006 DEBUG: validation counter charge slabs (n=146): RMSE WF 230.4, EF 96.4, vacuum 154.9 meV, mean WF error -21.1 meV; dipole step 235.8 mV, correlation with the WF error -0.993
+2026-10-30 23:01:29.006 DEBUG: validation counter charge slabs: WF error = 0.007 V/e x Q -0.023 V, residual RMSE 229.5 meV (a slope is a charging response the model lacks)
+2026-10-30 23:01:29.006 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:45 -6:110 -4:179 -2:200 +0:185 +2:173 +4:166 +8:164 +15:182, vacuum:232
+2026-10-30 23:01:29.007 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.03 | -0.02, inner water +0.26 | +0.22, sheet +-2 A +0.47 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.040 e, inner water 0.042 e, sheet +-2 A 0.018 e, beyond 0.017 e
+2026-10-30 23:01:29.007 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.79 V/e, dmu/dQ -0.69 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.52 A below the counter charge
+2026-10-30 23:01:29.007 DEBUG: validation per slab dV/dQ: 2.21 5.23 2.89 4.82
+2026-10-30 23:01:29.007 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0457 e, mean +0.0064 e, largest |net| 0.607 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0457 e
+2026-10-30 23:01:29.008 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1109 (0.1090..0.1138) e/V, gap v 3.77 (3.72..3.87) c 1.85 (1.85..1.86) eV, q0 +0.000+-0.000 e, alpha 0.70 A^3, bias -3.06+-0.04 V; H in the electrolyte: fermi_dos 0.1154 (0.0788..0.1284) e/V, gap v 3.75 (3.04..3.99) c 1.87 (1.63..2.52) eV, q0 +0.000+-0.000 e, alpha 0.70 A^3, bias -3.01+-0.06 V; O at the electrode: fermi_dos 0.0654 (0.0549..0.2473) e/V, gap v 5.00 (1.58..6.69) c 0.07 (0.00..1.87) eV, q0 +0.000+-0.000 e, alpha 2.16 A^3, bias -4.70+-0.57 V; O in the electrolyte: fermi_dos 0.0913 (0.0644..0.2349) e/V, gap v 3.78 (1.55..7.91) c 2.00 (0.00..2.98) eV, q0 +0.000+-0.000 e, alpha 0.54 A^3, bias -3.10+-0.41 V; Ir: fermi_dos 0.1312 (0.0991..0.1768) e/V, gap v 2.08 (1.77..2.65) c 1.71 (1.59..1.85) eV, q0 +0.000+-0.000 e, alpha 0.50 A^3, bias -1.56+-0.12 V
+2026-10-30 23:01:29.008 DEBUG: validation water molecule of the law: alpha O 0.54 + 2 x H 0.70 = 1.93 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 23:01:29.010 INFO: Epoch 49: loss=4.747, RMSE_E_per_atom=10.5553 meV, RMSE_F=58.9173 meV/A, RMSE_dip_per_atom=0.2734 meA, RMSE_rho(raw/smeared/farfield)=3.2876/0.3084/0.0447 me/A^3, RMSE_EF=71.6490 meV, RMSE_ESP(raw/smeared)=101.4261/70.9681 mV, RMSE_ESPvac=96.2159 mV, RMSE_WF=150.7370 meV
+2026-10-30 23:01:29.026 DEBUG: Optimizer epoch 49: lr=[0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003, 0.003], mean gradient norm=129.62, clipped=124/124
+2026-10-30 23:01:29.027 DEBUG: Epoch timing: train=80.358s, validation=19.371s, updates=124, train/update=0.64804s, peak allocated=14945.0 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 23:01:29.027 INFO: Checkpoint selection epoch 49: rmse_wf_abs=0.15073696, best=0.15073696, improved=True
+2026-10-30 23:01:29.070 DEBUG: Training epoch 49, online RMSE (base units): {'rmse_e_per_atom': 0.016372819305445152, 'rmse_f': 0.06735836237157301, 'rmse_mu_per_atom': 0.00035612809203105383, 'rmse_rho': 0.003278879087608824, 'rmse_esp': 0.12241720742201298, 'rmse_wf_abs': 0.1714034195794903, 'rmse_rho_smooth': 0.00031059739169401367, 'rmse_rho_farfield_smooth': 4.6169330189816506e-05, 'rmse_esp_smooth': 0.08589366866758459}
+2026-10-30 23:01:29.107 INFO: WeightedLoss(energy_per_atom_weight=100, forces_weight=500, dipole_weight=100, fourier_density_weight=100, fourier_density_reference=farfield, fourier_potential_weight=100, fourier_potential_reference=raw+smeared, vacuum_potential_weight=100, fermi_level_weight=100, )
+2026-10-30 23:01:29.107 INFO: FixedPointWrapper: mode=direct, scf_options=None, linear_solve=inverse, fixedpoint_scf_stability=False
+2026-10-30 23:01:29.107 INFO: Stage stage2 learning rates after checkpoint restore: [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001] (requested [0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001])
+2026-10-30 23:01:29.117 INFO: BandResponse: one exact minimum of the energy per structure, no SCF updates; mode direct and its SCF settings do not apply
+2026-10-30 23:03:08.874 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=150.536 mV, correlation with WF residual=-0.964196
+2026-10-30 23:03:08.881 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.01111, forces=1.712, dipole=0.08437, fourier_density=0.1731, fourier_potential=1.506, vacuum_potential=0.8995, fermi_level=0.4845
+2026-10-30 23:03:08.881 DEBUG: validation Newton steps of the band law per batch: mean 10.3, max 11
+2026-10-30 23:03:08.882 DEBUG: validation all slabs (n=469): RMSE WF 148.5, EF 69.6, vacuum 94.8 meV, mean WF error -1.7 meV; dipole step 150.5 mV, correlation with the WF error -0.964
+2026-10-30 23:03:08.882 DEBUG: validation electrolyte slabs (n=142): RMSE WF 64.8, EF 60.1, vacuum 20.0 meV, mean WF error +16.9 meV; dipole step 35.7 mV, correlation with the WF error -0.442
+2026-10-30 23:03:08.882 DEBUG: validation neutral slab slabs (n=53): RMSE WF 62.1, EF 22.7, vacuum 44.4 meV, mean WF error -5.1 meV; dipole step 66.2 mV, correlation with the WF error -0.968
+2026-10-30 23:03:08.882 DEBUG: validation slab in a field slabs (n=128): RMSE WF 122.9, EF 57.3, vacuum 69.6 meV, mean WF error -0.3 meV; dipole step 129.3 mV, correlation with the WF error -0.964
+2026-10-30 23:03:08.882 DEBUG: validation counter charge slabs (n=146): RMSE WF 228.2, EF 94.8, vacuum 153.4 meV, mean WF error -19.9 meV; dipole step 233.8 mV, correlation with the WF error -0.993
+2026-10-30 23:03:08.883 DEBUG: validation counter charge slabs: WF error = 0.004 V/e x Q -0.021 V, residual RMSE 227.3 meV (a slope is a charging response the model lacks)
+2026-10-30 23:03:08.883 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:46 -6:112 -4:179 -2:199 +0:183 +2:171 +4:164 +8:164 +15:181, vacuum:230
+2026-10-30 23:03:08.883 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.04 | -0.02, inner water +0.26 | +0.22, sheet +-2 A +0.47 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.043 e, inner water 0.045 e, sheet +-2 A 0.017 e, beyond 0.017 e
+2026-10-30 23:03:08.883 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.81 V/e, dmu/dQ -0.70 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.51 A below the counter charge
+2026-10-30 23:03:08.883 DEBUG: validation per slab dV/dQ: 2.20 5.16 2.94 4.94
+2026-10-30 23:03:08.883 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0464 e, mean +0.0065 e, largest |net| 0.618 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0464 e
+2026-10-30 23:03:08.884 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1129 (0.1110..0.1158) e/V, gap v 3.79 (3.73..3.89) c 1.86 (1.85..1.87) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -3.08+-0.04 V; H in the electrolyte: fermi_dos 0.1176 (0.0788..0.1314) e/V, gap v 3.76 (3.05..4.01) c 1.88 (1.63..2.73) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -3.02+-0.06 V; O at the electrode: fermi_dos 0.0657 (0.0550..0.2410) e/V, gap v 4.99 (1.57..6.71) c 0.07 (0.00..1.88) eV, q0 +0.000+-0.000 e, alpha 2.16 A^3, bias -4.72+-0.57 V; O in the electrolyte: fermi_dos 0.0895 (0.0662..0.2353) e/V, gap v 3.76 (1.52..7.88) c 2.05 (0.00..3.14) eV, q0 +0.000+-0.000 e, alpha 0.53 A^3, bias -3.12+-0.42 V; Ir: fermi_dos 0.1297 (0.0989..0.1745) e/V, gap v 2.06 (1.75..2.64) c 1.72 (1.58..1.86) eV, q0 +0.000+-0.000 e, alpha 0.51 A^3, bias -1.55+-0.12 V
+2026-10-30 23:03:08.884 DEBUG: validation water molecule of the law: alpha O 0.53 + 2 x H 0.71 = 1.95 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 23:03:08.886 INFO: Epoch 50: loss=4.86981, RMSE_E_per_atom=10.5382 meV, RMSE_F=58.5072 meV/A, RMSE_dip_per_atom=0.2673 meA, RMSE_rho(raw/smeared/farfield)=3.2905/0.3056/0.0416 me/A^3, RMSE_EF=69.6036 meV, RMSE_ESP(raw/smeared)=100.7826/70.0040 mV, RMSE_ESPvac=94.8413 mV, RMSE_WF=148.4576 meV
+2026-10-30 23:03:08.907 DEBUG: Optimizer epoch 50: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=88.165, clipped=124/124
+2026-10-30 23:03:08.907 DEBUG: Epoch timing: train=80.516s, validation=19.284s, updates=124, train/update=0.64933s, peak allocated=15202.8 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 23:03:08.907 INFO: Checkpoint selection epoch 50: rmse_wf_abs=0.14845759, best=0.14845759, improved=True
+2026-10-30 23:03:08.949 DEBUG: Training epoch 50, online RMSE (base units): {'rmse_e_per_atom': 0.012742210925564228, 'rmse_f': 0.06224239032528448, 'rmse_mu_per_atom': 0.0003021643486132352, 'rmse_rho': 0.0032830554500175, 'rmse_esp': 0.10952442862955161, 'rmse_wf_abs': 0.14769186536053028, 'rmse_rho_smooth': 0.00030617524642305584, 'rmse_rho_farfield_smooth': 4.23748415315711e-05, 'rmse_esp_smooth': 0.07643804801101156}
+2026-10-30 23:04:29.036 DEBUG: Training epoch 51, online RMSE (base units): {'rmse_e_per_atom': 0.012931644429655722, 'rmse_f': 0.061181888847860785, 'rmse_mu_per_atom': 0.00027855939743468217, 'rmse_rho': 0.0032526012125878097, 'rmse_esp': 0.10580306419772167, 'rmse_wf_abs': 0.141713657081115, 'rmse_rho_smooth': 0.00029908785015352827, 'rmse_rho_farfield_smooth': 3.867475999089671e-05, 'rmse_esp_smooth': 0.0727379537388999}
+2026-10-30 23:05:49.272 DEBUG: Training epoch 52, online RMSE (base units): {'rmse_e_per_atom': 0.01419617827211913, 'rmse_f': 0.060465762232232746, 'rmse_mu_per_atom': 0.00027613122618149973, 'rmse_rho': 0.003245592961963939, 'rmse_esp': 0.10357318646986273, 'rmse_wf_abs': 0.14001324236915746, 'rmse_rho_smooth': 0.00029781972357020793, 'rmse_rho_farfield_smooth': 3.724279550477574e-05, 'rmse_esp_smooth': 0.07172397400592459}
+2026-10-30 23:07:09.720 DEBUG: Training epoch 53, online RMSE (base units): {'rmse_e_per_atom': 0.012230600380644375, 'rmse_f': 0.06003367373903607, 'rmse_mu_per_atom': 0.00029102549652508015, 'rmse_rho': 0.0032341312907604985, 'rmse_esp': 0.10840432468746641, 'rmse_wf_abs': 0.14884959556895747, 'rmse_rho_smooth': 0.00029571020261477194, 'rmse_rho_farfield_smooth': 3.6711111375071513e-05, 'rmse_esp_smooth': 0.07406151966095229}
+2026-10-30 23:08:29.734 DEBUG: Training epoch 54, online RMSE (base units): {'rmse_e_per_atom': 0.01302586421688616, 'rmse_f': 0.060049086956281986, 'rmse_mu_per_atom': 0.00029586646950091974, 'rmse_rho': 0.0032455763639303655, 'rmse_esp': 0.10290379544973353, 'rmse_wf_abs': 0.14499544220097704, 'rmse_rho_smooth': 0.00029629501361913075, 'rmse_rho_farfield_smooth': 3.6082346324029734e-05, 'rmse_esp_smooth': 0.07122669461009162}
+2026-10-30 23:10:08.932 DEBUG: validation polarization diagnostic: centered dipole-step RMSE=147.129 mV, correlation with WF residual=-0.962283
+2026-10-30 23:10:08.937 DEBUG: validation loss terms, weight x mean: energy_per_atom=0.009448, forces=1.616, dipole=0.08077, fourier_density=0.1207, fourier_potential=1.407, vacuum_potential=0.8606, fermi_level=0.4496
+2026-10-30 23:10:08.937 DEBUG: validation Newton steps of the band law per batch: mean 10.3, max 11
+2026-10-30 23:10:08.938 DEBUG: validation all slabs (n=469): RMSE WF 145.2, EF 67.1, vacuum 92.8 meV, mean WF error -1.2 meV; dipole step 147.1 mV, correlation with the WF error -0.962
+2026-10-30 23:10:08.938 DEBUG: validation electrolyte slabs (n=142): RMSE WF 61.6, EF 57.2, vacuum 18.0 meV, mean WF error +17.8 meV; dipole step 33.1 mV, correlation with the WF error -0.352
+2026-10-30 23:10:08.938 DEBUG: validation neutral slab slabs (n=53): RMSE WF 66.2, EF 24.9, vacuum 45.1 meV, mean WF error -11.6 meV; dipole step 68.3 mV, correlation with the WF error -0.972
+2026-10-30 23:10:08.938 DEBUG: validation slab in a field slabs (n=128): RMSE WF 114.0, EF 53.3, vacuum 64.8 meV, mean WF error -3.6 meV; dipole step 121.4 mV, correlation with the WF error -0.957
+2026-10-30 23:10:08.938 DEBUG: validation counter charge slabs (n=146): RMSE WF 226.0, EF 92.5, vacuum 151.4 meV, mean WF error -13.7 meV; dipole step 231.4 mV, correlation with the WF error -0.993
+2026-10-30 23:10:08.938 DEBUG: validation counter charge slabs: WF error = 0.023 V/e x Q -0.019 V, residual RMSE 225.5 meV (a slope is a charging response the model lacks)
+2026-10-30 23:10:08.939 DEBUG: validation planar potential error (model - DFT) relative to 10 A below the counter charge, RMSE in mV at heights above it: -8:43 -6:105 -4:170 -2:188 +0:172 +2:162 +4:158 +8:160 +15:179, vacuum:227
+2026-10-30 23:10:08.939 DEBUG: validation charge about the counter charge per e of Q (slope on Q over 146 slabs), model | DFT: electrode -0.04 | -0.02, inner water +0.27 | +0.22, sheet +-2 A +0.47 | +0.50, beyond +0.31 | +0.30; RMS model - DFT per slab: electrode 0.041 e, inner water 0.044 e, sheet +-2 A 0.017 e, beyond 0.017 e
+2026-10-30 23:10:08.939 DEBUG: validation charging at fixed geometry on 4 counter charge slabs, dQ = 0.05 e along Q_cc = -Q: dV/dQ 3.83 V/e, dmu/dQ -0.70 V/e; induced charge per e in the electrode (below 5 A under the counter charge) 0.25, double layer 0.51, outer electrolyte 0.24; its centroid in the electrode 7.47 A below the counter charge
+2026-10-30 23:10:08.939 DEBUG: validation per slab dV/dQ: 2.22 5.21 2.95 4.92
+2026-10-30 23:10:08.939 DEBUG: validation electrolyte molecules of the counter charge slabs (313 molecules): net charge RMS 0.0458 e, mean +0.0065 e, largest |net| 0.613 e; from the MACE charges RMS 0.0000 e, from the response RMS 0.0458 e
+2026-10-30 23:10:08.940 DEBUG: validation law by element (median, min..max): H at the electrode: fermi_dos 0.1130 (0.1098..0.1168) e/V, gap v 3.79 (3.72..3.91) c 1.86 (1.83..1.87) eV, q0 +0.000+-0.000 e, alpha 0.72 A^3, bias -3.09+-0.05 V; H in the electrolyte: fermi_dos 0.1171 (0.0734..0.1334) e/V, gap v 3.76 (3.01..4.02) c 1.88 (1.68..3.21) eV, q0 +0.000+-0.000 e, alpha 0.71 A^3, bias -3.02+-0.06 V; O at the electrode: fermi_dos 0.0616 (0.0474..0.2215) e/V, gap v 5.09 (1.49..6.90) c 0.05 (0.00..1.85) eV, q0 +0.000+-0.000 e, alpha 2.15 A^3, bias -4.85+-0.60 V; O in the electrolyte: fermi_dos 0.0831 (0.0642..0.2165) e/V, gap v 3.76 (1.42..8.08) c 2.05 (0.00..3.20) eV, q0 +0.000+-0.000 e, alpha 0.49 A^3, bias -3.16+-0.43 V; Ir: fermi_dos 0.1191 (0.0944..0.1591) e/V, gap v 1.96 (1.65..2.52) c 1.70 (1.57..1.83) eV, q0 +0.000+-0.000 e, alpha 0.52 A^3, bias -1.49+-0.12 V
+2026-10-30 23:10:08.940 DEBUG: validation water molecule of the law: alpha O 0.49 + 2 x H 0.71 = 1.91 A^3, against 1.45 A^3 of a DFT water molecule
+2026-10-30 23:10:08.942 INFO: Epoch 55: loss=4.54409, RMSE_E_per_atom=9.7199 meV, RMSE_F=56.8545 meV/A, RMSE_dip_per_atom=0.2595 meA, RMSE_rho(raw/smeared/farfield)=3.2399/0.2926/0.0347 me/A^3, RMSE_EF=67.0535 meV, RMSE_ESP(raw/smeared)=97.4565/67.5997 mV, RMSE_ESPvac=92.7671 mV, RMSE_WF=145.2421 meV
+2026-10-30 23:10:08.955 DEBUG: Optimizer epoch 55: lr=[0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001, 0.001], mean gradient norm=100.78, clipped=124/124
+2026-10-30 23:10:08.955 DEBUG: Epoch timing: train=79.888s, validation=19.287s, updates=124, train/update=0.64426s, peak allocated=14742.0 MiB, backbone=CuEq, SCF updates per solve: training 1.0, validation 1.0
+2026-10-30 23:10:08.955 INFO: Checkpoint selection epoch 55: rmse_wf_abs=0.14524213, best=0.14524213, improved=True
+2026-10-30 23:10:08.996 DEBUG: Training epoch 55, online RMSE (base units): {'rmse_e_per_atom': 0.014332385488958516, 'rmse_f': 0.059724444763410815, 'rmse_mu_per_atom': 0.0002984651964736827, 'rmse_rho': 0.0032198737829087524, 'rmse_esp': 0.10460770728670817, 'rmse_wf_abs': 0.1446171470163951, 'rmse_rho_smooth': 0.0002922985870137216, 'rmse_rho_farfield_smooth': 3.551469521064057e-05, 'rmse_esp_smooth': 0.07234675021575884}
+2026-10-30 23:11:29.487 DEBUG: Training epoch 56, online RMSE (base units): {'rmse_e_per_atom': 0.013732766839462703, 'rmse_f': 0.05950413117391292, 'rmse_mu_per_atom': 0.00026453736436404633, 'rmse_rho': 0.0032185076021688723, 'rmse_esp': 0.10021517052161556, 'rmse_wf_abs': 0.14001436684605675, 'rmse_rho_smooth': 0.00029154964839863605, 'rmse_rho_farfield_smooth': 3.481878473347046e-05, 'rmse_esp_smooth': 0.06899369601891206}
+2026-10-30 23:12:49.650 DEBUG: Training epoch 57, online RMSE (base units): {'rmse_e_per_atom': 0.01429237741856615, 'rmse_f': 0.0600709860043194, 'rmse_mu_per_atom': 0.000290554375054963, 'rmse_rho': 0.0032109386592587595, 'rmse_esp': 0.10238509980998932, 'rmse_wf_abs': 0.14611487656732716, 'rmse_rho_smooth': 0.00029112307318427164, 'rmse_rho_farfield_smooth': 3.498770433254321e-05, 'rmse_esp_smooth': 0.07097138897111081}
+2026-10-30 23:14:09.945 DEBUG: Training epoch 58, online RMSE (base units): {'rmse_e_per_atom': 0.015497083510528406, 'rmse_f': 0.05874275424912901, 'rmse_mu_per_atom': 0.0002808193790111701, 'rmse_rho': 0.0031999999021373954, 'rmse_esp': 0.10016307785133503, 'rmse_wf_abs': 0.1379147244028098, 'rmse_rho_smooth': 0.0002877643050582375, 'rmse_rho_farfield_smooth': 3.4232282426415764e-05, 'rmse_esp_smooth': 0.0692879225464368}
+2026-10-30 23:15:30.385 DEBUG: Training epoch 59, online RMSE (base units): {'rmse_e_per_atom': 0.011870264620151012, 'rmse_f': 0.05851434405782057, 'rmse_mu_per_atom': 0.0002928647295742007, 'rmse_rho': 0.0032133832566342067, 'rmse_esp': 0.09973655706364544, 'rmse_wf_abs': 0.13620823231373194, 'rmse_rho_smooth': 0.0002893822919500402, 'rmse_rho_farfield_smooth': 3.360503922383958e-05, 'rmse_esp_smooth': 0.06835135790720198}
