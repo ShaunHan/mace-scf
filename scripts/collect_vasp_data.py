@@ -8,11 +8,11 @@ from ase.io import read, write
 from pymatgen.io.vasp import Chgcar, Locpot, Outcar
 
 
-BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft/")
-PROTO_BASE_PATH = BASE_PATH.with_name("dft_proto")
+BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft_plugin/")
+PROTO_BASE_PATH = None
 CHUNK_SIZE = 5
 N_PROCS = 64
-REUSE_HDF = False
+REUSE_HDF = True
 K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
 FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
 DENSITY_SIGMAS = [1.5]
@@ -21,7 +21,7 @@ FMAX_TOL = 6.0
 PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a uniform net force.
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
-SKIP_IDS = [279, 1668]  # Original VASP IDs: batch start + output index.
+SKIP_IDS = [1, 7, 10, 46, 66, 97, 101, 115, 194, 218, 228, 266, 288, 296, 308, 318, 342, 353, 375, 391, 420, 439, 506, 555, 566, 755]  # Original VASP IDs: batch start + output index.
 VACUUM_PLANE = {}  # e.g. {"vacuum_zfrac": 0.75}; empty selects a vacuum plane.
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
@@ -83,7 +83,7 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
     occupations = [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints]
     energies = [np.asarray(k.eps_n) - atoms.info["vasp_efermi"] for k in kpoints]
     for name, values in {
-        "energy_minus_EF": energies, "occupation": occupations,
+        "energy_minus_fermi": energies, "occupation": occupations,
         "kpoint_weight": [k.weight for k in kpoints],
         "spin": [k.s for k in kpoints], "kpoint": [k.k for k in kpoints],
     }.items():
@@ -109,7 +109,7 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
                 raise ValueError(f"Projection eigenvalues do not match this VASP run: {path}")
             energy = saved - atoms.info["vasp_efermi"]
             occupation = capacity * source["results/electron_eigenvalues/fermiweights"][k.s, k.k - 1]
-            states["energy_minus_EF"][row] = energy
+            states["energy_minus_fermi"][row] = energy
             states["occupation"][row] = occupation
             # Histogram: each band adds its orbital-summed projections to the bin of its eigenvalue.
             bins = np.rint(energy / PDOS_STEP).astype(int)
@@ -119,13 +119,13 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
                 pdos += k.weight * capacity / PDOS_STEP * site @ (bins[bands, None] == offsets)
     states.attrs.update(projections_available=True,
                         projection_units="PAW projected states per eV; not atomic charges")
-    states.create_dataset("pdos_energy_minus_EF", data=offsets * PDOS_STEP)
+    states.create_dataset("pdos_energy_minus_fermi", data=offsets * PDOS_STEP)
     states.create_dataset("pdos", data=pdos.astype(np.float32))
     # Geometry identifies electrode/solvent atoms without hard-coded species rules.
     for name, values in {"atomic_numbers": atoms.numbers, "positions": atoms.positions,
                          "cell": atoms.cell.array}.items():
         states.create_dataset(name, data=values)
-    return states["pdos_energy_minus_EF"][...], states["pdos"][...]
+    return states["pdos_energy_minus_fermi"][...], states["pdos"][...]
 
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
@@ -149,7 +149,7 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
             if states is not None and states.attrs.get("projections_available", False):
                 if "pdos" not in states:
                     raise ValueError(f"No projected DOS in {path}; set REUSE_HDF=False")
-                data["pdos"] = states["pdos_energy_minus_EF"][...], states["pdos"][...]
+                data["pdos"] = states["pdos_energy_minus_fermi"][...], states["pdos"][...]
             return data
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
@@ -374,7 +374,7 @@ def collect_job(outdir):
         # One row per atom, in states/eV rounded to 0.01. As a JSON array in the header this
         # takes about 6 characters per number; per-atom columns would take 17.
         energy, pdos = data["pdos"]
-        atoms.info["vasp_pdos_energy_minus_EF"] = np.round(energy, 3)
+        atoms.info["vasp_pdos_energy_minus_fermi"] = np.round(energy, 3)
         atoms.info["vasp_pdos"] = np.round(np.asarray(pdos, dtype=float), 2)
     if plugin:
         planar = data["planar_electron_density"]
