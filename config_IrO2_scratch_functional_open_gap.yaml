@@ -42,6 +42,7 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 energy_functional_config:
   type: EnergyFunctionalResponse
+  gap_dos_initial: 0.05
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
@@ -85,8 +86,8 @@ train_schedule:
       fourier_potential:
         weight: 100
         reference: raw+smeared
-      vacuum_potential: 300
-      fermi_level: 300
+      vacuum_potential: 100
+      fermi_level: 100
     checkpoint_metric: rmse_wf_abs
   1:
     name: stage2
@@ -103,8 +104,8 @@ train_schedule:
       fourier_potential:
         weight: 100
         reference: raw+smeared
-      vacuum_potential: 300
-      fermi_level: 300
+      vacuum_potential: 100
+      fermi_level: 100
     checkpoint_metric: rmse_wf_abs
   2:
     name: stage3
@@ -121,8 +122,8 @@ train_schedule:
       fourier_potential:
         weight: 100
         reference: raw+smeared
-      vacuum_potential: 300
-      fermi_level: 300
+      vacuum_potential: 100
+      fermi_level: 100
     checkpoint_metric: rmse_wf_abs
   3:
     name: stage4
@@ -139,6 +140,6 @@ train_schedule:
       fourier_potential:
         weight: 100
         reference: raw+smeared
-      vacuum_potential: 300
-      fermi_level: 300
+      vacuum_potential: 100
+      fermi_level: 100
     checkpoint_metric: rmse_wf_abs

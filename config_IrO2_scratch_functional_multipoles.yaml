@@ -24,8 +24,8 @@ device: cuda
 enable_cueq: true
 default_dtype: float64
 model: EnergyFunctional
-hidden_irreps: 128x0e + 128x1o
-MLP_irreps: 128x0e
+hidden_irreps: 64x0e + 64x1o
+MLP_irreps: 64x0e
 num_interactions: 2
 num_radial_basis: 8
 r_max: 6.0
@@ -42,6 +42,7 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 energy_functional_config:
   type: EnergyFunctionalResponse
+  local_amplitudes: false
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16

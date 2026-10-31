@@ -26,7 +26,7 @@ default_dtype: float64
 model: EnergyFunctional
 hidden_irreps: 64x0e + 64x1o
 MLP_irreps: 64x0e
-num_interactions: 3
+num_interactions: 2
 num_radial_basis: 8
 r_max: 6.0
 compute_avg_num_neighbors: true
@@ -42,6 +42,7 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 energy_functional_config:
   type: EnergyFunctionalResponse
+  field_read: true
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16

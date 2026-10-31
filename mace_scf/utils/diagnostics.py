@@ -93,6 +93,8 @@ class SlabDiagnostics:
         self.batch_classes = []
         self.newton = []
         self.reads = []
+        self.flatness = []
+        self.read_changes = []
 
     def on_device(self, model, wrapper, batch, output):
         """With the batch on the device: its classes, the law summary once, the charging response and the
@@ -108,6 +110,7 @@ class SlabDiagnostics:
         reads = getattr(model.field_dependent_charges_map, 'reads_taken', None)
         if reads is not None:
             self.reads.append((int(reads), float(getattr(model.field_dependent_charges_map, 'read_change', float('nan')))))
+            self.read_changes.append(list(getattr(model.field_dependent_charges_map, 'read_changes', [])))
         if self.law is None:
             try:
                 from mace_scf.electrostatics.coupled import describe_law
@@ -140,6 +143,9 @@ class SlabDiagnostics:
             step = FIELD_CONSTANT*(delta*normal).sum(-1)/area
         ef = (output['fermi_level'].reshape(-1)-batch.fermi_level.reshape(-1)
               if getattr(batch, 'fermi_level', None) is not None else torch.full_like(error, float('nan')))
+        plane = output.get('vacuum_potential_plane')
+        if plane is not None:
+            self.flatness += (plane.reshape(-1)-output['vacuum_potential'].reshape(-1))[weight > 0].tolist()
         vac = (output['vacuum_potential'].reshape(-1)-batch.vacuum_potential.reshape(-1)
                if getattr(batch, 'vacuum_potential', None) is not None else torch.full_like(error, float('nan')))
         profile = planar_potential_errors(batch, output, slab, normal, length)
@@ -162,6 +168,16 @@ class SlabDiagnostics:
                           'potential: median %.4f, max %.4f V', self.split, float(np.mean([r for r, _ in self.reads])),
                           int(max(r for r, _ in self.reads)), float(np.nanmedian([c for _, c in self.reads])),
                           float(np.nanmax([c for _, c in self.reads])))
+            longest = max((len(c) for c in self.read_changes), default=0)
+            if longest:
+                per_read = [np.median([c[i] for c in self.read_changes if len(c) > i]) for i in range(longest)]
+                logging.debug('%s change of the read potential per read, median over batches: %s V', self.split,
+                              ' '.join(f'{v:.4f}' for v in per_read))
+        if self.flatness:
+            flat = np.abs(np.array(self.flatness))
+            logging.debug('%s vacuum flatness: the smooth potential at the vacuum plane of the data minus the exact '
+                          'vacuum level, RMS %.1f mV, largest %.1f mV over %d slabs', self.split,
+                          1000*math.sqrt((flat*flat).mean()), 1000*flat.max(), len(flat))
         if self.records:
             self._log_records()
         done = [row for row in self.charging if row is not None]
@@ -190,20 +206,21 @@ class SlabDiagnostics:
             use = np.isfinite(x)
             xc, yc = x[use]-np.average(x[use], weights=w[use]), y[use]-np.average(y[use], weights=w[use])
             xx, yy, xy = (np.average(v, weights=w[use]) for v in (xc*xc, yc*yc, xc*yc))
-            logging.debug('%s %s slabs (n=%d): RMSE WF %.1f, EF %.1f, vacuum %.1f meV, mean WF error %+.1f meV; '
-                          'dipole step %.1f mV, correlation with the WF error %.3f', self.split, name, int(sel.sum()),
+            # The heavy tail: the share of the weighted squared error held by the tenth of the slabs with the largest.
+            squares = np.sort(w*y*y)[::-1]
+            tail = 100*squares[:max(1, len(squares)//10)].sum()/max(squares.sum(), 1e-30)
+            logging.debug('%s %s slabs (n=%d): RMSE WF %.1f, EF %.1f, vacuum %.1f meV, mean WF error %+.1f meV, median '
+                          '|WF error| %.1f meV, the worst 10%% of slabs hold %.0f%% of the squared error; dipole step '
+                          '%.1f mV, correlation with the WF error %.3f', self.split, name, int(sel.sum()),
                           rms(y, w), rms(ef[sel][np.isfinite(ef[sel])], w[np.isfinite(ef[sel])]),
                           rms(vac[sel][np.isfinite(vac[sel])], w[np.isfinite(vac[sel])]), 1000*np.average(y, weights=w),
-                          1000*math.sqrt(xx), xy/max(math.sqrt(xx*yy), 1e-30))
+                          1000*float(np.median(np.abs(y))), tail, 1000*math.sqrt(xx), xy/max(math.sqrt(xx*yy), 1e-30))
         if cc.sum() > 2:
             w = weight[cc]
             a, b = np.polyfit(charge[cc], wf[cc], 1, w=np.sqrt(w))
             residual = wf[cc]-(a*charge[cc]+b)
             logging.debug('%s counter charge slabs: WF error = %.3f V/e x Q %+.3f V, residual RMSE %.1f meV '
                           '(a slope is a charging response the model lacks)', self.split, a, b, rms(residual, w))
-            for lo, hi in ((0., 3.), (3., 6.), (6., 9.)):
-                sel = cc & (wf+1e-9 >= -1e9)  # all counter charge slabs; the bins are by the DFT work function below
-                _ = sel
             rows = profile[cc]
             use = np.isfinite(rows).all(-1)
             if use.sum() > 1:

@@ -174,6 +174,7 @@ class CounterCharge:
         unit = (.5*shift*(torch.erf(b/math.sqrt(2))-torch.erf(a/math.sqrt(2)))
                 +width[:, None]/math.sqrt(2*math.pi)*(torch.exp(-.5*a.square())-torch.exp(-.5*b.square()))).sum(-1)
         self.moment = self.charge*unit*(g.slab & present)
+        self.width, self.present = width, present
         species, energy = data['node_attrs'].argmax(-1), zero.clone()
         table = g.response.neutral_atom_form_factors
         overlap = getattr(g.response, 'counter_charge_overlap', True)

@@ -42,7 +42,6 @@ include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 energy_functional_config:
   type: EnergyFunctionalResponse
-  resolution: 0.25
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
@@ -53,7 +52,7 @@ weight_decay: 0.001
 field_block_weight_decay: 0.01
 local_charges_weight_decay: 0.0
 ema: true
-ema_decay: 0.99
+ema_decay: 0.999
 clip_grad: 10.0
 amsgrad: false
 eval_interval: 5

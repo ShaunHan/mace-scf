@@ -123,6 +123,10 @@ def save_plot(atoms, curves, summary, sigma, index):
     if 'vacuum_zfrac' in atoms.info:
         axes[1].axvline(((float(atoms.info['vacuum_zfrac'])-center+.5) % 1.-.5)*float(atoms.cell[2, 2]),
                         color='0.6', lw=.8, ls=':')
+    # The vacuum levels themselves: the model's exact level (no Fourier series) and the raw DFT label, both flat.
+    for name, color in (('dft', 'C0'), ('model', 'C1')):
+        if name in work:
+            axes[1].axhline(work[name], color=color, lw=.8, ls=':')
     axes[1].set_title('Work function: '+', '.join(f'{label} {work[name]:.3f} eV' for name, label in
                                                   (('dft', 'DFT'), ('model', 'MACE-VOLT')) if name in work)
                       + rf'; Fourier modes $|k|\leq{summary["kmax"]:.2f}$ $\AA^{{-1}}$', fontsize=9)
