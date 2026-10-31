@@ -15,6 +15,7 @@ except ModuleNotFoundError as e:
 
 
 def check_config_conflicts(args: argparse.Namespace):
+    fill_energy_functional_config(args)
     fill_default_dirs(args)
     check_and_fix_heads(args)
     check_and_fix_train_schedule(args)
@@ -26,6 +27,13 @@ def check_config_conflicts(args: argparse.Namespace):
 
     if args.model == "FixedPoint":
         for train_stage in args.train_schedule:
+            if args.energy_functional:
+                # An energy functional has one exact minimum: no SCF updates and no training mode.
+                if (train_stage.get("fixed_point_training_options", {"mode": "direct"}) != {"mode": "direct"}
+                        or "scf_training_options" in train_stage):
+                    raise ValueError("An energy functional has no SCF updates: drop fixed_point_training_options "
+                                     "from its stages")
+                train_stage["fixed_point_training_options"] = {"mode": "direct"}
             train_stage["fixed_point_training_options"] = (
                 fixed_point_training_options_from_stage(train_stage)
             )
@@ -197,6 +205,34 @@ def check_unsupported_training_options(args):
         )
 
 
+# The responses whose multipoles minimize an energy: one exact minimum, no fixed point.
+ENERGY_FUNCTIONAL_RESPONSES = ('EnergyFunctionalResponse', 'BandResponse', 'VariationalResponse',
+                               'VariationalFlowResponse')
+COUPLED_RESPONSES = ('CoupledResponse', 'ChargeFlowResponse', 'FixedPointResponse')+ENERGY_FUNCTIONAL_RESPONSES
+
+
+def fill_energy_functional_config(args):
+    """model: EnergyFunctional with energy_functional_config names the energy functionals of MACE-VOLT.
+
+    The model class is the FixedPoint container of MACE-SCF, whose response then has no fixed point but
+    one exact minimum. fixed_point_update_config keeps naming the fixed-point responses.
+    """
+    config = getattr(args, 'energy_functional_config', None)
+    if isinstance(config, str):
+        config = ast.literal_eval(config)
+    args.energy_functional = args.model == 'EnergyFunctional'
+    if config is not None:
+        if args.fixed_point_update_config is not None:
+            raise ValueError('Give energy_functional_config or fixed_point_update_config, not both')
+        if not isinstance(config, dict) or config.get('type') not in ENERGY_FUNCTIONAL_RESPONSES:
+            raise ValueError(f'energy_functional_config must be a mapping whose type is one of {ENERGY_FUNCTIONAL_RESPONSES}')
+        args.fixed_point_update_config, args.energy_functional = config, True
+    if args.model == 'EnergyFunctional':
+        if config is None:
+            raise ValueError('model: EnergyFunctional takes its response from energy_functional_config')
+        args.model = 'FixedPoint'
+
+
 def fill_fixed_point_update_config(args):
     if args.fixed_point_update_config is None:
         potential_data = any('fourier_potential' in head.get('info_keys', {})
@@ -212,8 +248,7 @@ def fill_fixed_point_update_config(args):
         if not isinstance(args.fixed_point_update_config, dict) or 'type' not in args.fixed_point_update_config:
             raise ValueError('fixed_point_update_config must be a mapping containing type')
 
-    if args.fixed_point_update_config['type'] in ('CoupledResponse', 'ChargeFlowResponse', 'VariationalResponse',
-                                                  'VariationalFlowResponse', 'BandResponse'):
+    if args.fixed_point_update_config['type'] in COUPLED_RESPONSES:
         args.fixed_point_update_config.setdefault('potential_amplitudes_smearing_width',
                                                   getattr(args, 'potential_amplitudes_smearing_width', 1.5))
 

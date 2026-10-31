@@ -11,6 +11,8 @@ import numpy as np
 import torch
 from graph_longrange.utils import FIELD_CONSTANT
 
+from mace_scf.electrostatics.coupled import DOS_SAMPLE_ENERGIES
+
 from mace_scf.electrostatics.reservoir import D_BLOCK
 
 # Heights above the counter charge at which the planar potential error is read, relative to its
@@ -90,6 +92,7 @@ class SlabDiagnostics:
         self.law = None
         self.batch_classes = []
         self.newton = []
+        self.reads = []
 
     def on_device(self, model, wrapper, batch, output):
         """With the batch on the device: its classes, the law summary once, the charging response and the
@@ -102,6 +105,9 @@ class SlabDiagnostics:
         taken = getattr(model.field_dependent_charges_map, 'newton_taken', None)
         if taken is not None:
             self.newton.append(int(taken))
+        reads = getattr(model.field_dependent_charges_map, 'reads_taken', None)
+        if reads is not None:
+            self.reads.append((int(reads), float(getattr(model.field_dependent_charges_map, 'read_change', float('nan')))))
         if self.law is None:
             try:
                 from mace_scf.electrostatics.coupled import describe_law
@@ -149,8 +155,13 @@ class SlabDiagnostics:
                               for name, pair in objective.items() if pair[1] > 0)
             logging.debug('%s loss terms, weight x mean: %s', self.split, terms)
         if self.newton:
-            logging.debug('%s Newton steps of the band law per batch: mean %.1f, max %d', self.split,
+            logging.debug('%s Newton steps of the charge law per batch (last read): mean %.1f, max %d', self.split,
                           float(np.mean(self.newton)), int(max(self.newton)))
+        if self.reads:
+            logging.debug('%s self-consistent reads of the law per batch: mean %.1f, max %d; last change of the read '
+                          'potential: median %.4f, max %.4f V', self.split, float(np.mean([r for r, _ in self.reads])),
+                          int(max(r for r, _ in self.reads)), float(np.nanmedian([c for _, c in self.reads])),
+                          float(np.nanmax([c for _, c in self.reads])))
         if self.records:
             self._log_records()
         done = [row for row in self.charging if row is not None]
@@ -247,6 +258,9 @@ class SlabDiagnostics:
                 if 'gap_v' in law:
                     text += (f", gap v {np.median(law['gap_v'][m]):.2f} ({law['gap_v'][m].min():.2f}..{law['gap_v'][m].max():.2f})"
                              f" c {np.median(law['gap_c'][m]):.2f} ({law['gap_c'][m].min():.2f}..{law['gap_c'][m].max():.2f}) eV")
+                if 'dos' in law:
+                    text += ', dos at '+' '.join(f'{e:+.0f}V:{np.median(law["dos"][m][:, j]):.3f}'
+                                                 for j, e in enumerate(DOS_SAMPLE_ENERGIES))
                 if 'q0' in law:
                     text += f", q0 {law['q0'][m].mean():+.3f}+-{law['q0'][m].std():.3f} e"
                 text += (f", alpha {np.median(law['alpha'][m]):.2f} A^3, bias {law['bias'][m].mean():+.2f}+-"

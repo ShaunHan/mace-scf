@@ -133,6 +133,10 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--fixed_point_update_config", type=str, default=None,
     )
     parser.add_argument(
+        "--energy_functional_config", type=str, default=None,
+        help="The response of model: EnergyFunctional, whose multipoles minimize the energy (no fixed point)",
+    )
+    parser.add_argument(
         "--field_readout_config", type=str, default=None,
     )
     parser.add_argument(
@@ -290,6 +294,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
             "MACE",
             "LocalSplitCharges",
             "FixedPoint",
+            "EnergyFunctional",
             "LocalCharges",
             "FixedChargeBaselinedMACE",
             "MACEQEq" #added model for qeq

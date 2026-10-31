@@ -23,7 +23,7 @@ seed: 7777
 device: cuda
 enable_cueq: true
 default_dtype: float64
-model: FixedPoint
+model: EnergyFunctional
 hidden_irreps: 64x0e + 64x1o
 MLP_irreps: 64x0e
 num_interactions: 2
@@ -40,12 +40,9 @@ kspace_cutoff_factor: 1.0
 include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
-fixed_point_update_config:
-  type: BandResponse
-  gap: 1.0
-  smearing: 0.2
-  response_scale: 1.0
-  field_input: neutral
+energy_functional_config:
+  type: EnergyFunctionalResponse
+  resolution: 0.25
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16
@@ -91,8 +88,6 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
-    fixed_point_training_options:
-      mode: direct
     checkpoint_metric: rmse_wf_abs
   1:
     name: stage2
@@ -111,8 +106,6 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
-    fixed_point_training_options:
-      mode: direct
     checkpoint_metric: rmse_wf_abs
   2:
     name: stage3
@@ -131,8 +124,6 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
-    fixed_point_training_options:
-      mode: direct
     checkpoint_metric: rmse_wf_abs
   3:
     name: stage4
@@ -151,6 +142,4 @@ train_schedule:
         reference: raw+smeared
       vacuum_potential: 100
       fermi_level: 100
-    fixed_point_training_options:
-      mode: direct
     checkpoint_metric: rmse_wf_abs

@@ -1366,4 +1366,5 @@ class ManyBodyChargesFieldReadout(PostScfReadout):
 
 
 # The MACE-VOLT density/potential response.
-from .coupled import BandResponse, ChargeFlowResponse, CoupledResponse, VariationalFlowResponse, VariationalResponse
+from .coupled import (BandResponse, ChargeFlowResponse, CoupledResponse, EnergyFunctionalResponse, FixedPointResponse,
+                      VariationalFlowResponse, VariationalResponse)

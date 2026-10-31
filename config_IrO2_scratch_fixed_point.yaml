@@ -41,11 +41,7 @@ include_electrostatic_self_interaction: true
 include_local_electron_energy: false
 electrostatic_pbc_method: mixed_periodic
 fixed_point_update_config:
-  type: BandResponse
-  gap: 3.0
-  smearing: 0.2
-  response_scale: 1.0
-  field_input: none
+  type: FixedPointResponse
 potential_amplitudes_smearing_width: 1.5
 batch_size: 16
 valid_batch_size: 16

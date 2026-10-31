@@ -23,6 +23,11 @@ VariationalResponse has the law of CoupledResponse without molecules, updates or
 readout, and VariationalFlowResponse the bond flows of ChargeFlowResponse: their multipoles
 minimize the energy of the model, which holds the local energy of the law, so the Fermi level, the
 cell voltage, the dipole and the forces are derivatives of one minimum.
+EnergyFunctionalResponse gives every atom a local density of states on an energy grid, read from
+its environment: its charge is the integral of that density between its own level and the Fermi
+level, and the multipoles are the exact minimum of the convex energy of that law (functional_state,
+with the dipoles eliminated once and Newton's method on the charges). FixedPointResponse reads the
+same law at its own self-consistent field, the fixed point of MACE-SCF.
 Potentials are electron referenced (in V, equal to eV).
 """
 import logging
@@ -48,6 +53,8 @@ INSULATOR_FRACTION, COVALENT_FRACTION = 1.e-3, .03
 ENVELOPE_START = .75
 # An atom this close to a d-block atom belongs to the electrode in the diagnostics (describe_law).
 METAL_DISTANCE = 2.3
+# The levels (V) at which the diagnostics sample the local density of states (describe_law).
+DOS_SAMPLE_ENERGIES = (-4., -2., -1., 0., 1., 2., 4.)
 # Parameters renamed to the MACE-SCF naming, former name: name.
 RENAMED = {'species_level': 'species_bias', 'dipole_hardness': 'dd_dE_readout', 'common_level': 'fermi_level_readout'}
 
@@ -71,6 +78,26 @@ def softplus_integral(y):
     high = y.clamp(min=1.)
     tail = sum((-1.)**(k+1)*torch.exp(-k*high)/k**2 for k in range(1, 13))
     return torch.where(y <= -1., series, torch.where(y < 1., taylor, math.pi**2/6+high**2/2-tail))
+
+
+def gaussian(x):
+    """g(x) = exp(-x^2)/sqrt(pi), of unit integral."""
+    return torch.exp(-x*x)/math.sqrt(math.pi)
+
+
+def gaussian_step(x):
+    """C(x) = (1 + erf x)/2, the integral of g from minus infinity, as erfc for full precision in both tails."""
+    return .5*torch.erfc(-x)
+
+
+def gaussian_ramp(x):
+    """S(x) = x C(x) + g(x)/2, the integral of C from minus infinity."""
+    return x*gaussian_step(x)+.5*gaussian(x)
+
+
+def gaussian_ramp_integral(x):
+    """T(x) = ((2 x^2 + 1) C(x) + x g(x))/4, the integral of S from minus infinity."""
+    return .25*((2.*x*x+1.)*gaussian_step(x)+x*gaussian(x))
 
 
 def angular_transport(positions, edge_index, shifts, batch, slot, graphs, size, cutoff, width):
@@ -645,6 +672,157 @@ class BandResponse(VariationalResponse):
         return dos*w**2*(softplus_integral(up)-softplus_integral(-gaps[..., 0]/w)
                          + softplus_integral(down)-softplus_integral(-gaps[..., 1]/w))
 
+    # The charge law interface of functional_state: the coefficients of the band law are [D, g_v, g_c].
+    def law_reference(self, chemical, vector, attrs, p0, mask):
+        local, law, species_bias, gaps = self.band_reference(chemical, vector, attrs, p0, mask)
+        return local, law, species_bias, torch.cat((law[..., 2:3], gaps), -1)
+
+    def charge_law(self, coefficients, delta):
+        return self.band_law(coefficients[..., 0], coefficients[..., 1:], delta)
+
+    def charge_energy(self, coefficients, delta):
+        return self.band_energy(coefficients[..., 0], coefficients[..., 1:], delta)
+
+
+class EnergyFunctionalResponse(VariationalResponse):
+    """MACE-VOLT energy functional: every atom carries a local density of states, read from its environment.
+
+    The atom responds to its level delta_i = bias_i + phi_i - mu, the electron energy of the atom
+    relative to the Fermi level of the cell, with the charge of the states between the two,
+
+        dq_i(delta_i) = integral from 0 to delta_i of n_i(e) de,    n_i(e) >= 0,
+
+    its local density of states n_i on the energy grid e_k = -E, -E + w, ..., E of resolution w,
+
+        n_i(e) = sum_k a_ik g((e - e_k)/w) + a_i,lo C((-E - w/2 - e)/w) + a_i,hi C((e - E - w/2)/w),
+
+    Gaussian bumps g of width w on the grid and two steps C that continue the density as a constant
+    beyond it, the deep bands. Equal coefficients give a flat density, a metal; coefficients that
+    vanish about e = 0 give a gap, an insulator that keeps its charge and polarizes until the potential
+    pushes a band edge across the Fermi level, where it breaks down. The coefficients a_ik = softplus
+    of a readout of the environment, dd_dE_i, d0_i and bias_i are all learned: what is a metal and what
+    an insulator, and where an electrolyte gives up electrons, is told to no atom. The density starts
+    at dos_initial in the bands and empty within gap_initial of e = 0. The charges and dipoles are the
+    exact minimum of the convex energy
+
+        E = E_local + min over q, d with sum_i q_i = Q of
+            [ E_electrostatic(q, d) + sum_i ( G_i(q_i) - bias_i q_i + |d_i - d0_i|^2/(2 dd_dE_i) ) ],
+
+    G_i the Legendre transform of the charge law, whose closed form the Gaussian basis has
+    (charge_energy). functional_state finds it by Newton's method on the levels with the dipoles
+    eliminated once per geometry, and one differentiable solve at the converged levels gives the exact
+    derivatives (the implicit function theorem): mu = -dE/dQ, dE/dQ_cc the potential at the counter
+    charge, the dipole -dE/dE_app and the forces -dE/dR, all of one energy. The band law of
+    BandResponse is the special case of two steps and no bumps, with gaps and a smearing told to the
+    model; the linear law of VariationalResponse the flat density. energy_range E (eV) and resolution
+    w (eV) are the only options, a resolution like the radial basis of MACE, not a physical assumption.
+    """
+    functional = True
+    permanent_charges = False
+    field_input = 'none'
+    energy_range, resolution = 6., .5
+    # The density of states at the start, e/V in the bands, and the half gap about e = 0 that starts empty, eV.
+    dos_initial, gap_initial = 1., 1.
+    # Newton's method on the levels: the most steps, the tolerance on the levels (V) and the largest step (V).
+    newton_steps, newton_tolerance, newton_clip = 40, 1.e-6, 2.
+
+    def __init__(self, *args, energy_range=None, resolution=None, **kwargs):
+        super().__init__(*args, response_scale=1., **kwargs)
+        energy_range = float(self.energy_range if energy_range is None else energy_range)
+        resolution = float(self.resolution if resolution is None else resolution)
+        if not (energy_range > 0 and resolution > 0 and energy_range >= resolution):
+            raise ValueError('energy_range and resolution must be positive energies in eV, with energy_range at '
+                             'least the resolution')
+        count = int(round(2*energy_range/resolution))+1
+        centers = torch.linspace(-energy_range, energy_range, count)
+        self.register_buffer('dos_centers', centers)
+        self.dos_width = float(centers[1]-centers[0])
+        band = math.log(math.expm1(float(self.dos_initial)))
+        offsets = torch.where(centers.abs() < float(self.gap_initial)-1.e-9, -6., band)
+        self.register_buffer('dos_offsets', torch.cat((offsets, torch.full((2,), band))))
+        width = self.chemical_scalar.out_features
+        self.dos_readout = nn.Linear(width, count+2)
+        nn.init.zeros_(self.dos_readout.weight)
+        nn.init.zeros_(self.dos_readout.bias)
+
+    def dos(self, hidden, mask):
+        """The coefficients of the local density of states, e/V, from the hidden features."""
+        return F.softplus(self.dos_readout(hidden)+self.dos_offsets)*mask[..., None]
+
+    def law_reference(self, chemical, vector, attrs, p0, mask):
+        """The local amplitudes, the geometry law [dd_dE, bias, n(0)], the species biases and the coefficients."""
+        hidden = self.geometry_reference_features(chemical, vector)
+        initial = self.scalar_out(hidden)
+        species_bias = attrs@self.species_bias
+        local = torch.cat((attrs@self.species_source+self.local_source_scalar(hidden),
+                           self.local_source_vector(vector.transpose(-1, -2)).transpose(-1, -2).flatten(-2)),
+                          -1)*mask[..., None]
+        coefficients = self.dos(hidden, mask)
+        at_fermi = self.charge_law(coefficients, torch.zeros_like(mask))[1]+1.e-6
+        law = torch.cat((_positive(self.dd_dE_readout(hidden)), species_bias[..., None]+initial[..., :1],
+                         at_fermi[..., None]), -1)
+        return local, law, species_bias, coefficients
+
+    def prepare_reference(self, chemical, vector, attrs, p0, mask):
+        return self.law_reference(chemical, vector, attrs, p0, mask)[:3]
+
+    def charge_law(self, coefficients, delta):
+        """The charge dq of the law at the levels delta, and its slope n(delta)."""
+        w, centers = self.dos_width, self.dos_centers
+        bumps, low, high = coefficients[..., :-2], coefficients[..., -2], coefficients[..., -1]
+        x = (delta[..., None]-centers)/w
+        lo, hi = centers[0]-w/2, centers[-1]+w/2
+        xl, xh = (lo-delta)/w, (delta-hi)/w
+        dq = ((bumps*(gaussian_step(x)-gaussian_step(-centers/w))).sum(-1)
+              + low*(gaussian_ramp(lo/w)-gaussian_ramp(xl))+high*(gaussian_ramp(xh)-gaussian_ramp(-hi/w)))*w
+        slope = (bumps*gaussian(x)).sum(-1)+low*gaussian_step(xl)+high*gaussian_step(xh)
+        return dq, slope
+
+    def charge_energy(self, coefficients, delta):
+        """The integral of the charge law from zero to delta, the local grand potential with its sign reversed."""
+        w, centers = self.dos_width, self.dos_centers
+        bumps, low, high = coefficients[..., :-2], coefficients[..., -2], coefficients[..., -1]
+        x = (delta[..., None]-centers)/w
+        lo, hi = centers[0]-w/2, centers[-1]+w/2
+        xl, xh = (lo-delta)/w, (delta-hi)/w
+        return ((bumps*(w*(gaussian_ramp(x)-gaussian_ramp(-centers/w))-delta[..., None]*gaussian_step(-centers/w))).sum(-1)
+                + low*(w*(gaussian_ramp_integral(xl)-gaussian_ramp_integral(lo/w))+delta*gaussian_ramp(lo/w))
+                + high*(w*(gaussian_ramp_integral(xh)-gaussian_ramp_integral(-hi/w))-delta*gaussian_ramp(-hi/w)))*w
+
+
+class FixedPointResponse(EnergyFunctionalResponse):
+    """The local density of states law of EnergyFunctionalResponse read at its own self-consistent field.
+
+    The fixed point of MACE-SCF: the network reads the levels delta_i = bias_i + phi_i - mu of every atom
+    in the potential of the current charges and dipoles, with the field and their neighbour differences
+    on the graph, and gives the law again, bias_i, n_i, dd_dE_i, d0_i and the local amplitudes. The exact
+    minimum of that law gives new levels, mixed with the old by mixing, until the read levels stop changing
+    or reads are taken. The energy, mu, the dipole and the forces are the derivatives of the minimum at
+    the last read law; the dependence of the read on the field is not differentiated (the one-shot
+    gradient of the direct mode). At zero field the read is the geometry law, so a cell whose potential
+    does not move its levels is the energy functional.
+    """
+    reads, mixing, read_tolerance = 8, .5, 1.e-3
+
+    def _invariants(self, chemical, vector, potential, field, mask, reference, mu, transport):
+        """The levels bias + phi - mu at every receiver width, with the field and their neighbour differences."""
+        levels = (reference[..., 0, None]+potential-mu[:, None, None])*mask[..., None]
+        scalar, embedded = self.state_embedding(chemical, vector, levels, field, transport)
+        return torch.cat((scalar, torch.asinh(embedded.square().sum(-1)),
+                          torch.asinh((vector*embedded).sum(-1))), -1), embedded
+
+    def reference_offsets(self, chemical, vector, local, law, mask, target, transport):
+        return super().reference_offsets(chemical, vector, local, law, mask, torch.zeros_like(target), transport)
+
+    def read_law(self, chemical, vector, potential, field, mask, reference, mu, transport, species_bias):
+        """The whole law at the sampled potential and field: bias, dd_dE, the coefficients, d0 and the amplitudes."""
+        invariants, embedded = self._invariants(chemical, vector, potential, field, mask, reference[..., -2:], mu,
+                                                transport)
+        scalars, polar, hidden = self._constitutive_outputs(invariants, vector, embedded)
+        amplitudes = (torch.cat((scalars[..., 2:], polar[..., 1:, :].flatten(-2)), -1)+reference[..., 4:-3])*mask[..., None]
+        return ((species_bias+scalars[..., 0])*mask, _positive(self.dd_dE_readout(hidden))[..., 0]*mask,
+                self.dos(hidden, mask), polar[..., 0, :]*mask[..., None], amplitudes)
+
 
 class VariationalFlowResponse(ChargeFlowResponse):
     """MACE-VOLT response in which charge moves along bonds and the bond flows minimize the energy.
@@ -722,8 +900,12 @@ def describe_law(model, data):
         if not hasattr(model, 'foundation_element_map'):
             vector, p0 = vector[..., [2, 0, 1]], p0[..., [0, 3, 1, 2]]
         chemical, vector = r.geometry_features(scalar, vector)
-        gaps = None
-        if getattr(r, 'band', False):
+        gaps = dos = None
+        if getattr(r, 'functional', False):
+            _, law, _, coefficients = r.law_reference(chemical, vector, g.attrs, p0, g.present)
+            dos = torch.stack([r.charge_law(coefficients, torch.full_like(law[..., 0], e))[1]
+                               for e in DOS_SAMPLE_ENERGIES], -1)
+        elif getattr(r, 'band', False):
             _, law, _, gaps = r.band_reference(chemical, vector, g.attrs, p0, g.present)
         else:
             _, law, _ = r.prepare_reference(chemical, vector, g.attrs, p0, g.present)
@@ -741,6 +923,8 @@ def describe_law(model, data):
                   'q0': local.field_independent_charge_density[:, 0].cpu().numpy()}
         if gaps is not None:
             result['gap_v'], result['gap_c'] = g.unpack(gaps[..., 0]).cpu().numpy(), g.unpack(gaps[..., 1]).cpu().numpy()
+        if dos is not None:
+            result['dos'] = g.unpack(dos).cpu().numpy()
         if getattr(r, 'flows', False):
             graph, a, b, length, conductance = r.bond_conductances(chemical, local.positions, data['edge_index'],
                                                                    data['shifts'], g)
@@ -1391,22 +1575,56 @@ def variational_flow_state(model, data, local, charge, counter):
     return g, state, energy, cell+(fukui*total[..., 0]).sum(-1)
 
 
-def band_offset(action, factors, deff, bias, charge, reference, values, field, p0, target, mask, sigma):
-    """screen_drive_offset for a law linearized as charge + deff (bias + phi - mu)."""
-    inverse, root = factors
-    base = torch.cat(((charge+deff*(bias+values))[..., None],
-                      p0[..., 1:4]/sigma+reference[..., 1:4]-reference[..., -3:-2]*sigma*field), -1)
-    return (action@(base*mask[..., None]).flatten(1)[..., None]).squeeze(-1)+root*inverse[:, :-1, -1]*target[:, None]
+def dipole_screening(kernel, completion, drive, dd_dE, d0, amplitudes, mask):
+    """Eliminate the dipoles of the moment system once per geometry and law.
+
+    With the dipoles d = d0 + dd_dE (drive_d - K_dq q - K_dd d) solved for every charge, the charges see
+    the effective kernel K_eff = K_qq - K_qd (1 + dd_dE K_dd)^-1 dd_dE K_dq, the Coulomb kernel screened
+    by the polarizable atoms, and the effective drive of the fixed sources and the free dipoles. Returns
+    K_eff, that drive, the dipole map (d = d_free - map q), d_free and the drive of the amplitudes alone.
+    """
+    graphs, atoms = mask.shape
+    index = torch.arange(4*atoms, device=mask.device).reshape(atoms, 4)
+    charge_rows, dipole_rows = index[:, 0], index[:, 1:].reshape(-1)
+    applied = (completion@amplitudes.flatten(1)[..., None]).squeeze(-1)
+    total = applied+drive.flatten(1)
+    k_qq, k_qd = kernel[:, charge_rows][:, :, charge_rows], kernel[:, charge_rows][:, :, dipole_rows]
+    k_dq, k_dd = kernel[:, dipole_rows][:, :, charge_rows], kernel[:, dipole_rows][:, :, dipole_rows]
+    response = (dd_dE[..., None].expand(-1, -1, 3)*mask[..., None]).flatten(1)
+    operator = torch.eye(3*atoms, dtype=kernel.dtype, device=kernel.device)+response[..., None]*k_dd
+    rhs = torch.cat((response[..., None]*k_dq, (d0.flatten(1)+response*total[:, dipole_rows])[..., None]), -1)
+    ensure_cuda_linalg(kernel.device)
+    solved = torch.linalg.solve(operator, rhs)
+    effective = k_qq-k_qd@solved[..., :atoms]
+    free = solved[..., atoms]
+    return effective, total[:, charge_rows]-(k_qd@free[..., None]).squeeze(-1), solved[..., :atoms], free, applied
 
 
-def band_state(model, data, local, charge, counter):
-    """The multipoles of a BandResponse, the exact minimum of the energy with the band law of every atom.
+def charge_solve(effective, drive, fixed, slope, bias, target, mask):
+    """The charges of the law linearized as fixed + slope (bias + phi - mu) in the screened cell at total charge target.
 
-    At the current levels delta the law is linearized, dq = c + D_eff (bias + phi - mu), and one exact
-    screened solve of the cell gives the next levels: Newton's method, run without gradients until
-    the levels are stationary. One differentiable solve at the converged levels then gives the state
-    with its exact first derivatives (the implicit function theorem), and the energy of the law from
-    its Legendre form. Returns the geometry, the state, the local energy of the charges, dipoles and
+    Two right-hand sides of one factorization give the charges at mu = 0 and the charges per volt of mu;
+    the constraint fixes mu. Returns the charges and mu.
+    """
+    atoms = mask.shape[-1]
+    operator = torch.eye(atoms, dtype=effective.dtype, device=effective.device)+slope[..., None]*effective
+    rhs = torch.stack((fixed+slope*(bias+drive), slope), -1)
+    solved = torch.linalg.solve(operator, rhs)
+    mu = ((solved[..., 0]*mask).sum(-1)-target)/(solved[..., 1]*mask).sum(-1)
+    return (solved[..., 0]-mu[:, None]*solved[..., 1])*mask, mu
+
+
+def functional_state(model, data, local, charge, counter):
+    """The multipoles of an EnergyFunctionalResponse, BandResponse or FixedPointResponse: the exact minimum.
+
+    The dipoles are eliminated once per law (dipole_screening). At the current levels delta the charge
+    law is linearized, dq = c + n (bias + phi - mu), and one solve on the charges gives the next levels:
+    Newton's method, run without gradients until the levels are stationary. One differentiable solve at
+    the converged levels then gives the state with its exact first derivatives (the implicit function
+    theorem: the linearized solution is stationary in its linearization point there), and the energy of
+    the law from its Legendre form. A FixedPointResponse reads its law again at the potential of each
+    minimum, mixed with the previous read, until the read levels stop changing, and the last read is
+    differentiated. Returns the geometry, the state, the local energy of the charges, dipoles and
     amplitudes at the minimum, and mu, the Lagrange multiplier of the total charge.
     """
     r = model.field_dependent_charges_map
@@ -1424,69 +1642,77 @@ def band_state(model, data, local, charge, counter):
                                  len(g.counts), g.size, float(model.r_max),
                                  float(r.receiver_widths.max())).permute(0, 3, 1, 2)
     transport = (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
-    source, law, species_bias, gaps = r.band_reference(chemical, vector, g.attrs, p0, mask)
+    source, law, species_bias, coefficients = r.law_reference(chemical, vector, g.attrs, p0, mask)
     kernel, completion = moment_kernels(g.tensors, g.kernels, mask, sigma, slab=g.slab_factor)
     q = charge.reshape(-1).to(g.volume)
     formal = torch.round(q.detach()+counter.detach().reshape(-1).to(g.volume))
     reference = r.reference_offsets(chemical, vector, source, law, mask, formal, transport)
-    dd_dE, dos = law[..., 0], law[..., 2]*mask
-    q0 = p0[..., 0]*mask if getattr(r, 'permanent_charges', True) else torch.zeros_like(law[..., 0])
+    q0 = p0[..., 0]*mask if getattr(r, 'permanent_charges', False) else torch.zeros_like(mask)
     # The counter charge and the applied field at the atoms; their slab terms are linear in z.
     values, field = sample_spectrum(g.counter_coulomb, g.tensors)
     slope = (g.external*g.normal).sum(-1)-g.slab_factor*g.counter_moment
     values = values[..., 0]+slope[:, None]*g.tensors[9]
     field = field[..., 0, :]-slope[:, None, None]*g.normal[:, None, :]
+    drive = torch.cat((values[..., None], -sigma*field), -1)*mask[..., None]
+    geometry_law = (law[..., 1]*mask, law[..., 0]*mask, coefficients, (p0[..., 1:4]/sigma+reference[..., 1:4])*mask[..., None],
+                    source)
 
-    def solve(delta, amplitudes, bias, values, field, target):
-        """One exact screened solve of the law linearized at the levels delta.
+    def minimum(read, differentiable):
+        """The exact minimum of one read law (bias, dd_dE, coefficients, d0, amplitudes)."""
+        bias, dd_dE, coefficients, d0, amplitudes = read
+        screen = dipole_screening(kernel, completion, drive, dd_dE, d0, amplitudes, mask)
+        effective, drive_q, dipole_map, free, applied = screen
 
-        Returns the state, the total potential and field at the atoms, mu and the levels of the solution.
-        """
-        dq, deff = r.band_law(dos, gaps, delta)
-        deff = deff*mask
-        fixed = (q0+dq-deff*delta)*mask
-        response = (torch.cat((deff[..., None], dd_dE[..., None].expand(-1, -1, 3)), -1)*mask[..., None]).flatten(-2)
-        factors = screen_factors(response, kernel, mask)
-        action, sources = screen_action(completion, response, mask, factors)
-        offset = band_offset(action, factors, deff, bias, fixed, reference, values, field, p0, target, mask, sigma)
-        state = apply_screen_action(amplitudes, mask, target, sources, offset)
-        moments = state[..., :4].flatten(1)
-        applied = (completion@amplitudes.flatten(1)[..., None]).squeeze(-1)
-        drive = torch.cat((values[..., None], -sigma*field), -1)*mask[..., None]
-        total = ((drive.flatten(1)+applied-(kernel@moments[..., None]).squeeze(-1)).reshape(*mask.shape, 4)
-                 * mask[..., None])
-        mu = ((fixed+deff*(bias+total[..., 0])).sum(-1)-target)/deff.sum(-1)
-        return state, total, mu, (bias+total[..., 0]-mu[:, None])*mask, applied
-    quiet_v, quiet_f, zeros = torch.zeros_like(values), torch.zeros_like(field), torch.zeros_like(values)
-    if getattr(r, 'field_input', 'none') == 'neutral':
-        # The biases at the field of the geometry law in the neutral cell, the amplitudes at the field of those biases.
-        def neutral_field(bias):
-            state = solve(zeros, source, bias, quiet_v, quiet_f, formal)[0]
-            return sample_spectrum(total_spectrum(state, g.tensors, g.kernels, sigma, torch.zeros_like(g.fixed[0])),
-                                   g.tensors)
-        bias = r.band_biases(chemical, vector, *neutral_field(law[..., 1]), mask, reference, formal, transport,
-                             species_bias)
-        amplitudes, _ = r(chemical, vector, *neutral_field(bias), mask, formal, reference, transport)
-    else:
-        amplitudes, bias = source, law[..., 1]
-    # Newton's method on the levels, without gradients.
-    with torch.no_grad():
-        delta, held_amplitudes, held_bias = zeros, amplitudes.detach(), bias.detach()
-        taken = 0
-        for taken in range(1, int(r.newton_steps)+1):
-            change = (solve(delta, held_amplitudes, held_bias, values, field, q)[3]-delta)*mask
-            delta = delta+change.clamp(-float(r.newton_clip), float(r.newton_clip))
-            if float(change.abs().amax()) < float(r.newton_tolerance):
-                break
+        def levels_of(delta):
+            dq, n = r.charge_law(coefficients, delta)
+            fixed = (q0+dq-n*delta)*mask
+            charges, mu = charge_solve(effective, drive_q, fixed, n*mask, bias, q, mask)
+            return charges, mu, (bias+drive_q-(effective@charges[..., None]).squeeze(-1)-mu[:, None])*mask
+        with torch.no_grad():
+            delta, taken = torch.zeros_like(values), 0
+            for taken in range(1, int(r.newton_steps)+1):
+                change = levels_of(delta)[2]-delta
+                delta = delta+change.clamp(-float(r.newton_clip), float(r.newton_clip))
+                if float(change.abs().amax()) < float(r.newton_tolerance):
+                    break
         r.newton_taken = taken
-    # The differentiable solve at the converged levels.
-    state, total, mu, level, applied = solve(delta, amplitudes, bias, values, field, q)
-    moved = (state[..., 0]-q0)*mask
-    moments = state[..., :4].flatten(1)
-    induced = (state[..., 1:4]-p0[..., 1:4]/sigma-reference[..., 1:4])*mask[..., None]
-    energy = ((moved*level-r.band_energy(dos, gaps, level)-bias*moved).sum(-1)
-              + .5*(induced*total[..., 1:4]).sum((-1, -2))-(moments*applied).sum(-1))
+        with torch.set_grad_enabled(differentiable and torch.is_grad_enabled()):
+            charges, mu, level = levels_of(delta)
+            dipoles = free-(dipole_map@charges[..., None]).squeeze(-1)
+            moments = torch.cat((charges[..., None], dipoles.reshape(*mask.shape, 3)), -1).flatten(1)
+            total = ((applied+drive.flatten(1)-(kernel@moments[..., None]).squeeze(-1)).reshape(*mask.shape, 4)
+                     * mask[..., None])
+            state = torch.cat((moments.reshape(*mask.shape, 4), amplitudes), -1)
+            moved = (charges-q0)*mask
+            induced = (dipoles.reshape(*mask.shape, 3)-d0)*mask[..., None]
+            energy = ((moved*level-r.charge_energy(coefficients, level)-bias*moved).sum(-1)
+                      + .5*(induced*total[..., 1:4]).sum((-1, -2))-(moments*applied).sum(-1))
+        return state, energy, mu, level, total
+    read = geometry_law
+    if getattr(r, 'reads', 0):
+        # The fixed point: the law read at the potential of its own minimum, the read inputs mixed.
+        with torch.no_grad():
+            inputs, change = None, float('inf')
+            for taken in range(1, int(r.reads)+1):
+                state, _, mu, _, _ = minimum(read, False)
+                potential, sampled = sample_spectrum(total_spectrum(state, g.tensors, g.kernels, sigma, g.fixed[1]),
+                                                     g.tensors)
+                if inputs is None:
+                    inputs = (potential, sampled, mu)
+                else:
+                    change = float(((potential-inputs[0])*mask[..., None]).abs().amax())
+                    inputs = tuple(old+float(r.mixing)*(new-old) for old, new in zip(inputs, (potential, sampled, mu)))
+                    if change < float(r.read_tolerance):
+                        break
+                read = r.read_law(chemical, vector, inputs[0], inputs[1], mask, reference, inputs[2], transport,
+                                  species_bias)
+            r.reads_taken, r.read_change = taken, change
+        read = r.read_law(chemical, vector, inputs[0], inputs[1], mask, reference, inputs[2], transport, species_bias)
+    state, energy, mu, _, _ = minimum(read, True)
     return g, state, energy, mu
+
+
+band_state = functional_state
 
 
 def variational_state(model, data, local, charge, counter):
@@ -1579,7 +1805,7 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
     scf_steps is 1 and scf_residual 0. Without a mode, a model evaluates as it was trained
     in its last stage (deployment_direct).
 
-    A VariationalResponse has one exact minimum instead (variational_state): mode, steps,
+    A VariationalResponse has one exact minimum instead (variational_state, functional_state): mode, steps,
     mixing, tolerance and stability do not apply, and its energy holds the local energy of the
     law in place of the Fermi level readout. Its Lagrange multiplier is lagrange_fermi_level,
     which equals -dE/dQ up to the constant fermi_level_offset and vacuum reference.
@@ -1621,8 +1847,8 @@ def evaluate_coupled(model, data, steps=50, training=False, compute_force=True, 
             # One exact minimum: no updates, no molecules and no Fermi level readout.
             if getattr(r, 'flows', False):
                 g, state, response_energy, lagrange = variational_flow_state(model, data, local, charge, counter)
-            elif getattr(r, 'band', False):
-                g, state, response_energy, lagrange = band_state(model, data, local, charge, counter)
+            elif getattr(r, 'functional', False) or getattr(r, 'band', False):
+                g, state, response_energy, lagrange = functional_state(model, data, local, charge, counter)
             else:
                 g, state, response_energy, lagrange = variational_state(model, data, local, charge, counter)
             q = charge.reshape(-1).to(g.volume)
