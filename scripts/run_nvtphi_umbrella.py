@@ -196,7 +196,7 @@ def charge_check(atoms, dq=2.e-3):
 
 
 def simulate(source, index, replica, model_file, model_sha, directory):
-    from mace_scf.calculators.potential_response import NVTPhiLangevin
+    from mace_scf.md import NVTPhiLangevin
     atoms, fixed, mobile, wall, pair, kind = prepare(source, index)
     stages = make_stages(atoms.get_distance(*pair, mic=True))
     # What a resumed run must share with its start: the physics, not the text of this file.

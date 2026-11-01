@@ -47,7 +47,8 @@ def prepare_frame(source):
 
 
 def main() -> None:
-    from mace_scf.calculators.potential_response import MACEPotentialResponse, NVTPhiLangevin
+    from mace_scf.calculators.potential_response import MACEPotentialResponse
+    from mace_scf.md import NVTPhiLangevin
 
     for path in (ATOMS_FILE, MODEL_FILE):
         if not Path(path).is_file():
