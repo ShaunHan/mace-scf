@@ -287,12 +287,14 @@ class Cell:
         self.counter_width = width
         species, energy = data['node_attrs'].argmax(-1), zero.clone()
         table = model.neutral_atom_form_factors
+        # In constant potential MD the sheet stands for ions and acts through electrostatics only.
+        overlap = getattr(model, 'counter_charge_overlap', True)
         for i in torch.nonzero(present).flatten().tolist():
             sigma = float(width[i])
             atoms = data['batch'] == i
             rows = table[species[atoms].unique()]
             covered = FORM_FACTOR_SPACING*(rows.shape[-1]-1-(rows != 0).flip(-1).int().argmax(-1))
-            if bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any()):
+            if overlap and (bool((rows[:, 0] == 0).any()) or bool((covered < math.sqrt(2*TAIL)/sigma).any())):
                 raise ValueError('A counter charge needs the neutral atoms of every element: train on frames '
                                  'with fourier_proto_potential')
             m = torch.arange(1, int(math.sqrt(2*TAIL)/sigma*float(self.length[i])/(2*math.pi))+2,
@@ -301,6 +303,8 @@ class Cell:
             k2 = waves.square().sum(-1)
             # The self energy and the overlap -Q_cc <phi_neutral>, over the +k half of the modes.
             energy[i] = FIELD_CONSTANT*self.counter_charge[i].square()/self.volume[i]*(torch.exp(-sigma**2*k2)/k2).sum()
+            if not overlap:
+                continue
             coordinate = (k2.sqrt()/FORM_FACTOR_SPACING).clamp_max(table.shape[-1]-1.001)
             left = coordinate.long()
             form = (table[:, left]*(left+1-coordinate)+table[:, left+1]*(coordinate-left))[species[atoms]]
@@ -426,7 +430,7 @@ def solve_charges(effective, drive, fixed, slope, bias, target, mask):
     return (solved[..., 0]-mu[:, None]*solved[..., 1])*mask, mu
 
 
-class EnergyFunctional(ScaleShiftMACE):
+class PotentialResponse(ScaleShiftMACE):
     """A MACE whose atoms carry the local law of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 
     newton_steps, newton_tolerance = 60, 1.e-6
@@ -436,7 +440,7 @@ class EnergyFunctional(ScaleShiftMACE):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
-            raise ValueError('EnergyFunctional needs scalar and vector features in every layer, e.g. 64x0e + 64x1o')
+            raise ValueError('PotentialResponse needs scalar and vector features in every layer, e.g. 64x0e + 64x1o')
         self.feature_slices = [(sl.start, sl.stop, mul, ir.l) for (mul, ir), sl in zip(irreps, irreps.slices())]
         self.layout = 'mul_ir'
         self.density_width = float(density_width)
@@ -599,12 +603,14 @@ class EnergyFunctional(ScaleShiftMACE):
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 **kwargs):
         if compute_virials or compute_stress:
-            raise NotImplementedError('EnergyFunctional computes no stress')
+            raise NotImplementedError('PotentialResponse computes no stress')
         if data['positions'].is_cuda and torch.backends.cuda.preferred_linalg_library().name != 'Cusolver':
             torch.backends.cuda.preferred_linalg_library('cusolver')
         with torch.enable_grad():
             data = dict(data)
             charge = data['total_charge'].reshape(-1).clone().requires_grad_(True)
+            counter = data['counter_charge'].reshape(-1).clone().requires_grad_(True)
+            data['counter_charge'] = counter
             ctx = prepare_graph(data)
             positions = ctx.positions
             node_energy, scalars, vectors = self.backbone(data, ctx)
@@ -628,12 +634,14 @@ class EnergyFunctional(ScaleShiftMACE):
                              + counter_energy-(self.fermi_level_offset+cell.vacuum_reference)*charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(cell.counts))
             energy = energy+electrostatic+response_energy
-            inputs = [charge, positions] if compute_force else [charge]
+            inputs = [charge, counter, positions] if compute_force else [charge, counter]
             gradients = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True)
         forces = None
         if compute_force:
-            forces = -gradients[1] if gradients[1] is not None else torch.zeros_like(positions)
+            forces = -gradients[2] if gradients[2] is not None else torch.zeros_like(positions)
         fermi_level = -gradients[0]
+        # dE/dQ along Q_cc = -Q, the voltage between the electrode and the counter charge
+        cell_voltage = -fermi_level-(gradients[1] if gradients[1] is not None else torch.zeros_like(fermi_level))
         workfunction = cell.vacuum_level(state, self.law.num_sources)-fermi_level
         # The Fourier density and potential undo the Gaussian smoothing of the charges and amplitudes.
         smooth = torch.exp(-.5*sigma**2*cell.k2)
@@ -651,6 +659,7 @@ class EnergyFunctional(ScaleShiftMACE):
             'dipole': dipole,
             'fermi_level': fermi_level,
             'workfunction': workfunction,
+            'cell_voltage': cell_voltage,
             'fourier_farfield_density': coarse*farfield*cell.ngrid,
             'fourier_potential': torch.view_as_real(raw+cell.ramp(boundary, width=0.))*cell.ngrid,
             'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smooth)*cell.ngrid,
@@ -753,7 +762,7 @@ def hats(k2, cutoff, knots):
 
 
 @torch.no_grad()
-def initialize_energy_functional(model, args, train_loader, device):
+def initialize_potential_response(model, args, train_loader, device):
     """The neutral atoms of the reference calculations and the feature units of the law, from training data."""
     key = next(iter(args.heads.values()))['info_keys'].get('fourier_proto_potential')
     if key is not None:

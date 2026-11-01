@@ -1,4 +1,3 @@
-"""Building MACE-VOLT models: from scratch or on a MACE-POLAR foundation, with an optional replay head."""
 import ast
 import inspect
 import logging
@@ -15,11 +14,11 @@ from mace import data
 from mace.tools import AtomicNumberTable, torch_geometric
 from mace.tools.scatter import scatter_sum
 
-from mace_scf.electrostatics.energy_functional import EnergyFunctional, initialize_energy_functional
+from mace_scf.electrostatics.potential_response import PotentialResponse, initialize_potential_response
 from mace_scf.electrostatics.loss import WeightedLoss
 
 
-def build_energy_functional(args, model_config, train_loader, atomic_energies):
+def build_potential_response(args, model_config, train_loader, atomic_energies):
     foundation = None
     if args.foundation_model:
         foundation = torch.load(args.foundation_model, map_location='cpu', weights_only=False)
@@ -33,7 +32,7 @@ def build_energy_functional(args, model_config, train_loader, atomic_energies):
         mean, std = 0., 1.
     else:
         mean, std = mace.modules.scaling_classes[args.scaling](train_loader, atomic_energies)
-    model = EnergyFunctional(
+    model = PotentialResponse(
         **model_config,
         interaction_cls_first=mace.modules.interaction_classes[args.interaction_first],
         atomic_inter_scale=std,
@@ -42,11 +41,11 @@ def build_energy_functional(args, model_config, train_loader, atomic_energies):
         field_widths=ast.literal_eval(args.field_feature_widths),
         kspace_cutoff_factor=args.kspace_cutoff_factor,
         fermi_level_offset=args.fermi_level_offset,
-        **args.energy_functional_config,
+        **args.potential_response_config,
     ).to(args.device)
     if foundation is not None:
         adopt_foundation(model, foundation)
-    initialize_energy_functional(model, args, train_loader, args.device)
+    initialize_potential_response(model, args, train_loader, args.device)
     if foundation is not None:
         condition_energy(model, train_loader, args.device)
     if args.enable_cueq:
@@ -117,6 +116,8 @@ class FusedConvolution(torch.nn.Module):
 
 def accelerate_backbone(model, device):
     """Interactions and products in the CuEq ir_mul layout, with MACE's own weight transfer."""
+    if model.layout == 'ir_mul':
+        return
     from mace.cli.convert_e3nn_cueq import transfer_weights
     from mace.modules import EquivariantProductBasisBlock
     from mace.modules.wrapper_ops import CuEquivarianceConfig

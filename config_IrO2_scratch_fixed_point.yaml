@@ -20,7 +20,7 @@ seed: 7777
 device: cuda
 enable_cueq: true
 default_dtype: float64
-model: EnergyFunctional
+model: PotentialResponse
 hidden_irreps: 64x0e + 64x1o
 MLP_irreps: 64x0e
 num_interactions: 2
@@ -110,5 +110,5 @@ train_schedule:
       fourier_potential: 100.0
       workfunction: 100.0
       fermi_level: 100.0
-energy_functional_config:
+potential_response_config:
   fixed_point: true

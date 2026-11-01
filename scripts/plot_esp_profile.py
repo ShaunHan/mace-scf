@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""Plot the plane-averaged ESP of MACE-VOLT against DFT for XYZ frames with stored Fourier labels.
-
-DFT: the deformation potential LOCPOT - LOCPOT_proto (info key vasp_phi_fftn_shifted) and
-the neutral-atom potential LOCPOT_proto (vasp_proto_phi_fftn_shifted), unsmoothed Fourier
-modes written by scripts/collect_vasp_data.py. Model: its deformation potential. Both are
-averaged over the planes of the slab on the Fourier modes they share, raw and with the
-model's Gaussian smearing, as in the potential loss. The total ESP adds the same neutral
-atoms to both and is referenced to each Fermi level, so its vacuum plateau is the work
-function. Edit the settings below; one PNG/PDF/SVG/CSV set is saved per selected index.
-"""
 from pathlib import Path
 
 import matplotlib
@@ -18,7 +8,7 @@ from matplotlib.transforms import Affine2D
 import numpy as np
 from ase.io import read
 from ase.visualize.plot import plot_atoms
-from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
+from mace_scf.calculators.potential_response import MACEPotentialResponse
 
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v387.model'
@@ -26,14 +16,6 @@ FRAME_INDEXES = list(range(10, 20))
 DEVICE = 'cuda:0'
 POTENTIAL_KEY, PROTO_KEY, FERMI_KEY = 'vasp_phi_fftn_shifted', 'vasp_proto_phi_fftn_shifted', 'vasp_efermi'
 OUTPUT_DIR, DPI = Path('esp_profiles'), 300
-
-
-class ProfileCalculator(MACEFixedPointSCF):
-    def _build_results(self, output, diagnostics):
-        results = super()._build_results(output, diagnostics)
-        for key in ('fourier_potential', 'k_vectors_grid_shape', 'k_vectors_mask'):
-            results[key] = output[key].detach().cpu().numpy()
-        return results
 
 
 def planar_modes(coefficients, keep):
@@ -79,8 +61,10 @@ def profiles(atoms, results, sigma):
     errors = {kind: float(np.sqrt(sum(abs(weight(m)*(model[m]-dft[m]))**2 for m in dft)))
               for kind, weight in (('raw', lambda m: 1.), ('smeared', smear.get))}
     errors['fermi'] = fermi['model']-fermi['dft']
-    work = {'model': float(results['work_function'])}
-    if 'vacuum_potential' in atoms.info:
+    work = {'model': float(results['workfunction'])}
+    if 'workfunction' in atoms.info:
+        work['dft'] = float(atoms.info['workfunction'])
+    elif 'vacuum_potential' in atoms.info:
         work['dft'] = float(atoms.info['vacuum_potential'])-fermi['dft']
     return curves, dict(center=center, errors=errors, work=work, kmax=2*np.pi*max(dft)/length)
 
@@ -120,9 +104,6 @@ def save_plot(atoms, curves, summary, sigma, index):
         axis.text(.015, .94, letter, transform=axis.transAxes, fontweight='bold', va='top', fontsize=13)
         axis.legend(fontsize=8, loc='best', frameon=False)
         axis.set_xlim(z[0], z[-1])
-    if 'vacuum_zfrac' in atoms.info:
-        axes[1].axvline(((float(atoms.info['vacuum_zfrac'])-center+.5) % 1.-.5)*float(atoms.cell[2, 2]),
-                        color='0.6', lw=.8, ls=':')
     # The vacuum levels themselves: the model's exact level (no Fourier series) and the raw DFT label, both flat.
     for name, color in (('dft', 'C0'), ('model', 'C1')):
         if name in work:
@@ -153,16 +134,14 @@ def plot_frame(atoms, calculator, index):
     model_atoms.set_constraint([])
     model_atoms.calc = calculator
     model_atoms.get_potential_energy()
-    sigma = float(calculator.model.field_dependent_charges_map.potential_amplitudes_smearing_width)
+    sigma = float(calculator.model.density_width)
     curves, summary = profiles(atoms, calculator.results, sigma)
     save_plot(atoms, curves, summary, sigma, index)
     return summary['errors']
 
 
 def main():
-    calculator = ProfileCalculator(model_path=MODEL_FILE, device=DEVICE, pbc_handling='slab', scf_restart=False,
-                                   external_field_key='external_field', total_charge_key='total_charge')
-    calculator.model.eval().requires_grad_(False)
+    calculator = MACEPotentialResponse(model_path=MODEL_FILE, device=DEVICE)
     frames = read(ATOMS_FILE, index=':')
     for index in FRAME_INDEXES:
         plot_frame(frames[index], calculator, index)

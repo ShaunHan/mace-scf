@@ -1,15 +1,4 @@
 #!/usr/bin/env python3
-"""Constant-potential (NVTPhi) MD of an electrode slab in water at U* vs SHE.
-
-  relax       Langevin MD at Q = 0, averaging Delta = WF - eV (counter charge to vacuum);
-  align       thermopotentiostat at V* = 4.44 V + U* - <Delta>, <Delta> averaged online
-              and then frozen, so that <U_SHE> = U*;
-  production  the same dynamics with V* fixed.
-A known SHE_OFFSET skips the alignment. atoms.info needs at most total_charge =
-counter_charge = 0: the calculator places the counter-charge sheet, the dipole cut
-and the vacuum plane from the geometry. The sheet stands for solvated ions and acts
-through electrostatics only.
-"""
 from pathlib import Path
 
 import numpy as np
@@ -36,7 +25,6 @@ CAPACITANCE = 0.05            # C0 in e/V for the whole cell; sets the charge re
 STEPS = 10000                 # Production steps after relaxation and alignment.
 MAX_CHARGE_E = 1.0            # Stop if |Q| exceeds it: the model has left its range.
 SEED = 7777
-SCF_STEPS = None              # Updates per solve; None runs the model's last training stage.
 
 DEVICE = "cuda"
 TRAJECTORY = "nvtphi.traj"
@@ -44,7 +32,7 @@ LOGFILE = "nvtphi.log"
 LOGINTERVAL = 10
 # -------------------------------------------------------------------------- #
 
-PLANE_KEYS = ("counter_charge_zfrac", "counter_charge_width", "dipole_correction_zfrac", "vacuum_zfrac")
+PLANE_KEYS = ("counter_charge_zfrac", "counter_charge_width", "dipole_correction_zfrac")
 
 
 def prepare_frame(source):
@@ -59,18 +47,16 @@ def prepare_frame(source):
 
 
 def main() -> None:
-    from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
-    from mace_scf.md import NVTPhiLangevin
+    from mace_scf.calculators.potential_response import MACEPotentialResponse, NVTPhiLangevin
 
     for path in (ATOMS_FILE, MODEL_FILE):
         if not Path(path).is_file():
             raise FileNotFoundError(path)
     rng = np.random.default_rng(SEED)
     atoms = prepare_frame(read(ATOMS_FILE, index=-1))
-    atoms.calc = MACEFixedPointSCF(model_path=MODEL_FILE, device=DEVICE, default_dtype="float64",
-                                   constant_potential=True, scf_options={} if SCF_STEPS is None else {"num_scf_steps": SCF_STEPS},
-                                   ignore_nonconverged=True, counter_charge_height=SHEET_HEIGHT,
-                                   counter_charge_width=SHEET_WIDTH)
+    atoms.calc = MACEPotentialResponse(model_path=MODEL_FILE, device=DEVICE, default_dtype="float64",
+                                       constant_potential=True, counter_charge_height=SHEET_HEIGHT,
+                                       counter_charge_width=SHEET_WIDTH)
     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=rng)
     Stationary(atoms)
     ZeroRotation(atoms)
@@ -84,13 +70,12 @@ def main() -> None:
     length, cut = atoms.cell[2, 2], atoms.info["dipole_correction_zfrac"]
     z = ((atoms.get_scaled_positions(wrap=True)[:, 2]-cut) % 1.)*length
     print(f"Heights above the dipole cut (L = {length:.2f} A): atoms {z.min():.2f}..{z.max():.2f}, sheet "
-          f"{((atoms.info['counter_charge_zfrac']-cut) % 1.)*length:.2f}, vacuum plane "
-          f"{((atoms.info['vacuum_zfrac']-cut) % 1.)*length:.2f}")
+          f"{((atoms.info['counter_charge_zfrac']-cut) % 1.)*length:.2f}")
 
     def status() -> None:
         r, q = atoms.calc.results, dyn.electrode_charge
         print(f"step={dyn.nsteps:7d} T={atoms.get_temperature():6.1f} K Q={q:+.4f} e V={r['cell_voltage']:.4f} "
-              f"V*={dyn.target_cell_voltage:.4f} WF={r['work_function']:.4f} U={r['electrode_potential_she']:+.4f} "
+              f"V*={dyn.target_cell_voltage:.4f} WF={r['workfunction']:.4f} U={r['electrode_potential_she']:+.4f} "
               f"<Delta>={dyn.mean_offset:.4f}{'' if dyn.aligned else ' (aligning)'}", flush=True)
         if abs(q) > MAX_CHARGE_E:
             raise RuntimeError(f"|Q| = {abs(q):.3f} e exceeds MAX_CHARGE_E: the model has left its range")

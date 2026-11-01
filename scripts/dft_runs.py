@@ -1,23 +1,3 @@
-"""One SCF run per configuration: python dft_runs.py vasp_0_4.
-
-The Python local-potential plugin captures LOCPOT_proto from the initial
-atomic-density Hamiltonian, before adding the prescribed external potential.
-Requires a plugin-enabled VASP executable. No separate proto calculation.
-
-Every slab uses the same electronic settings. A nonzero counter charge (a
-Gaussian sheet, counter_charge_<axis>frac, or a 3D Gaussian,
-counter_charge_center) is added by the plug-in, which then also applies the
-slab dipole correction, since VASP's own correction needs a neutral cell.
-Neutral slabs use VASP's dipole correction. A placed source is recorded even
-at Q = 0, so every member of a charge scan shares one counter-charge geometry.
-
-A run is converged when VASP reached EDIFF, the density residual rms(c) of its
-last steps is below SCF_DENSITY_TOL and, with the plug-in, its dipole has
-settled. VASP tests EDIFF on two successive energies only, which a stalled
-density can pass by chance. An unconverged run continues from its CHGCAR with
-gentler Kerker mixing, at most MAX_CONTINUATIONS times; the attempts before
-are kept in attempt_<n>.
-"""
 from pathlib import Path
 from types import SimpleNamespace
 import json

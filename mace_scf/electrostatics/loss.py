@@ -11,7 +11,7 @@ from mace.modules.loss import (
     weighted_mean_squared_stress,
 )
 from .utils import compute_effective_index
-from .energy_functional import (
+from .potential_response import (
     replay_loss,
     weighted_mean_squared_error_fourier_density,
     weighted_mean_squared_error_fourier_potential,

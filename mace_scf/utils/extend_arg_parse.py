@@ -127,7 +127,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--field_readout_config", type=str, default=None,
     )
     parser.add_argument(
-        "--energy_functional_config", type=str, default=None,
+        "--potential_response_config", type=str, default=None,
     )
     parser.add_argument(
         "--field_block_weight_decay", type=float, default=5e-7
@@ -278,7 +278,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
             "MACE",
             "LocalSplitCharges",
             "FixedPoint",
-            "EnergyFunctional",
+            "PotentialResponse",
             "LocalCharges",
             "FixedChargeBaselinedMACE",
             "MACEQEq" #added model for qeq

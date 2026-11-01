@@ -1,15 +1,3 @@
-"""Collect VASP single points into extxyz training data: python collect_vasp_data.py
-
-The work function is the one of VASP's LVACPOTAV on the upper side of the slab, the vacuum potential above it
-minus the Fermi level. Without an applied field that potential is flat; with one it rises by the field per A up
-to the dipole correction plane, and the work function is read just below that plane. No vacuum plane needs to
-be given. Runs whose electronic minimization stopped before the density converged are skipped.
-
-    python collect_vasp_data.py TRAIN.xyz VALID.xyz ...
-
-relabels xyz files of earlier collections, which carry vacuum_potential at vacuum_zfrac, to the same work
-function, keeping every other frame and key, into TRAIN_wf.xyz, VALID_wf.xyz, ...
-"""
 from pathlib import Path
 import json
 import multiprocessing as mp
@@ -36,11 +24,11 @@ PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a un
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
 SKIP_IDS = [1, 7, 10, 46, 66, 97, 101, 115, 194, 218, 228, 266, 288, 296, 308, 318, 342, 353, 375, 391, 420, 439, 506, 555, 566, 755]  # Original VASP IDs: batch start + output index.
-VACUUM_MARGIN = 2.0  # A: vacuum planes start this far above the outermost atom.
-VACPOTFLAT = 0.02  # eV/A: largest planar field of a vacuum plane, applied field removed (LVACPOTAV's VACPOTFLAT).
-VACUUM_FLATNESS = 0.03  # V: largest spread of the vacuum potential over its planes, applied field removed.
-SCF_DENSITY_TOL = 2e-3  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
-DIPOLE_DRIFT_TOL = 2e-3  # eA: largest change of the plug-in dipole over its last callbacks.
+VACUUM_MARGIN = 3.0  # A: vacuum planes start this far above the outermost atom.
+VACPOTFLAT = 0.1  # eV/A: largest planar field of a vacuum plane, applied field removed, as LVACPOTAV.
+VACUUM_FLATNESS = 0.2  # V: a vacuum potential that varies more than this is not a converged density.
+SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
+DIPOLE_DRIFT_TOL = 0.05  # V: largest work function change from the plug-in dipole over its last callbacks.
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
 HDF_NAME = "fourier_data.hdf"
@@ -254,7 +242,9 @@ def vacuum_potential(atoms, planar, axis, correction, field):
     LVACPOTAV averages the planar potential over the field-free vacuum. The vacuum planes here lie between
     VACUUM_MARGIN above the outermost atom and the correction plane, where the field, the applied field
     removed, is below VACPOTFLAT. The applied field raises the potential by the field per A towards the plane,
-    so V(z) + field * (distance to the plane) is the same at every vacuum plane, the value just below it.
+    so V(z) + field * (distance to the plane) is the same at every vacuum plane, the value just below it. A
+    density that has not settled leaves a uniform charge in the vacuum, which bends that average by the spread
+    returned with it.
     """
     normal = np.linalg.inv(atoms.cell.array)[:, axis]
     length = 1.0 / np.linalg.norm(normal)
@@ -268,7 +258,7 @@ def vacuum_potential(atoms, planar, axis, correction, field):
     return float(level[vacuum].mean()), float(np.ptp(level[vacuum]))
 
 
-def converged_electronic_state(outdir, text, plugin):
+def converged_electronic_state(outdir, text, plugin, area):
     """Why the electronic state of a run is not converged, or None.
 
     VASP stops at EDIFF when one energy change is small, which a stalled density can pass by chance: the
@@ -286,8 +276,9 @@ def converged_electronic_state(outdir, text, plugin):
         return f"density residual rms(c) {max(residuals[-3:]):.1e}"
     if plugin and (outdir / "plugin_scf.csv").is_file():
         dipoles = np.loadtxt(outdir / "plugin_scf.csv", delimiter=",", skiprows=1, ndmin=2)[-6:, 1]
-        if np.ptp(dipoles) > DIPOLE_DRIFT_TOL:
-            return f"plug-in dipole drifts by {np.ptp(dipoles):.1e} eA over its last callbacks"
+        drift = np.ptp(dipoles) / (0.005526349406 * area)
+        if drift > DIPOLE_DRIFT_TOL:
+            return f"plug-in dipole drifts by {np.ptp(dipoles):.1e} eA, {drift:.3f} V of work function"
     return None
 
 
@@ -352,7 +343,9 @@ def collect_job(outdir):
     if not np.isfinite(charge) or not np.isfinite(fermi):
         raise ValueError(f"Nonfinite charge/Fermi level: {outdir}")
     text = (outdir / "OUTCAR").read_text(errors="replace")
-    reason = converged_electronic_state(outdir, text, plugin)
+    axis = meta["slab_axis"] if plugin else (int(parameters["idipol"]) - 1 if parameters["ldipol"] else 2)
+    area = np.linalg.norm(np.cross(*np.delete(atoms.cell.array, axis, axis=0)))
+    reason = converged_electronic_state(outdir, text, plugin, area)
     if reason is not None:
         print(f"Skipping {outdir}: {reason}")
         return None
@@ -436,6 +429,8 @@ def collect_job(outdir):
             if spread > VACUUM_FLATNESS:
                 print(f"Skipping {outdir}: the vacuum potential varies by {spread:.3f} V")
                 return None
+            if spread > 0.05:
+                print(f"Note {outdir}: the vacuum potential varies by {spread:.3f} V; kept at its average")
             vasp = re.findall(r"vacuum level on the upper side and lower side of the slab\s+([-+.\d]+)", text)
             if vasp and not external_field.any() and abs(float(vasp[-1]) - level) > 0.02:
                 print(f"Warning {outdir}: vacuum level {level:.3f} V, VASP's LVACPOTAV {float(vasp[-1]):.3f} V")

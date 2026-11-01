@@ -121,6 +121,8 @@ def create_error_table(
             "RMSE E / meV / atom",
             "RMSE F / meV / A",
             "relative F RMSE %",
+            "RMSE rho / me / A^3",
+            "RMSE ESP / mV",
             "RMSE EF / meV",
             "RMSE WF / meV",
         ]
@@ -170,6 +172,8 @@ def create_error_table(
             "rmse_polarizability_per_atom",
             "rmse_fermi_level",
             "rmse_workfunction",
+            "rmse_fourier_density",
+            "rmse_fourier_potential",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
@@ -261,6 +265,8 @@ def create_error_table(
                     metrics['rmse_e_per_atom'],
                     metrics['rmse_f'],
                     metrics['rel_rmse_f'],
+                    metrics['rmse_fourier_density'],
+                    metrics['rmse_fourier_potential'],
                     metrics['rmse_fermi_level'],
                     metrics['rmse_workfunction'],
                 ]

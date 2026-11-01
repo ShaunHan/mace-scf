@@ -216,9 +216,9 @@ def build_model(
                 read_hardness=args.read_hardness,
                 default_hardness=args.default_hardness,
             )
-    elif args.model == "EnergyFunctional":
-        from .foundation import build_energy_functional
-        model = build_energy_functional(args, model_config, train_loader, atomic_energies)
+    elif args.model == "PotentialResponse":
+        from .foundation import build_potential_response
+        model = build_potential_response(args, model_config, train_loader, atomic_energies)
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
@@ -323,7 +323,7 @@ def get_param_options(model, args):
                 "weight_decay": args.weight_decay,
             }
         )
-    if args.model == "EnergyFunctional":
+    if args.model == "PotentialResponse":
         param_options["params"].append(
             {
                 "name": "law",

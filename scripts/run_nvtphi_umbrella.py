@@ -1,17 +1,4 @@
 #!/usr/bin/env python3
-"""NVTPhi umbrella sampling of one O-O distance per frame at constant electrode potential.
-
-Each run has three stages, all under the O-O umbrella and the restraints:
-  relax    Langevin MD at Q = 0 at the starting distance, averaging Delta = WF - eV
-           (the step from the counter charge to the vacuum);
-  align    thermopotentiostat at V* = 4.44 V + U* - <Delta>, with <Delta> still
-           averaged online and then frozen, so that <U_SHE> = U*;
-  windows  equilibrate, then sample, each umbrella center from the start onward.
-The counter charge -Q is a Gaussian sheet SHEET_HEIGHT above the electrode surface
-in the water. It stands for solvated ions and acts through electrostatics only.
-Frames run in parallel processes on one GPU. Every record is a restart point, so
-rerunning the script resumes each run from its last record.
-"""
 import csv
 import hashlib
 import json
@@ -37,7 +24,7 @@ OUTPUT_ROOT = 'nvtphi_umbrella'
 RUN_INDEXES = list(range(0, 10))                # Frames of ATOMS_FILE to run.
 OXYGEN_PAIRS = {}                               # Optional {index: (O_id, O_id)}, zero-based.
 MAX_WORKERS, REPLICAS = len(RUN_INDEXES), 1     # Workers share one visible GPU.
-DEVICE, HEAD, ENABLE_CUEQ, SCF_STEPS = 'cuda:0', None, True, None  # None: the model's training steps.
+DEVICE, ENABLE_CUEQ = 'cuda:0', True
 TARGET_U_SHE = 1.60                             # V vs SHE: <WF> = 4.44 eV + e U*.
 SHEET_HEIGHT, SHEET_WIDTH = 6.0, 1.0            # A above the electrode surface, Gaussian sigma.
 CAPACITANCE, TAUPHI_FS = 0.05, 100.0            # C0 (e/V, whole cell) and tau set only the charge relaxation.
@@ -52,7 +39,7 @@ TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300.0, 0.5, 0.01
 LOGINTERVAL, SEED = 20, 7777                    # 10 fs records; stage lengths are multiples of it.
 MAX_CHARGE_E, MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1.0, 1000.0, 100.0
 # -------------------------------------------------------------------------- #
-PHYSICAL = ('HEAD SCF_STEPS TARGET_U_SHE SHEET_HEIGHT SHEET_WIDTH CAPACITANCE TAUPHI_FS FIXED_DEPTH WALL_GAP '
+PHYSICAL = ('TARGET_U_SHE SHEET_HEIGHT SHEET_WIDTH CAPACITANCE TAUPHI_FS FIXED_DEPTH WALL_GAP '
             'WALL_K O2_BOND PAIR_CUTOFF R_MIN R_MAX WINDOW_SPACING UMBRELLA_K RELAX_STEPS ALIGN_STEPS '
             'ALIGNMENT_CONSTANT_FS EQUIL_STEPS SAMPLE_STEPS TEMPERATURE_K TIMESTEP_FS FRICTION_PER_FS '
             'LOGINTERVAL SEED').split()
@@ -124,7 +111,7 @@ def select_pair(atoms, index, mobile):
 
 def prepare(source, index):
     """Atoms at Q = 0 with the planes from geometry; fixed atoms, wall height and O-O pair."""
-    from mace_scf.electrostatics.reservoir import slab_controls
+    from mace_scf.calculators.potential_response import slab_controls
     atoms = continuous(source)
     z = atoms.positions[:, 2]
     if atoms.cell[2, 2]-np.ptp(z) < 12.:
@@ -183,26 +170,11 @@ def make_stages(distance):
 
 def make_calculator(model_file):
     import torch
-    from mace_scf.calculators.fixedpoint_scf import MACEFixedPointSCF
+    from mace_scf.calculators.potential_response import MACEPotentialResponse
     torch.set_num_threads(1)
-    options = dict(constant_charge=True, use_autograd_forces=True, initial_density='local_guess',
-                   initial_fermi_level='zero')
-    if SCF_STEPS is not None:
-        options['num_scf_steps'] = int(SCF_STEPS)
-    calc = MACEFixedPointSCF(model_path=model_file, device=DEVICE, default_dtype='float64', pbc_handling='slab',
-                             scf_options=options, scf_restart=False, ignore_nonconverged=True, use_compile=False,
-                             counter_charge_height=SHEET_HEIGHT, counter_charge_width=SHEET_WIDTH,
-                             constant_potential=True)
-    heads = list(getattr(calc.model, 'heads', [calc.head]))
-    head = HEAD or (heads[0] if len(heads) == 1 else next((h for h in heads if h.lower() == 'default'), None))
-    if head not in heads:
-        raise ValueError(f'Set HEAD to the electrochemistry head; model heads are {heads}')
-    calc.head = head
-    if ENABLE_CUEQ:
-        from mace_scf.utils.foundation import accelerate_backbone
-        accelerate_backbone(calc.model, DEVICE)
-    calc.model.eval().requires_grad_(False)
-    return calc
+    return MACEPotentialResponse(model_path=model_file, device=DEVICE, default_dtype='float64', constant_potential=True,
+                                 counter_charge_height=SHEET_HEIGHT, counter_charge_width=SHEET_WIDTH,
+                                 enable_cueq=ENABLE_CUEQ)
 
 
 def charge_check(atoms, dq=2.e-3):
@@ -212,7 +184,7 @@ def charge_check(atoms, dq=2.e-3):
         atoms.info.update(total_charge=q, counter_charge=-q)
         atoms.calc.reset()
         energy = atoms.get_potential_energy(apply_constraint=False)
-        values.append((energy, atoms.calc.results['cell_voltage'], atoms.calc.results['work_function']))
+        values.append((energy, atoms.calc.results['cell_voltage'], atoms.calc.results['workfunction']))
     atoms.info.update(total_charge=0., counter_charge=0.)
     atoms.calc.reset()
     (em, vm, wm), (_, v, w), (ep, vp, wp) = values
@@ -224,7 +196,7 @@ def charge_check(atoms, dq=2.e-3):
 
 
 def simulate(source, index, replica, model_file, model_sha, directory):
-    from mace_scf.md import NVTPhiLangevin
+    from mace_scf.calculators.potential_response import NVTPhiLangevin
     atoms, fixed, mobile, wall, pair, kind = prepare(source, index)
     stages = make_stages(atoms.get_distance(*pair, mic=True))
     # What a resumed run must share with its start: the physics, not the text of this file.
@@ -307,10 +279,9 @@ def simulate(source, index, replica, model_file, model_sha, directory):
             row = dict(step=dyn.nsteps, time_fs=dyn.nsteps*TIMESTEP_FS, stage=stage['stage'], window=stage['window'],
                        center_A=bias.center, distance_A=distance, bias_eV=umbrella, energy_model_eV=energy,
                        temperature_K=temperature, charge_e=charge, cell_voltage_V=float(r['cell_voltage']),
-                       target_cell_voltage_V=dyn.target_cell_voltage, wf_eV=float(r['work_function']),
+                       target_cell_voltage_V=dyn.target_cell_voltage, wf_eV=float(r['workfunction']),
                        U_SHE_V=float(r['electrode_potential_she']), delta_V=float(r['she_offset']),
-                       mean_delta_V=dyn.mean_offset, aligned=int(dyn.aligned),
-                       scf_residual=float(np.max(r['scf_residual'])))
+                       mean_delta_V=dyn.mean_offset, aligned=int(dyn.aligned))
             for j, oxygen in enumerate(pair, 1):
                 row.update({f'O{j}_{key}': value for key, value in environment(atoms, oxygen).items()})
             if writer is None:
