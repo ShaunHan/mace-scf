@@ -35,7 +35,8 @@ NEW_TABLE_TYPES = [
     "DipoleRMSE",
     "DensityDipoleRMSE",
     "EnergyDensityDipoleRMSE",
-    "EnergyDipolePotentialsRMSE"
+    "EnergyDipolePotentialsRMSE",
+    "WorkFunctionRMSE",
 ]
 
 
@@ -114,6 +115,15 @@ def create_error_table(
             "RMSE ESP / mV",
             "relative ESP RMSE %",
         ]
+    elif table_type == "WorkFunctionRMSE":
+        table.field_names = [
+            "config_type",
+            "RMSE E / meV / atom",
+            "RMSE F / meV / A",
+            "relative F RMSE %",
+            "RMSE EF / meV",
+            "RMSE WF / meV",
+        ]
     # add new tables here...
 
     for name in sorted(all_data_loaders, key=mace_table_custom_key):
@@ -158,6 +168,8 @@ def create_error_table(
             "rmse_esp",
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
+            "rmse_fermi_level",
+            "rmse_workfunction",
         ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
@@ -240,6 +252,17 @@ def create_error_table(
                     metrics['rel_rmse_mu'],
                     metrics['rmse_esp'],
                     metrics['rel_rmse_esp'],
+                ]
+            )
+        elif table_type == "WorkFunctionRMSE":
+            table.add_row(
+                [
+                    name,
+                    metrics['rmse_e_per_atom'],
+                    metrics['rmse_f'],
+                    metrics['rel_rmse_f'],
+                    metrics['rmse_fermi_level'],
+                    metrics['rmse_workfunction'],
                 ]
             )
         # add new tables here...

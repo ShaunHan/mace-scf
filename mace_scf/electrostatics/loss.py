@@ -11,6 +11,12 @@ from mace.modules.loss import (
     weighted_mean_squared_stress,
 )
 from .utils import compute_effective_index
+from .energy_functional import (
+    replay_loss,
+    weighted_mean_squared_error_fourier_density,
+    weighted_mean_squared_error_fourier_potential,
+    weighted_mean_squared_error_workfunction,
+)
 import logging
 
 
@@ -37,7 +43,7 @@ def weighted_mean_squared_error_charge_extensive(ref: Batch, pred: TensorDict) -
 
 def weighted_mean_squared_error_fermi(ref: Batch, pred: TensorDict) -> torch.Tensor:
     # fermi level: [n_graphs, ]
-    configs_weight = ref.weight  # [n_graphs, ]
+    configs_weight = ref.weight * ref.fermi_level_weight  # [n_graphs, ]
     num_atoms = (ref.ptr[1:] - ref.ptr[:-1]) # [n_graphs, ]
     assert ref["fermi_level"].shape == pred['fermi_level'].shape
     return torch.mean(configs_weight * torch.square( (ref["fermi_level"] - pred['fermi_level']) / num_atoms))
@@ -45,7 +51,7 @@ def weighted_mean_squared_error_fermi(ref: Batch, pred: TensorDict) -> torch.Ten
 
 def weighted_mean_squared_error_fermi_extensive(ref: Batch, pred: TensorDict) -> torch.Tensor:
     # fermi level: [n_graphs, ]
-    configs_weight = ref.weight  # [n_graphs, ]
+    configs_weight = ref.weight * ref.fermi_level_weight  # [n_graphs, ]
     assert ref["fermi_level"].shape == pred['fermi_level'].shape
     return torch.mean(configs_weight * torch.square( (ref["fermi_level"] - pred['fermi_level']) ))
 
@@ -262,6 +268,10 @@ _LOSS_FUNCTIONS = {
     "fermi_level_gradient": fermi_level_gradient_function,
     "final_terms_fixedpoint_scf_stability": final_terms_fixedpoint_scf_stability,
     "field_features": weighted_mean_squared_error_field_feats,
+    "workfunction": weighted_mean_squared_error_workfunction,
+    "fourier_density": weighted_mean_squared_error_fourier_density,
+    "fourier_potential": weighted_mean_squared_error_fourier_potential,
+    "replay": replay_loss,
 }
 
 

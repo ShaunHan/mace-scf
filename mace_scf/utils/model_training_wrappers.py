@@ -34,7 +34,7 @@ def make_model_wrapper(
 ):
     model_class = model.__class__.__name__
 
-    if model_class in ["MACE", "ScaleShiftMACE"]:
+    if model_class in ["MACE", "ScaleShiftMACE", "EnergyFunctional"]:
         return DefaultModelWrapper(
             optimizer=optimizer,
             output_args=output_args,

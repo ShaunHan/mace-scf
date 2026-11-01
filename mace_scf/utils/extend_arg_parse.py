@@ -34,6 +34,10 @@ def preprocess_extended_arg_parser() -> argparse.ArgumentParser:
 
 def extended_arg_parser() -> argparse.ArgumentParser:
     parser = build_default_arg_parser()
+    # newer mace defines some of the options below
+    parser.conflict_handler = "resolve"
+    parser._optionals.conflict_handler = "resolve"
+    parser.add_argument("--amsgrad", type=strict_str2bool, default=True)
 
     # new arguments
     parser.add_argument(
@@ -121,6 +125,9 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--field_readout_config", type=str, default=None,
+    )
+    parser.add_argument(
+        "--energy_functional_config", type=str, default=None,
     )
     parser.add_argument(
         "--field_block_weight_decay", type=float, default=5e-7
@@ -271,6 +278,7 @@ def extended_arg_parser() -> argparse.ArgumentParser:
             "MACE",
             "LocalSplitCharges",
             "FixedPoint",
+            "EnergyFunctional",
             "LocalCharges",
             "FixedChargeBaselinedMACE",
             "MACEQEq" #added model for qeq

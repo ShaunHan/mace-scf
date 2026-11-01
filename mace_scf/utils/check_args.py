@@ -23,6 +23,7 @@ def check_config_conflicts(args: argparse.Namespace):
     check_unsupported_training_options(args)
     fill_fixedpoint_update_config(args)
     fill_field_readout_config(args)
+    args.energy_functional_config = ast.literal_eval(args.energy_functional_config or "{}")
 
     if args.model == "FixedPoint":
         for train_stage in args.train_schedule:

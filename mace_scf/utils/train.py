@@ -464,6 +464,7 @@ def evaluate(
     delta_total_charge_list = []
     fermi_level_computed = False
     delta_fermi_level_list = []
+    delta_workfunction_list = []
     batch = None  # for pylint
 
     for name, param in model.named_parameters():
@@ -533,7 +534,11 @@ def evaluate(
             delta_total_charge_list.append(batch.total_charge - total_charge)
         if output.get("fermi_level") is not None and batch.fermi_level is not None:
             fermi_level_computed = True
-            delta_fermi_level_list.append(batch.fermi_level - output["fermi_level"])
+            observed = batch.fermi_level_weight > 0.0
+            delta_fermi_level_list.append((batch.fermi_level - output["fermi_level"])[observed])
+        if output.get("workfunction") is not None:
+            observed = batch.workfunction_weight > 0.0
+            delta_workfunction_list.append((batch.workfunction - output["workfunction"])[observed])
         if output.get("dipole") is not None and batch.dipole is not None:
             dipole_components_to_include = batch.dipole_weight.view(-1, 3) > 0.0
             if torch.any(dipole_components_to_include):
@@ -669,6 +674,10 @@ def evaluate(
         aux["mae_fermi_level"] = compute_mae(delta_fermi_level)
         aux["rmse_fermi_level"] = compute_rmse(delta_fermi_level)
         aux["q95_fermi_level"] = compute_q95(delta_fermi_level)
+    if delta_workfunction_list:
+        delta_workfunction = to_numpy(torch.cat(delta_workfunction_list, dim=0))
+        aux["mae_workfunction"] = compute_mae(delta_workfunction)
+        aux["rmse_workfunction"] = compute_rmse(delta_workfunction)
 
     aux["time"] = time.time() - start_time
 
@@ -695,6 +704,14 @@ def valid_err_log(
         error_f = eval_metrics["rmse_f"] * 1e3
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
+        )
+    elif log_errors == "WorkFunctionRMSE":
+        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+        error_f = eval_metrics["rmse_f"] * 1e3
+        error_ef = eval_metrics["rmse_fermi_level"] * 1e3
+        error_wf = eval_metrics["rmse_workfunction"] * 1e3
+        logging.info(
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV"
         )
     elif (
         log_errors == "PerAtomRMSEstressvirials"

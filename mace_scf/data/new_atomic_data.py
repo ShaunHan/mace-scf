@@ -50,6 +50,22 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
     return keyspec
 
 
+VOLT_KEYS = (
+    "workfunction",
+    "workfunction_weight",
+    "fourier_density",
+    "fourier_density_shape",
+    "fourier_density_weight",
+    "fourier_potential",
+    "fourier_potential_shape",
+    "fourier_potential_weight",
+    "dipole_correction_fraction",
+    "counter_charge",
+    "counter_charge_width",
+    "counter_charge_fraction",
+)
+
+
 class ExtAtomicData(AtomicData):
     density_coefficients: torch.Tensor
     density_coefficients_weight: torch.Tensor
@@ -62,6 +78,18 @@ class ExtAtomicData(AtomicData):
     fermi_level_weight: torch.Tensor
     enegs: torch.Tensor
     hardness: torch.Tensor
+    workfunction: torch.Tensor
+    workfunction_weight: torch.Tensor
+    fourier_density: torch.Tensor
+    fourier_density_shape: torch.Tensor
+    fourier_density_weight: torch.Tensor
+    fourier_potential: torch.Tensor
+    fourier_potential_shape: torch.Tensor
+    fourier_potential_weight: torch.Tensor
+    dipole_correction_fraction: torch.Tensor
+    counter_charge: torch.Tensor
+    counter_charge_width: torch.Tensor
+    counter_charge_fraction: torch.Tensor
 
     def __init__(
         self,
@@ -89,6 +117,7 @@ class ExtAtomicData(AtomicData):
         cluster_loss_weight = kwargs.pop("cluster_loss_weight", None)
         enegs = kwargs.pop("enegs", None)
         hardness = kwargs.pop("hardness", None)
+        volt = {key: kwargs.pop(key, None) for key in VOLT_KEYS}
         super().__init__(**kwargs)
         assert (
             density_coefficients_weight is None
@@ -128,6 +157,7 @@ class ExtAtomicData(AtomicData):
             "cluster_loss_weight": cluster_loss_weight,
             "enegs": enegs,
             "hardness": hardness,
+            **volt,
         }
         for key, value in data.items():
             setattr(self, key, value)
@@ -276,7 +306,40 @@ class ExtAtomicData(AtomicData):
             if config.properties.get("hardness") is not None
             else torch.zeros((num_atoms))
         )
+        def label(name, default):
+            value = config.properties.get(name)
+            return torch.tensor(default if value is None else value, dtype=torch.get_default_dtype())
+
+        def weight(name):
+            return torch.tensor(config.property_weights.get(name, 0.0), dtype=torch.get_default_dtype())
+
+        def fourier(name):
+            # [2, nx, ny, nz] real and imaginary parts of the unnormalized FFT, stored flat
+            value = config.properties.get(name)
+            if value is None:
+                return torch.zeros((0,), dtype=torch.cdouble), torch.zeros((3,), dtype=torch.long)
+            value = torch.as_tensor(np.asarray(value), dtype=torch.get_default_dtype())
+            value = torch.complex(value[0], value[1])
+            return value.reshape(-1), torch.tensor(value.shape, dtype=torch.long)
+
+        fourier_density, fourier_density_shape = fourier("fourier_density")
+        fourier_potential, fourier_potential_shape = fourier("fourier_potential")
+        volt = dict(
+            workfunction=label("workfunction", 0.0),
+            workfunction_weight=weight("workfunction"),
+            fourier_density=fourier_density,
+            fourier_density_shape=fourier_density_shape,
+            fourier_density_weight=weight("fourier_density"),
+            fourier_potential=fourier_potential,
+            fourier_potential_shape=fourier_potential_shape,
+            fourier_potential_weight=weight("fourier_potential"),
+            dipole_correction_fraction=label("dipole_correction_fraction", 0.5),
+            counter_charge=label("counter_charge", 0.0),
+            counter_charge_width=label("counter_charge_width", 0.0),
+            counter_charge_fraction=label("counter_charge_fraction", 0.0),
+        )
         return cls(
+            **volt,
             edge_index=atomic_data.edge_index,
             positions=atomic_data.positions,
             shifts=atomic_data.shifts,

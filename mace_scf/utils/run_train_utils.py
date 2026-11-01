@@ -216,6 +216,9 @@ def build_model(
                 read_hardness=args.read_hardness,
                 default_hardness=args.default_hardness,
             )
+    elif args.model == "EnergyFunctional":
+        from .foundation import build_energy_functional
+        model = build_energy_functional(args, model_config, train_loader, atomic_energies)
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
 
@@ -320,6 +323,26 @@ def get_param_options(model, args):
                 "weight_decay": args.weight_decay,
             }
         )
+    if args.model == "EnergyFunctional":
+        param_options["params"].append(
+            {
+                "name": "law",
+                "params": model.law.parameters(),
+                "weight_decay": args.field_block_weight_decay,
+            }
+        )
+        if hasattr(model, "replay_head"):
+            # its backbone is the model's own
+            param_options["params"].append(
+                {
+                    "name": "replay_head",
+                    "params": [
+                        p for name, p in model.replay_head.named_parameters()
+                        if name.split(".")[0] not in ("node_embedding", "interactions", "products")
+                    ],
+                    "weight_decay": 0.0,
+                }
+            )
     if args.model == "MACEQEq":
         param_options["params"].append(
             {
