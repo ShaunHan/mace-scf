@@ -434,7 +434,7 @@ def collect_job(outdir):
             vasp = re.findall(r"vacuum level on the upper side and lower side of the slab\s+([-+.\d]+)", text)
             if vasp and not external_field.any() and abs(float(vasp[-1]) - level) > 0.02:
                 print(f"Warning {outdir}: vacuum level {level:.3f} V, VASP's LVACPOTAV {float(vasp[-1]):.3f} V")
-            atoms.info["workfunction"] = level - fermi
+            atoms.info["vasp_workfunction"] = level - fermi
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
         add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")

@@ -7,7 +7,7 @@ heads:
       dipole: vasp_dipole
       external_field: external_field
       fermi_level: vasp_efermi
-      workfunction: workfunction
+      workfunction: vasp_workfunction
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
