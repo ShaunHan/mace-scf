@@ -10,20 +10,31 @@ SHE_ABSOLUTE_V = 4.44  # Trasatti's absolute SHE potential at 298.15 K, IUPAC
 D_BLOCK = frozenset([*range(21, 31), *range(39, 49), *range(57, 81), *range(89, 113)])
 
 
-def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
-    """The dipole correction plane and a counter charge sheet of a slab open along z, from its geometry.
+def slab_axis(atoms):
+    """The non-periodic axis of a slab, the unit normal of its periodic plane and the cell height along it."""
+    axes = np.flatnonzero(~np.asarray(atoms.pbc, dtype=bool))
+    if len(axes) != 1:
+        raise ValueError(f'A constant potential slab needs one non-periodic axis, not pbc = {atoms.pbc.tolist()}')
+    axis = int(axes[0])
+    normal = np.cross(*np.delete(atoms.cell.array, axis, axis=0))
+    normal = normal*np.sign(atoms.cell[axis]@normal)/np.linalg.norm(normal)
+    return axis, normal, float(atoms.cell[axis]@normal)
 
-    The plane lies in the middle of the largest empty gap along z unless cut is given. The electrode surface is
-    the outermost d-block atom, or O bonded to one, on the side that holds the solvent; the sheet lies
-    sheet_height beyond it.
+
+def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
+    """The dipole correction plane and a counter charge sheet of a slab, from its geometry.
+
+    Both lie along the one non-periodic axis of the slab. The plane lies in the middle of the largest empty gap
+    along it unless cut is given. The electrode surface is the outermost d-block atom, or O bonded to one, on
+    the side that holds the solvent; the sheet lies sheet_height beyond it.
     """
-    z = atoms.get_scaled_positions(wrap=True)[:, 2]
+    axis, _, length = slab_axis(atoms)
+    z = atoms.get_scaled_positions(wrap=True)[:, axis]
     if cut is None:
         order = np.sort(z)
         gaps = np.diff(np.append(order, order[0]+1.))
         i = int(np.argmax(gaps))
         cut = (order[i]+.5*gaps[i]) % 1.
-    length = atoms.cell[2, 2]
     height = ((z-cut) % 1.)*length
     numbers = atoms.get_atomic_numbers()
     electrode = np.isin(numbers, list(D_BLOCK))
@@ -35,16 +46,17 @@ def slab_controls(atoms, sheet_height=6., sheet_width=1., cut=None):
             surface.append(int(o))
     top, bottom = height[surface].max(), height[surface].min()
     sheet = top+sheet_height if (height > top).sum() >= (height < bottom).sum() else bottom-sheet_height
-    return {'dipole_correction_zfrac': float(cut), 'counter_charge_zfrac': float((cut+sheet/length) % 1.),
-            'counter_charge_width': float(sheet_width)}
+    letter = 'xyz'[axis]
+    return {f'dipole_correction_{letter}frac': float(cut),
+            f'counter_charge_{letter}frac': float((cut+sheet/length) % 1.), 'counter_charge_width': float(sheet_width)}
 
 
 class MACEPotentialResponse(Calculator):
     """ASE calculator of a PotentialResponse model at the total charge, counter charge and field in atoms.info.
 
     With constant_potential the counter charge stands for solvated ions and acts through electrostatics only,
-    and a slab without one gets a sheet counter_charge_height above its electrode surface on the first call,
-    kept for the trajectory (slab_controls).
+    and a slab without one gets a sheet counter_charge_height above its electrode surface, along its one
+    non-periodic axis, on the first call, kept for the trajectory (slab_controls).
     """
 
     implemented_properties = ['energy', 'free_energy', 'forces', 'dipole', 'charges', 'fermi_level',
@@ -79,8 +91,12 @@ class MACEPotentialResponse(Calculator):
         return changes
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
-        if self.constant_potential and atoms is not None and 'counter_charge_zfrac' not in atoms.info:
-            atoms.info.update(slab_controls(atoms, self.counter_charge_height, self.counter_charge_width))
+        if self.constant_potential and atoms is not None:
+            letter = 'xyz'[slab_axis(atoms)[0]]
+            self.keyspec.info_keys.update(counter_charge_fraction=f'counter_charge_{letter}frac',
+                                          dipole_correction_fraction=f'dipole_correction_{letter}frac')
+            if f'counter_charge_{letter}frac' not in atoms.info:
+                atoms.info.update(slab_controls(atoms, self.counter_charge_height, self.counter_charge_width))
         Calculator.calculate(self, atoms, properties, system_changes)
         config = mace.data.config_from_atoms(self.atoms, key_specification=self.keyspec)
         data = mace_scf.data.ExtAtomicData.from_config(config, z_table=self.z_table, cutoff=float(self.model.r_max))

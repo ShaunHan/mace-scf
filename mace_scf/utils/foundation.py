@@ -67,6 +67,7 @@ def adopt_foundation(model, foundation):
     device = model.atomic_numbers.device
     model.register_buffer('foundation_element_map', mapping.to(device))
     model.register_buffer('foundation_atomic_numbers', foundation.atomic_numbers.clone().to(device))
+    model.use_reduced_cg = bool(getattr(foundation, 'use_reduced_cg', False))
     for name in ('node_embedding', 'radial_embedding', 'spherical_harmonics', 'interactions', 'products',
                  'readouts', 'scale_shift'):
         setattr(model, name, deepcopy(getattr(foundation, name)).to(device))

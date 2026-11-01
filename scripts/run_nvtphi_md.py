@@ -32,22 +32,20 @@ LOGFILE = "nvtphi.log"
 LOGINTERVAL = 10
 # -------------------------------------------------------------------------- #
 
-PLANE_KEYS = ("counter_charge_zfrac", "counter_charge_width", "dipole_correction_zfrac")
-
-
 def prepare_frame(source):
-    """The slab open along z at Q = 0, keeping any planes the frame already fixes."""
+    """The slab at Q = 0, keeping any planes the frame already fixes along its non-periodic axis."""
+    from mace_scf.calculators.potential_response import slab_axis
     atoms = source.copy()
-    if not np.allclose(atoms.cell.array[:2, 2], 0.):
-        raise ValueError("This driver expects an xy-periodic slab, open along Cartesian z")
-    atoms.pbc, atoms.calc = [True, True, False], None
+    letter = "xyz"[slab_axis(atoms)[0]]
+    atoms.calc = None
+    keys = (f"counter_charge_{letter}frac", "counter_charge_width", f"dipole_correction_{letter}frac")
     atoms.info = {"total_charge": 0., "counter_charge": 0.,
-                  **{key: float(source.info[key]) for key in PLANE_KEYS if source.info.get(key) is not None}}
+                  **{key: float(source.info[key]) for key in keys if source.info.get(key) is not None}}
     return atoms
 
 
 def main() -> None:
-    from mace_scf.calculators.potential_response import MACEPotentialResponse
+    from mace_scf.calculators.potential_response import MACEPotentialResponse, slab_axis
     from mace_scf.md import NVTPhiLangevin
 
     for path in (ATOMS_FILE, MODEL_FILE):
@@ -68,10 +66,12 @@ def main() -> None:
                          alignment_constant=ALIGNMENT_CONSTANT_FS*units.fs, C0=CAPACITANCE,
                          tauphi=TAUPHI_FS*units.fs, trajectory=TRAJECTORY, logfile=LOGFILE,
                          loginterval=LOGINTERVAL, rng=rng)
-    length, cut = atoms.cell[2, 2], atoms.info["dipole_correction_zfrac"]
-    z = ((atoms.get_scaled_positions(wrap=True)[:, 2]-cut) % 1.)*length
+    axis, _, length = slab_axis(atoms)
+    letter = "xyz"[axis]
+    cut, sheet = atoms.info[f"dipole_correction_{letter}frac"], atoms.info[f"counter_charge_{letter}frac"]
+    z = ((atoms.get_scaled_positions(wrap=True)[:, axis]-cut) % 1.)*length
     print(f"Heights above the dipole cut (L = {length:.2f} A): atoms {z.min():.2f}..{z.max():.2f}, sheet "
-          f"{((atoms.info['counter_charge_zfrac']-cut) % 1.)*length:.2f}")
+          f"{((sheet-cut) % 1.)*length:.2f}")
 
     def status() -> None:
         r, q = atoms.calc.results, dyn.electrode_charge

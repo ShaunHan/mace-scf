@@ -64,18 +64,18 @@ def write_json(path, value):
 
 
 def continuous(source):
-    """The slab open along z and continuous across its largest vacuum gap."""
+    """The slab continuous across its largest vacuum gap along its non-periodic axis."""
+    from mace_scf.calculators.potential_response import slab_axis
     atoms = source.copy()
-    if not np.allclose(atoms.cell.array[:2, 2], 0.):
-        raise ValueError('Expected an xy-periodic slab, open along Cartesian z')
-    atoms.pbc, atoms.calc = [True, True, False], None
+    axis = slab_axis(atoms)[0]
+    atoms.calc = None
     atoms.set_constraint()
-    c, f = atoms.cell[2, 2], atoms.get_scaled_positions()[:, 2]
-    s = np.sort(f)
+    f = atoms.get_scaled_positions(wrap=False)[:, axis]
+    s = np.sort(f % 1.)
     gaps = np.diff(np.append(s, s[0]+1.))
     cut = s[np.argmax(gaps)]+.5*gaps.max()
-    z = ((f-cut) % 1.+cut)*c
-    atoms.positions[:, 2] = z+c*np.rint(np.mean(atoms.positions[:, 2]-z)/c)
+    g = (f-cut) % 1.+cut
+    atoms.positions += (g+np.rint(np.mean(f-g))-f)[:, None]*atoms.cell[axis]
     return atoms
 
 
@@ -85,7 +85,7 @@ def environment(atoms, oxygen):
     return dict(H_neighbors=int((dh < 1.25).sum()), Ir_neighbors=int((di < 2.6).sum()), nearest_Ir_A=float(di.min()))
 
 
-def select_pair(atoms, index, mobile):
+def select_pair(atoms, index, mobile, height):
     """An existing O2, else the exposed adsorbate O with the nearest free O within PAIR_CUTOFF."""
     if index in OXYGEN_PAIRS:
         pair = sorted(int(i) for i in OXYGEN_PAIRS[index])
@@ -98,10 +98,10 @@ def select_pair(atoms, index, mobile):
         raise ValueError(f'{index}: several O-O bonds {bonded}; choose one in OXYGEN_PAIRS')
     if bonded:
         return sorted(bonded[0]), 'O2'
-    top = atoms.positions[atoms.numbers == 77, 2].max()
+    top = height[atoms.numbers == 77].max()
     env = {o: environment(atoms, o) for o in mobile}
     adsorbed = [o for o in mobile if env[o]['Ir_neighbors'] == 1 and env[o]['H_neighbors'] <= 1
-                and atoms.positions[o, 2] > top+.3]
+                and height[o] > top+.3]
     free = [o for o in mobile if env[o]['Ir_neighbors'] == 0]
     pairs = [(d[a, b], a, b) for a in adsorbed for b in free if d[a, b] <= PAIR_CUTOFF]
     if not pairs:
@@ -111,14 +111,15 @@ def select_pair(atoms, index, mobile):
 
 def prepare(source, index):
     """Atoms at Q = 0 with the planes from geometry; fixed atoms, wall height and O-O pair."""
-    from mace_scf.calculators.potential_response import slab_controls
+    from mace_scf.calculators.potential_response import slab_axis, slab_controls
     atoms = continuous(source)
-    z = atoms.positions[:, 2]
-    if atoms.cell[2, 2]-np.ptp(z) < 12.:
-        raise ValueError(f'{index}: only {atoms.cell[2, 2]-np.ptp(z):.1f} A of vacuum')
+    _, normal, length = slab_axis(atoms)
+    z = atoms.positions@normal
+    if length-np.ptp(z) < 12.:
+        raise ValueError(f'{index}: only {length-np.ptp(z):.1f} A of vacuum')
     fixed = [int(i) for i in np.flatnonzero(z < z.min()+FIXED_DEPTH)]
     mobile = [int(o) for o in np.flatnonzero(atoms.numbers == 8) if o not in set(fixed)]
-    pair, kind = select_pair(atoms, index, mobile)
+    pair, kind = select_pair(atoms, index, mobile, z)
     atoms.info = dict(total_charge=0., counter_charge=0.,
                       **slab_controls(atoms, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH))
     return atoms, fixed, mobile, float(z[mobile].max()+WALL_GAP), pair, kind
@@ -196,6 +197,7 @@ def charge_check(atoms, dq=2.e-3):
 
 
 def simulate(source, index, replica, model_file, model_sha, directory):
+    from mace_scf.calculators.potential_response import slab_axis
     from mace_scf.md import NVTPhiLangevin
     atoms, fixed, mobile, wall, pair, kind = prepare(source, index)
     stages = make_stages(atoms.get_distance(*pair, mic=True))
@@ -243,7 +245,7 @@ def simulate(source, index, replica, model_file, model_sha, directory):
                 writer.writeheader()
                 writer.writerows(kept)
     bias = DistanceUmbrella(pair, stages[min(stage_id, len(stages)-1)]['center_A'], UMBRELLA_K)
-    walls = [Hookean(a1=o, a2=(0., 0., 1., -wall), k=WALL_K) for o in mobile]
+    walls = [Hookean(a1=o, a2=(*slab_axis(atoms)[1], -wall), k=WALL_K) for o in mobile]
     atoms.set_constraint([bias, FixAtoms(indices=fixed)]+walls)
     atoms.calc = make_calculator(model_file)
     if state is None:
@@ -330,16 +332,18 @@ def run_one(source, index, replica, model_file, model_sha, directory):
 
 
 def main():
+    from mace_scf.calculators.potential_response import slab_axis
     frames = read(ATOMS_FILE, index=':')
     indexes = list(RUN_INDEXES)
     if not indexes or len(set(indexes)) != len(indexes) or not set(indexes) <= set(range(len(frames))):
         raise ValueError('RUN_INDEXES must list distinct frames of ATOMS_FILE')
     for index in indexes:
         atoms, _, _, wall, pair, kind = prepare(frames[index], index)
+        letter = 'xyz'[slab_axis(atoms)[0]]
         stages = make_stages(atoms.get_distance(*pair, mic=True))
         print(f'{index}: {kind} pair {pair} at {atoms.get_distance(*pair, mic=True):.2f} A, {stages[-1]["stage"]} '
               f'over {stages[-1]["window"]+1} windows, {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps; '
-              f'sheet z/c {atoms.info["counter_charge_zfrac"]:.3f}, wall {wall:.1f} A', flush=True)
+              f'sheet {letter}frac {atoms.info[f"counter_charge_{letter}frac"]:.3f}, wall {wall:.1f} A', flush=True)
     model = Path(MODEL_FILE).resolve(strict=True)
     model_sha, failures = sha256(model), []
     with ProcessPoolExecutor(max_workers=min(MAX_WORKERS, len(indexes)*REPLICAS),
