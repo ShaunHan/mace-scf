@@ -318,13 +318,13 @@ class Cell:
         self.counter_potential = -self.coulomb*self.counter_density+self.ramp(-self.slab_factor*self.counter_moment)
 
     def vacuum_level(self, state, num_sources):
-        """The vacuum potential above the slab, just below the dipole correction plane.
+        """The field-free vacuum potential above the slab.
 
-        Below the plane the potential of the charges is flat and, in the zero-mean origin of periodic DFT,
-        equals -(K/2V) times the second moment of the planar charge density measured from the plane. The
-        point multipoles, the counter charge sheet and the local amplitudes have that moment in closed form,
-        so the level is exact and independent of where in the vacuum it would be read. The applied field
-        adds its sawtooth at the plane.
+        Below the dipole correction plane the potential of the charges is flat and, in the zero-mean origin of
+        periodic DFT, equals -(K/2V) times the second moment of the planar charge density measured from the
+        plane. The point multipoles, the counter charge sheet and the local amplitudes have that moment in
+        closed form, so the level is exact and independent of where in the vacuum it would be read. The applied
+        field's sawtooth, zero at the slab centre, is left out: the work function is that of the charges alone.
         """
         L, V, sigma = self.length, self.volume, self.width
         u = (self.tensors[9]+.5*L[:, None]).remainder(L[:, None])*self.present
@@ -336,7 +336,7 @@ class Cell:
         m2 = m2+self.counter_charge*window_moments(u_cc, self.counter_width, L)[2]
         amplitudes = state[..., 4:4+num_sources].sum((-1, -2))
         top = -FIELD_CONSTANT/(2*V)*m2-amplitudes*(2*math.pi)**1.5*sigma**3/V+self.vacuum_reference
-        return (top+.5*self.field*L)*self.slab
+        return top*self.slab
 
     def expand(self, value):
         output = value.new_zeros((len(self.counts), self.k2.shape[1], value.shape[-1]))

@@ -46,8 +46,7 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
     if foundation is not None:
         adopt_foundation(model, foundation)
     initialize_potential_response(model, args, train_loader, args.device)
-    if foundation is not None:
-        condition_energy(model, train_loader, args.device)
+    condition_energy(model, train_loader, args.device)
     if args.enable_cueq:
         accelerate_backbone(model, args.device)
     if args.foundation_model and args.multiheads_finetuning:
@@ -77,7 +76,7 @@ def adopt_foundation(model, foundation):
 
 @torch.no_grad()
 def condition_energy(model, loader, device):
-    """Energy zeros by element, so that the foundation's local energies start at the training energies."""
+    """Energy zeros by element, so that the local energies start at the training energies."""
     counts, residuals = [], []
     for i, batch in enumerate(loader):
         if i*loader.batch_size >= 64:
@@ -90,7 +89,7 @@ def condition_energy(model, loader, device):
     a, b = torch.cat(counts), torch.cat(residuals)
     delta = torch.linalg.lstsq(a.cpu(), b[:, None].cpu(), rcond=1.e-6).solution[:, 0]
     model.atomic_energies_fn.atomic_energies.add_(delta.to(device).reshape_as(model.atomic_energies_fn.atomic_energies))
-    logging.info(f'Energy zeros of the foundation shifted by {delta.tolist()} eV')
+    logging.info(f'Energy zeros shifted by {delta.tolist()} eV')
 
 
 class FusedConvolution(torch.nn.Module):

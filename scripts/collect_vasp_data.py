@@ -244,7 +244,8 @@ def vacuum_potential(atoms, planar, axis, correction, field):
     removed, is below VACPOTFLAT. The applied field raises the potential by the field per A towards the plane,
     so V(z) + field * (distance to the plane) is the same at every vacuum plane, the value just below it. A
     density that has not settled leaves a uniform charge in the vacuum, which bends that average by the spread
-    returned with it.
+    returned with it. Training subtracts the applied field's zero-mean sawtooth at the plane, field * L / 2,
+    and fits the field-free work function.
     """
     normal = np.linalg.inv(atoms.cell.array)[:, axis]
     length = 1.0 / np.linalg.norm(normal)

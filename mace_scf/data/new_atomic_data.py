@@ -50,6 +50,18 @@ def update_keyspec_from_kwargs(keyspec, keydict) -> KeySpecification:
     return keyspec
 
 
+def applied_sawtooth(cell, pbc, external_field):
+    """The applied field's zero-mean sawtooth just below the dipole plane, field*L/2 in V; zero for bulk."""
+    pbc = np.asarray(pbc, dtype=bool)
+    if pbc.sum() != 2:
+        return 0.0
+    cell = np.asarray(cell, dtype=float).reshape(3, 3)
+    axis = int(np.argmin(pbc))
+    normal = np.cross(cell[(axis + 1) % 3], cell[(axis + 2) % 3])
+    normal *= np.sign(cell[axis] @ normal) / np.linalg.norm(normal)
+    return 0.5 * float(np.ravel(external_field) @ normal) * float(cell[axis] @ normal)
+
+
 VOLT_KEYS = (
     "workfunction",
     "workfunction_weight",
@@ -325,7 +337,8 @@ class ExtAtomicData(AtomicData):
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
         volt = dict(
-            workfunction=label("workfunction", 0.0),
+            # field-free: the work function of the charges, without the applied sawtooth
+            workfunction=label("workfunction", 0.0) - applied_sawtooth(config.cell, config.pbc, external_field),
             workfunction_weight=weight("workfunction"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,

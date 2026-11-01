@@ -9,12 +9,14 @@ import numpy as np
 from ase.io import read
 from ase.visualize.plot import plot_atoms
 from mace_scf.calculators.potential_response import MACEPotentialResponse
+from mace_scf.data.new_atomic_data import applied_sawtooth
 
 ATOMS_FILE = 'IrO2OH_110_mdinit_0_50_vasp_sp.xyz'
 MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_training/wf_training_186/fit_0_stage4_finetune_v387.model'
 FRAME_INDEXES = list(range(10, 20))
 DEVICE = 'cuda:0'
 POTENTIAL_KEY, PROTO_KEY, FERMI_KEY = 'vasp_phi_fftn_shifted', 'vasp_proto_phi_fftn_shifted', 'vasp_efermi'
+WORKFUNCTION_KEY = 'vasp_workfunction'
 OUTPUT_DIR, DPI = Path('esp_profiles'), 300
 
 
@@ -62,10 +64,9 @@ def profiles(atoms, results, sigma):
               for kind, weight in (('raw', lambda m: 1.), ('smeared', smear.get))}
     errors['fermi'] = fermi['model']-fermi['dft']
     work = {'model': float(results['workfunction'])}
-    if 'workfunction' in atoms.info:
-        work['dft'] = float(atoms.info['workfunction'])
-    elif 'vacuum_potential' in atoms.info:
-        work['dft'] = float(atoms.info['vacuum_potential'])-fermi['dft']
+    if WORKFUNCTION_KEY in atoms.info:
+        work['dft'] = float(atoms.info[WORKFUNCTION_KEY])-applied_sawtooth(atoms.cell, atoms.pbc,
+                                                                          atoms.info.get('external_field', np.zeros(3)))
     return curves, dict(center=center, errors=errors, work=work, kmax=2*np.pi*max(dft)/length)
 
 
