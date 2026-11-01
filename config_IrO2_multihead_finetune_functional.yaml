@@ -26,7 +26,6 @@ MLP_irreps: 64x0e
 num_interactions: 2
 num_radial_basis: 8
 r_max: 6.0
-E0s: average
 compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
