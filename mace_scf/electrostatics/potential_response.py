@@ -14,8 +14,8 @@ from torch import nn
 from torch.nn import functional as F
 
 RESPONSE_SCALE = .02
-# The linearized law holds at least this density of states (e/V per atom), so that the Fermi level stays finite.
-DOS_FLOOR = 1.e-9
+# A background density of states (e/V per atom) at all energies, so that every charge has one finite level.
+DOS_FLOOR = 1.e-5
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -87,9 +87,10 @@ class LocalLaw(nn.Module):
     """The law of every atom: bias, density of states on an energy grid, dd_dE, d0 and local amplitudes.
 
     dd_dE times the density width squared is the dipole per field. The density of states is a sum of
-    Gaussian bumps of width resolution on [-energy_range, energy_range] eV, and starts at 1 e/V in the bands
-    and 0.0025 e/V within 1 eV of the level. With fixed_point the law also reads the levels and fields of
-    the atom and its neighbours; at zero levels and field that read is the law of the geometry.
+    Gaussian bumps of width resolution on [-energy_range, energy_range] eV over a background of DOS_FLOOR,
+    and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. With fixed_point the law also
+    reads the levels and fields of the atom and its neighbours; at zero levels and field that read is the law
+    of the geometry.
     """
 
     def __init__(self, num_scalars, num_vectors, num_elements, num_sources, num_receivers, fixed_point=False,
@@ -151,15 +152,15 @@ class LocalLaw(nn.Module):
         """The charge of the law at the levels delta, and the density of states there."""
         w, centers = self.dos_width, self.dos_centers
         x = (delta[..., None]-centers)/w
-        dq = (coefficients*(gaussian_step(x)-gaussian_step(-centers/w))).sum(-1)*w
-        return dq, (coefficients*gaussian(x)).sum(-1)
+        dq = (coefficients*(gaussian_step(x)-gaussian_step(-centers/w))).sum(-1)*w+DOS_FLOOR*delta
+        return dq, (coefficients*gaussian(x)).sum(-1)+DOS_FLOOR
 
     def energy(self, coefficients, delta):
         """The integral of the charge from zero to delta."""
         w, centers = self.dos_width, self.dos_centers
         x = (delta[..., None]-centers)/w
         return (coefficients*(w*(gaussian_ramp(x)-gaussian_ramp(-centers/w))
-                              - delta[..., None]*gaussian_step(-centers/w))).sum(-1)*w
+                              - delta[..., None]*gaussian_step(-centers/w))).sum(-1)*w+.5*DOS_FLOOR*delta.square()
 
 
 def reciprocal_grid(cell, cutoff):
@@ -435,7 +436,7 @@ def solve_charges(effective, drive, fixed, slope, bias, target, mask):
 class PotentialResponse(ScaleShiftMACE):
     """A MACE whose atoms carry the local law of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 
-    newton_steps, newton_tolerance, newton_clip = 60, 1.e-6, 2.
+    newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.5, **kwargs):
@@ -515,9 +516,8 @@ class PotentialResponse(ScaleShiftMACE):
 
         Newton's method on the concave dual D(p, mu) = -p.Kp/2 - mu Q - sum_i A_i(b_i + v_i - (Kp)_i - mu),
         A_i the integral of the charge law, whose maximum has p = q: each step solves the law linearized at
-        the current levels, moves no level by more than newton_clip, and a backtracking line search on D makes
-        every step an ascent, so the solve converges for every law. One differentiable solve at the converged
-        levels gives the exact derivatives.
+        the current levels and a backtracking line search on D makes every step an ascent, so the solve
+        converges for every law. One differentiable solve at the converged levels gives the exact derivatives.
         """
         bias, dd_dE, coefficients, d0, amplitudes = law
         effective, drive_q, dipole_map, free, applied = screen_dipoles(kernel, completion, drive, dd_dE, d0,
@@ -531,7 +531,6 @@ class PotentialResponse(ScaleShiftMACE):
 
         def linearized(delta):
             dq, n = self.law.charge(coefficients, delta)
-            n = n+DOS_FLOOR
             return solve_charges(effective, drive_q, (dq-n*delta)*mask, n*mask, bias, charge, mask)
         with torch.no_grad():
             # From the law linearized at the Fermi level, unless a start is given.
@@ -545,9 +544,7 @@ class PotentialResponse(ScaleShiftMACE):
                 dp, dmu = target-p, target_mu-mu
                 kdp = (effective@dp[..., None]).squeeze(-1)
                 slope = ((dq-p)*kdp).sum(-1)+(dq.sum(-1)-charge)*dmu
-                # No step moves a level by more than newton_clip, so the levels stay where the law has states.
-                largest = ((kdp+dmu[:, None])*mask).abs().amax(-1)
-                value, t = dual(p, mu, kp), self.newton_clip/largest.clamp_min(self.newton_clip)
+                value, t = dual(p, mu, kp), torch.ones_like(mu)
                 for _ in range(40):
                     trial = dual(p+t[:, None]*dp, mu+t*dmu, kp+t[:, None]*kdp)
                     accept = (trial >= value+1.e-4*t*slope) | (slope <= 1.e-12*(1.+value.abs()))

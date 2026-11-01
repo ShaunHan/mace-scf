@@ -724,8 +724,9 @@ def valid_err_log(
         error_wf = eval_metrics["rmse_workfunction"] * 1e3
         error_rho = eval_metrics.get("rmse_fourier_density", float("nan")) * 1e3
         error_esp = eval_metrics.get("rmse_fourier_potential", float("nan")) * 1e3
+        error_mu = eval_metrics.get("rmse_mu_per_atom", float("nan")) * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_rho={error_rho:.2f} me / A^3, RMSE_ESP={error_esp:.1f} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho={error_rho:.2f} me / A^3, RMSE_ESP={error_esp:.1f} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV"
         )
     elif (
         log_errors == "PerAtomRMSEstressvirials"
