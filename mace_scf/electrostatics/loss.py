@@ -274,6 +274,17 @@ _LOSS_FUNCTIONS = {
     "replay": replay_loss,
 }
 
+# The terms of the state that a fixed point PotentialResponse also answers for at its first minimum.
+FIRST_MINIMUM_TERMS = (
+    "dipole",
+    "dipole_per_atom",
+    "fermi_level",
+    "fermi_level_per_atom",
+    "vacuum_potential",
+    "fourier_density",
+    "fourier_potential",
+)
+
 
 class WeightedLoss(torch.nn.Module):
     def __init__(
@@ -304,7 +315,16 @@ class WeightedLoss(torch.nn.Module):
         for name, func in self.loss_fns.items():
             loss_component = self.loss_weights[name] * func(ref, pred)
             loss += loss_component
-            logstring += f'{name}: {loss_component}, ' 
+            logstring += f'{name}: {loss_component}, '
+        # the first minimum of a fixed point PotentialResponse: the same terms of its state, at its own weight
+        first = pred.get("first_minimum")
+        if first is not None:
+            observed = {**pred, **first}
+            for name, func in self.loss_fns.items():
+                if name in FIRST_MINIMUM_TERMS:
+                    loss_component = first["weight"] * self.loss_weights[name] * func(ref, observed)
+                    loss += loss_component
+                    logstring += f'{name}_first: {loss_component}, '
         logging.debug(logstring)
         if "loss_weight_modifier" in pred:
             ref.weight = data_weight

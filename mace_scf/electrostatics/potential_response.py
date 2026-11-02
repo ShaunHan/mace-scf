@@ -440,7 +440,8 @@ class PotentialResponse(ScaleShiftMACE):
     newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
-                 fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25, **kwargs):
+                 fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
+                 first_minimum_weight=.1, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
@@ -460,6 +461,8 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
+        # A fixed point answers in training for the state of its first minimum too, at this fraction of the weights.
+        self.first_minimum_weight = float(first_minimum_weight)
         layers = int(self.num_interactions)
         self.law = LocalLaw(layers*irreps.count('0e'), layers*irreps.count('1o'), num_elements, len(sources),
                             len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
@@ -573,7 +576,10 @@ class PotentialResponse(ScaleShiftMACE):
         return state, energy, mu, (charges.detach(), mu.detach())
 
     def solve(self, data, cell, positions, scalars, vectors, charge):
-        """The state of the multipoles and amplitudes, the local energy of the law and the Fermi level."""
+        """The minima of the law: the state of the multipoles and amplitudes, the local energy and mu of each.
+
+        A fixed point has two, the minimum of the law of the geometry and the final one at the law read there.
+        """
         mask, sigma = cell.present, self.density_width
         chemical, vector = self.law.features(cell.pack(scalars), cell.pack(vectors))
         law = self.law(chemical, vector, cell.attrs, mask)
@@ -584,6 +590,7 @@ class PotentialResponse(ScaleShiftMACE):
         field = field[..., 0, :]-slope[:, None, None]*cell.normal[:, None, :]
         drive = torch.cat((values[..., None], -sigma*field), -1)*mask[..., None]
         state, energy, mu, start = self.minimum(law, kernel, completion, drive, mask, charge)
+        minima = [(state, energy, mu)]
         if self.fixed_point:
             transport = neighbour_transport(positions, data['edge_index'], data['shifts'], cell.batch, cell.slot,
                                             len(cell.counts), cell.size, float(self.r_max),
@@ -601,8 +608,8 @@ class PotentialResponse(ScaleShiftMACE):
                     torch.cat((sampled, radial[..., c:].reshape_as(sampled), directional[..., :c].permute(0, 2, 3, 1)),
                               -2))
             law = self.law(chemical, vector, cell.attrs, mask, state=read)
-            state, energy, mu, _ = self.minimum(law, kernel, completion, drive, mask, charge, start=start)
-        return state, energy, mu
+            minima.append(self.minimum(law, kernel, completion, drive, mask, charge, start=start)[:3])
+        return minima
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 **kwargs):
@@ -619,52 +626,36 @@ class PotentialResponse(ScaleShiftMACE):
             positions = ctx.positions
             node_energy, scalars, vectors = self.backbone(data, ctx)
             cell = Cell(self, data, positions)
-            state, response_energy, _ = self.solve(data, cell, positions, scalars, vectors, charge.to(cell.volume))
-            sigma = self.density_width
-            moments = torch.cat((state[..., :1], state[..., 1:4]*sigma), -1)
-            carrier, regular = (cell.expand(x) for x in coefficient_contributions(state, cell.tensors, cell.kernels))
-            total_charge = state[..., 0].sum(-1)
-            coarse = carrier/torch.where(cell.coulomb > 0, -cell.coulomb, 1.)[..., None]
-            coarse = coarse+torch.stack(((cell.k2 == 0)*(total_charge/cell.volume)[:, None], torch.zeros_like(cell.k2)),
-                                        -1)
-            dipole = (moments[..., :1]*(cell.pack(positions)-cell.origin[:, None])+moments[..., 1:4]).sum(1)
-            normal_dipole = (dipole*cell.normal).sum(-1)
-            deformation = cell.coulomb*torch.view_as_complex(coarse.contiguous())-torch.view_as_complex(
-                regular.contiguous())
-            counter_energy = (cell.volume*(cell.counter_density.conj()*deformation).real.sum(-1)
-                              + cell.slab_factor*normal_dipole*cell.counter_moment+cell.counter_energy)
-            electrostatic = (.5*cell.volume*(coarse.square().sum(-1)*cell.coulomb).sum(-1)
-                             + .5*cell.slab_factor*normal_dipole.square()-(dipole*cell.external).sum(-1)
-                             + counter_energy-(self.fermi_level_offset+cell.vacuum_reference)*charge)
+            minima = self.solve(data, cell, positions, scalars, vectors, charge.to(cell.volume))
+            state, response_energy, _ = minima[-1]
+            electrostatic, observed = self.observe(cell, state, positions, charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(cell.counts))
             energy = energy+electrostatic+response_energy
             inputs = [charge, counter, positions] if compute_force else [charge, counter]
             gradients = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True)
+            first = None
+            if training and len(minima) > 1 and getattr(self, 'first_minimum_weight', 0.) > 0:
+                # The first minimum of a fixed point, at the law of the geometry, answers to the same electronic
+                # labels: its law stays a law of the data, and the read learns how the law responds to the field.
+                # Its Fermi level is -dE/dQ of that minimum, from the multiplier of its total charge.
+                state, _, mu = minima[0]
+                first = {**self.observe(cell, state, positions, charge)[1],
+                         'fermi_level': mu+self.fermi_level_offset+cell.vacuum_reference,
+                         'weight': self.first_minimum_weight}
         forces = None
         if compute_force:
             forces = -gradients[2] if gradients[2] is not None else torch.zeros_like(positions)
         fermi_level = -gradients[0]
         # dE/dQ along Q_cc = -Q, the voltage between the electrode and the counter charge
         cell_voltage = -fermi_level-(gradients[1] if gradients[1] is not None else torch.zeros_like(fermi_level))
-        vacuum_potential = cell.vacuum_level(state, self.law.num_sources)
-        # The raw Fourier density and potential: the Gaussian smoothing of the charges and amplitudes is undone,
-        # the counter charge keeps its width and the boundary sawtooth is sharp.
-        smooth = torch.where(cell.mask, torch.exp(-.5*sigma**2*cell.k2), 1.)
-        boundary = cell.field-cell.slab_factor*(normal_dipole+cell.counter_moment)
-        potential = (torch.view_as_complex((carrier+regular).contiguous())/smooth-cell.coulomb*cell.counter_density
-                     + cell.ramp(boundary, width=0.))
         output = {
             'energy': energy,
             'forces': forces,
             'virials': None,
             'stress': None,
-            'density_coefficients': cell.unpack(moments)[..., [0, 2, 3, 1]],
-            'dipole': dipole,
+            **observed,
             'fermi_level': fermi_level,
-            'vacuum_potential': vacuum_potential,
             'cell_voltage': cell_voltage,
-            'fourier_density': coarse/smooth[..., None]*cell.ngrid,
-            'fourier_potential': torch.view_as_real(potential)*cell.ngrid,
             'k_vectors': cell.wave,
             'k_vectors_mask': cell.mask,
             'k_vectors_grid_shape': torch.tensor(cell.shape, device=positions.device),
@@ -674,9 +665,45 @@ class PotentialResponse(ScaleShiftMACE):
                 output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], cell.shape).to(positions)
                 output[key+'_dft_mask'] = (cell.modes[None].abs() <= torch.div(
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
+        if first is not None:
+            output['first_minimum'] = first
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
+
+    def observe(self, cell, state, positions, charge):
+        """The electrostatic energy of a state, and its multipoles, dipole, vacuum potential and Fourier fields.
+
+        The raw Fourier density and potential: the Gaussian smoothing of the charges and amplitudes is undone,
+        the counter charge keeps its width and the boundary sawtooth is sharp.
+        """
+        sigma = self.density_width
+        moments = torch.cat((state[..., :1], state[..., 1:4]*sigma), -1)
+        carrier, regular = (cell.expand(x) for x in coefficient_contributions(state, cell.tensors, cell.kernels))
+        total_charge = state[..., 0].sum(-1)
+        coarse = carrier/torch.where(cell.coulomb > 0, -cell.coulomb, 1.)[..., None]
+        coarse = coarse+torch.stack(((cell.k2 == 0)*(total_charge/cell.volume)[:, None], torch.zeros_like(cell.k2)),
+                                    -1)
+        dipole = (moments[..., :1]*(cell.pack(positions)-cell.origin[:, None])+moments[..., 1:4]).sum(1)
+        normal_dipole = (dipole*cell.normal).sum(-1)
+        deformation = cell.coulomb*torch.view_as_complex(coarse.contiguous())-torch.view_as_complex(
+            regular.contiguous())
+        counter_energy = (cell.volume*(cell.counter_density.conj()*deformation).real.sum(-1)
+                          + cell.slab_factor*normal_dipole*cell.counter_moment+cell.counter_energy)
+        electrostatic = (.5*cell.volume*(coarse.square().sum(-1)*cell.coulomb).sum(-1)
+                         + .5*cell.slab_factor*normal_dipole.square()-(dipole*cell.external).sum(-1)
+                         + counter_energy-(self.fermi_level_offset+cell.vacuum_reference)*charge)
+        smooth = torch.where(cell.mask, torch.exp(-.5*sigma**2*cell.k2), 1.)
+        boundary = cell.field-cell.slab_factor*(normal_dipole+cell.counter_moment)
+        potential = (torch.view_as_complex((carrier+regular).contiguous())/smooth-cell.coulomb*cell.counter_density
+                     + cell.ramp(boundary, width=0.))
+        return electrostatic, {
+            'density_coefficients': cell.unpack(moments)[..., [0, 2, 3, 1]],
+            'dipole': dipole,
+            'vacuum_potential': cell.vacuum_level(state, self.law.num_sources),
+            'fourier_density': coarse/smooth[..., None]*cell.ngrid,
+            'fourier_potential': torch.view_as_real(potential)*cell.ngrid,
+        }
 
 
 def collate_fft(values, shapes, grid):

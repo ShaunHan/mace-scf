@@ -156,3 +156,4 @@ train_schedule:
       replay: 1.0
 potential_response_config:
   fixed_point: true
+  first_minimum_weight: 0.1

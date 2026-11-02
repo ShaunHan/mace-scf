@@ -27,6 +27,7 @@ num_interactions: 2
 num_radial_basis: 8
 r_max: 6.0
 compute_avg_num_neighbors: true
+scaling: no_scaling
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
 field_feature_widths: '[1.5, 3.0]'
@@ -127,3 +128,4 @@ train_schedule:
       fermi_level: 100.0
 potential_response_config:
   fixed_point: true
+  first_minimum_weight: 0.1

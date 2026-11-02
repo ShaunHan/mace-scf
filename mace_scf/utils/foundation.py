@@ -30,6 +30,9 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
         model_config.update(hidden_irreps=o3.Irreps(str(foundation.products[0].linear.irreps_out)),
                             num_interactions=len(foundation.interactions))
         mean, std = 0., 1.
+    elif args.scaling == 'no_scaling':
+        # the energy zeros of condition_energy take the mean
+        mean, std = 0., 1.
     else:
         mean, std = mace.modules.scaling_classes[args.scaling](train_loader, atomic_energies)
     model = PotentialResponse(
