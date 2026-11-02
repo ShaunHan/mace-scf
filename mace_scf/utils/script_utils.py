@@ -173,7 +173,7 @@ def create_error_table(
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
             "rmse_fermi_level",
-            "rmse_workfunction",
+            "rmse_work_function",
         ] + [f"rmse_{key}_{w:g}A" for key, widths in REPORTED_SMEARING_WIDTHS.items() for w in widths]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
@@ -269,7 +269,7 @@ def create_error_table(
                     "/".join(metrics[f"rmse_fourier_density_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_density"]),
                     "/".join(metrics[f"rmse_fourier_potential_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_potential"]),
                     metrics['rmse_fermi_level'],
-                    metrics['rmse_workfunction'],
+                    metrics['rmse_work_function'],
                 ]
             )
         # add new tables here...

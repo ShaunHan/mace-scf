@@ -16,7 +16,7 @@ MODEL_FILE = '/fs/cephfs/data/qm_inorganics/shuang/electrocatalysis/IrO2_110/ml_
 FRAME_INDEXES = list(range(10, 20))
 DEVICE = 'cuda:0'
 POTENTIAL_KEY, PROTO_KEY, FERMI_KEY = 'vasp_phi_fftn_shifted', 'vasp_proto_phi_fftn_shifted', 'vasp_efermi'
-WORKFUNCTION_KEY = 'vasp_workfunction'
+VACUUM_KEY = 'vasp_vacuum_potential'
 OUTPUT_DIR, DPI = Path('esp_profiles'), 300
 
 
@@ -63,9 +63,9 @@ def profiles(atoms, results, sigma):
     errors = {kind: float(np.sqrt(sum(abs(weight(m)*(model[m]-dft[m]))**2 for m in dft)))
               for kind, weight in (('raw', lambda m: 1.), ('smeared', smear.get))}
     errors['fermi'] = fermi['model']-fermi['dft']
-    work = {'model': float(results['workfunction'])}
-    if WORKFUNCTION_KEY in atoms.info:
-        work['dft'] = float(atoms.info[WORKFUNCTION_KEY])-applied_sawtooth(atoms.cell, atoms.pbc,
+    work = {'model': float(results['work_function'])}
+    if VACUUM_KEY in atoms.info:
+        work['dft'] = float(atoms.info[VACUUM_KEY])-fermi['dft']-applied_sawtooth(atoms.cell, atoms.pbc,
                                                                           atoms.info.get('external_field', np.zeros(3)))
     return curves, dict(center=center, errors=errors, work=work, kmax=2*np.pi*max(dft)/length)
 

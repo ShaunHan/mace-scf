@@ -33,7 +33,7 @@ class NVTPhiMDLogger(IOContext):
         results = self.atoms.calc.results
         epot = self.atoms.get_potential_energy(apply_constraint=False)
         voltage = float(results["cell_voltage"])
-        wf = float(results["workfunction"])
+        wf = float(results["work_function"])
         self.logfile.write(self.fmt % (
             self.dyn.get_time() / (1000.0 * units.fs), epot, self.dyn.grand_potential(),
             self.atoms.get_kinetic_energy(), self.atoms.get_temperature(), self.dyn.electrode_charge,

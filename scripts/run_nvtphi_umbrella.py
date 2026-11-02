@@ -185,7 +185,7 @@ def charge_check(atoms, dq=2.e-3):
         atoms.info.update(total_charge=q, counter_charge=-q)
         atoms.calc.reset()
         energy = atoms.get_potential_energy(apply_constraint=False)
-        values.append((energy, atoms.calc.results['cell_voltage'], atoms.calc.results['workfunction']))
+        values.append((energy, atoms.calc.results['cell_voltage'], atoms.calc.results['work_function']))
     atoms.info.update(total_charge=0., counter_charge=0.)
     atoms.calc.reset()
     (em, vm, wm), (_, v, w), (ep, vp, wp) = values
@@ -281,7 +281,7 @@ def simulate(source, index, replica, model_file, model_sha, directory):
             row = dict(step=dyn.nsteps, time_fs=dyn.nsteps*TIMESTEP_FS, stage=stage['stage'], window=stage['window'],
                        center_A=bias.center, distance_A=distance, bias_eV=umbrella, energy_model_eV=energy,
                        temperature_K=temperature, charge_e=charge, cell_voltage_V=float(r['cell_voltage']),
-                       target_cell_voltage_V=dyn.target_cell_voltage, wf_eV=float(r['workfunction']),
+                       target_cell_voltage_V=dyn.target_cell_voltage, wf_eV=float(r['work_function']),
                        U_SHE_V=float(r['electrode_potential_she']), delta_V=float(r['she_offset']),
                        mean_delta_V=dyn.mean_offset, aligned=int(dyn.aligned))
             for j, oxygen in enumerate(pair, 1):

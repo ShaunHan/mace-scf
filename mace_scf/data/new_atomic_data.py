@@ -63,8 +63,8 @@ def applied_sawtooth(cell, pbc, external_field):
 
 
 VOLT_KEYS = (
-    "workfunction",
-    "workfunction_weight",
+    "vacuum_potential",
+    "vacuum_potential_weight",
     "fourier_density",
     "fourier_density_shape",
     "fourier_density_weight",
@@ -90,8 +90,8 @@ class ExtAtomicData(AtomicData):
     fermi_level_weight: torch.Tensor
     enegs: torch.Tensor
     hardness: torch.Tensor
-    workfunction: torch.Tensor
-    workfunction_weight: torch.Tensor
+    vacuum_potential: torch.Tensor
+    vacuum_potential_weight: torch.Tensor
     fourier_density: torch.Tensor
     fourier_density_shape: torch.Tensor
     fourier_density_weight: torch.Tensor
@@ -337,9 +337,9 @@ class ExtAtomicData(AtomicData):
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
         volt = dict(
-            # field-free: the work function of the charges, without the applied sawtooth
-            workfunction=label("workfunction", 0.0) - applied_sawtooth(config.cell, config.pbc, external_field),
-            workfunction_weight=weight("workfunction"),
+            # field-free: the vacuum potential of the charges, without the applied sawtooth
+            vacuum_potential=label("vacuum_potential", 0.0) - applied_sawtooth(config.cell, config.pbc, external_field),
+            vacuum_potential_weight=weight("vacuum_potential"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,
             fourier_density_weight=weight("fourier_density"),

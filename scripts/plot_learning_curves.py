@@ -31,7 +31,7 @@ PANELS = [
     ("Dipole", "me Å/atom", ("rmse_mu_per_atom",)),
     ("Deformation charge density", "me/Å³", ("rmse_fourier_density_3A", "rmse_fourier_density", "rmse_rho")),
     ("Deformation electrostatic potential", "mV", ("rmse_fourier_potential_1.5A", "rmse_fourier_potential", "rmse_esp")),
-    ("Work function", "meV", ("rmse_workfunction", "rmse_wf_abs")),
+    ("Work function", "meV", ("rmse_work_function", "rmse_wf_abs")),
 ]
 
 

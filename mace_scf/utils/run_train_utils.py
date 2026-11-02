@@ -324,11 +324,22 @@ def get_param_options(model, args):
             }
         )
     if args.model == "PotentialResponse":
+        # Decay the maps of the law, not its references: the species biases and sources and the biases of its
+        # layers are physical levels and offsets, and pulling them to zero is a prior on the gauge, not smoothness.
+        maps = [p for name, p in model.law.named_parameters() if name.endswith("weight") and p.ndim >= 2]
+        references = [p for name, p in model.law.named_parameters() if not (name.endswith("weight") and p.ndim >= 2)]
         param_options["params"].append(
             {
                 "name": "law",
-                "params": model.law.parameters(),
+                "params": maps,
                 "weight_decay": args.field_block_weight_decay,
+            }
+        )
+        param_options["params"].append(
+            {
+                "name": "law_references",
+                "params": references,
+                "weight_decay": 0.0,
             }
         )
         if hasattr(model, "replay_head"):

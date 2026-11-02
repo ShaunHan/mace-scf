@@ -76,7 +76,7 @@ def main() -> None:
     def status() -> None:
         r, q = atoms.calc.results, dyn.electrode_charge
         print(f"step={dyn.nsteps:7d} T={atoms.get_temperature():6.1f} K Q={q:+.4f} e V={r['cell_voltage']:.4f} "
-              f"V*={dyn.target_cell_voltage:.4f} WF={r['workfunction']:.4f} U={r['electrode_potential_she']:+.4f} "
+              f"V*={dyn.target_cell_voltage:.4f} WF={r['work_function']:.4f} U={r['electrode_potential_she']:+.4f} "
               f"<Delta>={dyn.mean_offset:.4f}{'' if dyn.aligned else ' (aligning)'}", flush=True)
         if abs(q) > MAX_CHARGE_E:
             raise RuntimeError(f"|Q| = {abs(q):.3f} e exceeds MAX_CHARGE_E: the model has left its range")

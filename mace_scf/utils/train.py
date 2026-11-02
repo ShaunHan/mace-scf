@@ -465,7 +465,7 @@ def evaluate(
     delta_total_charge_list = []
     fermi_level_computed = False
     delta_fermi_level_list = []
-    delta_workfunction_list = []
+    delta_work_function_list = []
     fourier_errors = {}
     batch = None  # for pylint
 
@@ -538,9 +538,11 @@ def evaluate(
             fermi_level_computed = True
             observed = batch.fermi_level_weight > 0.0
             delta_fermi_level_list.append((batch.fermi_level - output["fermi_level"])[observed])
-        if output.get("workfunction") is not None:
-            observed = batch.workfunction_weight > 0.0
-            delta_workfunction_list.append((batch.workfunction - output["workfunction"])[observed])
+        if output.get("vacuum_potential") is not None:
+            # the work function is the vacuum potential minus the Fermi level
+            observed = (batch.vacuum_potential_weight > 0.0) & (batch.fermi_level_weight > 0.0)
+            delta_work_function_list.append((batch.vacuum_potential - batch.fermi_level
+                                             - output["vacuum_potential"] + output["fermi_level"])[observed])
         for key, widths in REPORTED_SMEARING_WIDTHS.items():
             if output.get(key + "_dft") is not None:
                 observed = getattr(batch, key + "_weight") > 0.0
@@ -682,10 +684,10 @@ def evaluate(
         aux["mae_fermi_level"] = compute_mae(delta_fermi_level)
         aux["rmse_fermi_level"] = compute_rmse(delta_fermi_level)
         aux["q95_fermi_level"] = compute_q95(delta_fermi_level)
-    if delta_workfunction_list:
-        delta_workfunction = to_numpy(torch.cat(delta_workfunction_list, dim=0))
-        aux["mae_workfunction"] = compute_mae(delta_workfunction)
-        aux["rmse_workfunction"] = compute_rmse(delta_workfunction)
+    if delta_work_function_list:
+        delta_work_function = to_numpy(torch.cat(delta_work_function_list, dim=0))
+        aux["mae_work_function"] = compute_mae(delta_work_function)
+        aux["rmse_work_function"] = compute_rmse(delta_work_function)
     for name, errors in fourier_errors.items():
         aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
@@ -719,7 +721,7 @@ def valid_err_log(
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_ef = eval_metrics["rmse_fermi_level"] * 1e3
-        error_wf = eval_metrics["rmse_workfunction"] * 1e3
+        error_wf = eval_metrics["rmse_work_function"] * 1e3
         widths_rho, widths_esp = ("/".join(f"{w:g}" for w in REPORTED_SMEARING_WIDTHS[key]) for key in REPORTED_SMEARING_WIDTHS)
         error_rho = "/".join(f"{eval_metrics.get(f'rmse_fourier_density_{w:g}A', float('nan')) * 1e3:.2f}"
                              for w in REPORTED_SMEARING_WIDTHS["fourier_density"])

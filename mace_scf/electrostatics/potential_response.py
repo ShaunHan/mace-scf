@@ -95,7 +95,7 @@ class LocalLaw(nn.Module):
     """
 
     def __init__(self, num_scalars, num_vectors, num_elements, num_sources, num_receivers, fixed_point=False,
-                 energy_range=6., resolution=.5, width=64):
+                 energy_range=6., resolution=.25, width=64):
         super().__init__()
         self.vector_width = min(16, max(4, num_vectors))
         self.num_sources = num_sources
@@ -325,7 +325,7 @@ class Cell:
         periodic DFT, equals -(K/2V) times the second moment of the planar charge density measured from the
         plane. The point multipoles, the counter charge sheet and the local amplitudes have that moment in
         closed form, so the level is exact and independent of where in the vacuum it would be read. The applied
-        field's sawtooth, zero at the slab centre, is left out: the work function is that of the charges alone.
+        field's sawtooth, zero at the slab centre, is left out: the level is that of the charges alone.
         """
         L, V, sigma = self.length, self.volume, self.width
         u = (self.tensors[9]+.5*L[:, None]).remainder(L[:, None])*self.present
@@ -440,7 +440,7 @@ class PotentialResponse(ScaleShiftMACE):
     newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
-                 fixed_point=False, short_range_potential=True, energy_range=6., resolution=.5, **kwargs):
+                 fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
@@ -646,7 +646,7 @@ class PotentialResponse(ScaleShiftMACE):
         fermi_level = -gradients[0]
         # dE/dQ along Q_cc = -Q, the voltage between the electrode and the counter charge
         cell_voltage = -fermi_level-(gradients[1] if gradients[1] is not None else torch.zeros_like(fermi_level))
-        workfunction = cell.vacuum_level(state, self.law.num_sources)-fermi_level
+        vacuum_potential = cell.vacuum_level(state, self.law.num_sources)
         # The raw Fourier density and potential: the Gaussian smoothing of the charges and amplitudes is undone,
         # the counter charge keeps its width and the boundary sawtooth is sharp.
         smooth = torch.where(cell.mask, torch.exp(-.5*sigma**2*cell.k2), 1.)
@@ -661,7 +661,7 @@ class PotentialResponse(ScaleShiftMACE):
             'density_coefficients': cell.unpack(moments)[..., [0, 2, 3, 1]],
             'dipole': dipole,
             'fermi_level': fermi_level,
-            'workfunction': workfunction,
+            'vacuum_potential': vacuum_potential,
             'cell_voltage': cell_voltage,
             'fourier_density': coarse/smooth[..., None]*cell.ngrid,
             'fourier_potential': torch.view_as_real(potential)*cell.ngrid,
@@ -839,10 +839,10 @@ class FourierPotentialError(FourierError):
         super().__init__(smearing_widths)
 
 
-def weighted_mean_squared_error_workfunction(ref, pred):
-    # workfunction: [n_graphs, ]
-    configs_weight = ref.weight*ref.workfunction_weight
-    return torch.mean(configs_weight*torch.square(ref['workfunction']-pred['workfunction']))
+def weighted_mean_squared_error_vacuum_potential(ref, pred):
+    # vacuum_potential: [n_graphs, ]
+    configs_weight = ref.weight*ref.vacuum_potential_weight
+    return torch.mean(configs_weight*torch.square(ref['vacuum_potential']-pred['vacuum_potential']))
 
 
 def replay_loss(ref, pred):

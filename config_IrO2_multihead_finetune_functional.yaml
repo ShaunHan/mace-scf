@@ -7,7 +7,7 @@ heads:
       dipole: vasp_dipole
       external_field: external_field
       fermi_level: vasp_efermi
-      workfunction: vasp_workfunction
+      vacuum_potential: vasp_vacuum_potential
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
@@ -79,7 +79,7 @@ train_schedule:
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      workfunction: 100.0
+      vacuum_potential: 100.0
       fermi_level: 100.0
       replay: 1.0
   1:
@@ -97,7 +97,7 @@ train_schedule:
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      workfunction: 100.0
+      vacuum_potential: 100.0
       fermi_level: 100.0
       replay: 1.0
   2:
@@ -115,7 +115,7 @@ train_schedule:
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      workfunction: 100.0
+      vacuum_potential: 100.0
       fermi_level: 100.0
       replay: 1.0
   3:
@@ -133,7 +133,7 @@ train_schedule:
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      workfunction: 100.0
+      vacuum_potential: 100.0
       fermi_level: 100.0
       replay: 1.0
   4:
@@ -151,6 +151,6 @@ train_schedule:
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      workfunction: 100.0
+      vacuum_potential: 100.0
       fermi_level: 100.0
       replay: 1.0

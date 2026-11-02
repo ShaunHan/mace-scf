@@ -28,7 +28,7 @@ VACUUM_MARGIN = 3.0  # A: vacuum planes start this far above the outermost atom.
 VACPOTFLAT = 0.1  # eV/A: largest planar field of a vacuum plane, applied field removed, as LVACPOTAV.
 VACUUM_FLATNESS = 0.2  # V: a vacuum potential that varies more than this is not a converged density.
 SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
-DIPOLE_DRIFT_TOL = 0.05  # V: largest work function change from the plug-in dipole over its last callbacks.
+DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
 HDF_NAME = "fourier_data.hdf"
@@ -245,7 +245,7 @@ def vacuum_potential(atoms, planar, axis, correction, field):
     so V(z) + field * (distance to the plane) is the same at every vacuum plane, the value just below it. A
     density that has not settled leaves a uniform charge in the vacuum, which bends that average by the spread
     returned with it. Training subtracts the applied field's zero-mean sawtooth at the plane, field * L / 2,
-    and fits the field-free work function.
+    and fits the field-free vacuum potential.
     """
     normal = np.linalg.inv(atoms.cell.array)[:, axis]
     length = 1.0 / np.linalg.norm(normal)
@@ -279,7 +279,7 @@ def converged_electronic_state(outdir, text, plugin, area):
         dipoles = np.loadtxt(outdir / "plugin_scf.csv", delimiter=",", skiprows=1, ndmin=2)[-6:, 1]
         drift = np.ptp(dipoles) / (0.005526349406 * area)
         if drift > DIPOLE_DRIFT_TOL:
-            return f"plug-in dipole drifts by {np.ptp(dipoles):.1e} eA, {drift:.3f} V of work function"
+            return f"plug-in dipole drifts by {np.ptp(dipoles):.1e} eA, {drift:.3f} V of vacuum potential"
     return None
 
 
@@ -435,7 +435,7 @@ def collect_job(outdir):
             vasp = re.findall(r"vacuum level on the upper side and lower side of the slab\s+([-+.\d]+)", text)
             if vasp and not external_field.any() and abs(float(vasp[-1]) - level) > 0.02:
                 print(f"Warning {outdir}: vacuum level {level:.3f} V, VASP's LVACPOTAV {float(vasp[-1]):.3f} V")
-            atoms.info["vasp_workfunction"] = level - fermi
+            atoms.info["vasp_vacuum_potential"] = level
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
         # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
         add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
@@ -484,10 +484,14 @@ def collect():
 
 
 def relabel(paths):
-    """vacuum_potential at vacuum_zfrac of earlier collections to the work function just below the plane."""
+    """vasp_vacuum_potential, the vacuum potential just below the plane, in the xyz files of earlier collections.
+
+    It is vasp_workfunction plus the Fermi level, or vacuum_potential at vacuum_zfrac carried to the plane by the
+    applied field. Writes NAME_vac.xyz next to each file.
+    """
     pairs = re.compile(r'(?:^|\s)(\w+)=("[^"]*"|\S+)')
     for path in map(Path, paths):
-        target = path.with_name(path.stem + "_wf" + path.suffix)
+        target = path.with_name(path.stem + "_vac" + path.suffix)
         with open(path, encoding="utf-8", newline="") as source, open(target, "w", encoding="utf-8", newline="") as out:
             while True:
                 first = source.readline()
@@ -497,9 +501,12 @@ def relabel(paths):
                     continue
                 header = source.readline()
                 info = {key: value.strip('"') for key, value in pairs.findall(header)
-                        if key in ("Lattice", "pbc", "external_field", "vasp_efermi", "vacuum_potential")
-                        or key.startswith(("vacuum_", "dipole_correction_"))}
-                if "vacuum_potential" in info:
+                        if key in ("Lattice", "pbc", "external_field", "vasp_efermi", "vasp_workfunction",
+                                   "vacuum_potential") or key.startswith(("vacuum_", "dipole_correction_"))}
+                level = None
+                if "vasp_workfunction" in info:
+                    level = float(info["vasp_workfunction"]) + float(info["vasp_efermi"])
+                elif "vacuum_potential" in info:
                     cell = np.array(info["Lattice"].split(), float).reshape(3, 3)
                     axis = [x == "T" for x in info["pbc"].split()].index(False)
                     normal = np.linalg.inv(cell)[:, axis]
@@ -507,10 +514,11 @@ def relabel(paths):
                     field = np.array(info["external_field"].split(), float) @ normal
                     plane = float(info[f"dipole_correction_{'xyz'[axis]}frac"])
                     below = (plane - float(info[f"vacuum_{'xyz'[axis]}frac"])) % 1.0 * float(cell[axis] @ normal)
-                    workfunction = float(info["vacuum_potential"]) + field * below - float(info["vasp_efermi"])
-                    header = header.rstrip("\r\n") + f" workfunction={workfunction:.8f}\n"
-                header = re.sub(r'(?:^|\s)(vacuum_potential|vacuum_[xyz]frac|config_vacuum_potential_weight|'
+                    level = float(info["vacuum_potential"]) + field * below
+                header = re.sub(r'(?:^|\s)(vasp_workfunction|vacuum_potential|vacuum_[xyz]frac|'
                                 r'electronic_converged)=("[^"]*"|\S+)', "", header)
+                if level is not None:
+                    header = header.rstrip("\r\n") + f" vasp_vacuum_potential={level:.8f}\n"
                 out.write(first + header + "".join(source.readline() for _ in range(int(first))))
         print(f"Wrote {target}")
 

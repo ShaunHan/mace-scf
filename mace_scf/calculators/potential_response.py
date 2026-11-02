@@ -60,7 +60,8 @@ class MACEPotentialResponse(Calculator):
     """
 
     implemented_properties = ['energy', 'free_energy', 'forces', 'dipole', 'charges', 'fermi_level',
-                              'workfunction', 'cell_voltage', 'she_offset', 'electrode_potential_she']
+                              'vacuum_potential', 'work_function', 'cell_voltage', 'she_offset',
+                              'electrode_potential_she']
 
     def __init__(self, model_path, device='cuda', default_dtype='float64', constant_potential=False,
                  counter_charge_height=6., counter_charge_width=1., enable_cueq=False, **kwargs):
@@ -103,18 +104,20 @@ class MACEPotentialResponse(Calculator):
         batch = torch_geometric.batch.Batch.from_data_list([data]).to(self.device)
         output = self.model(batch.to_dict(), compute_force=True)
         output = {key: value.detach() if isinstance(value, torch.Tensor) else value for key, value in output.items()}
-        workfunction, cell_voltage = float(output['workfunction'][0]), float(output['cell_voltage'][0])
+        fermi_level, vacuum_potential = float(output['fermi_level'][0]), float(output['vacuum_potential'][0])
+        work_function, cell_voltage = vacuum_potential-fermi_level, float(output['cell_voltage'][0])
         self.results = {
             'energy': float(output['energy'][0]),
             'free_energy': float(output['energy'][0]),
             'forces': output['forces'].cpu().numpy(),
             'dipole': output['dipole'][0].cpu().numpy(),
             'charges': output['density_coefficients'][:, 0].cpu().numpy(),
-            'fermi_level': float(output['fermi_level'][0]),
-            'workfunction': workfunction,
+            'fermi_level': fermi_level,
+            'vacuum_potential': vacuum_potential,
+            'work_function': work_function,
             'cell_voltage': cell_voltage,
-            'she_offset': workfunction-cell_voltage,
-            'electrode_potential_she': workfunction-SHE_ABSOLUTE_V,
+            'she_offset': work_function-cell_voltage,
+            'electrode_potential_she': work_function-SHE_ABSOLUTE_V,
         }
         for key in ('fourier_potential', 'k_vectors_grid_shape', 'k_vectors_mask'):
             self.results[key] = output[key].cpu().numpy()
