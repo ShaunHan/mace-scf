@@ -62,6 +62,38 @@ def window_moments(center, width, length):
     return mass, first, second, edge
 
 
+def window_derivatives(center, width, length, order):
+    """The derivatives 0 to order of the periodic unit Gaussian of window_moments at the window ends 0 and length."""
+    ends = []
+    for end in (0., length):
+        values = [torch.zeros_like(center) for _ in range(order+1)]
+        for n in (-1., 0., 1.):
+            x = (end-center-n*length)/width
+            density, hermite = normal_density(x)/width, [torch.ones_like(x), x]
+            for j in range(1, order):
+                hermite.append(x*hermite[j]-j*hermite[j-1])
+            values = [value+(-1./width)**j*hermite[j]*density for j, value in enumerate(values)]
+        ends.append(values)
+    return ends
+
+
+def solid_harmonics(order, vectors):
+    """The solid harmonics |x|^l Y_lm of e3nn for l = 0 to order, of norm |x|^l in every order; l = 1 is x."""
+    return o3.spherical_harmonics(list(range(order+1)), vectors, False, normalization='norm')
+
+
+def component_orders(order):
+    """The order l of every component of the harmonics to order."""
+    return [l for l in range(order+1) for _ in range(2*l+1)]
+
+
+def phase_factors(order, sign, reference):
+    """Real and imaginary part of (sign i)^l for every component of the harmonics to order."""
+    cycle = reference.new_tensor([[1., 0.], [0., sign], [-1., 0.], [0., -sign]])
+    factors = cycle[torch.tensor(component_orders(order), device=reference.device) % 4]
+    return factors[:, 0], factors[:, 1]
+
+
 def vector_asinh(vector):
     squared = vector.square().sum(-1, keepdim=True)
     threshold = math.sqrt(torch.finfo(vector.dtype).eps)
@@ -84,19 +116,27 @@ def neighbour_transport(positions, edge_index, shifts, batch, slot, graphs, size
     return (operator-torch.diag_embed(operator.sum(-1))).flatten(1, 2)
 
 
-class LocalLaw(nn.Module):
-    """The law of every atom: bias, density of states on an energy grid, dd_dE, d0 and local amplitudes.
+class AtomicResponse(nn.Module):
+    """The response of every atom: bias, density of states on an energy grid, dd_dE, d0 and local amplitudes.
 
-    dd_dE times the density width squared is the dipole per field. The density of states is a sum of
-    Gaussian bumps of width resolution on [-energy_range, energy_range] eV over a background of DOS_FLOOR,
-    and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. With fixed_point the law also
-    reads the levels and fields of the atom and its neighbours; at zero levels and field that read is the law
-    of the geometry.
+    It reads a learned mixture of the scalars and vectors of all num_layers layers, as wide as one layer. The
+    multipoles of the atom reach order max_l and its local amplitudes order completion_max_l. Every order l >= 1
+    has a permanent moment d0 and a response dd_dE, the moment per field projection of that order in units of
+    the density width: for l = 1 dd_dE times the density width squared is the dipole per field. The outputs of
+    order l are gated sums of the order l solid harmonics of the vector channels. The density of states is a
+    sum of Gaussian bumps of width resolution on [-energy_range, energy_range] eV over a background of
+    DOS_FLOOR, and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. With fixed_point the
+    response also reads the levels and fields of the atom and its neighbours; at zero levels and field that read
+    is the response of the geometry.
     """
 
-    def __init__(self, num_scalars, num_vectors, num_elements, num_sources, num_receivers, fixed_point=False,
-                 energy_range=6., resolution=.25, width=64):
+    def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
+                 fixed_point=False, energy_range=6., resolution=.25, width=64, max_l=1, completion_max_l=1):
         super().__init__()
+        # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
+        self.mixer_scalar = nn.Parameter(torch.randn(num_layers*num_scalars, num_scalars))
+        self.mixer_vector = nn.Parameter(torch.randn(num_layers*num_vectors, num_vectors))
+        self.max_l, self.completion_max_l = int(max_l), int(completion_max_l)
         self.vector_width = min(16, max(4, num_vectors))
         self.num_sources = num_sources
         self.chemical_scalar = nn.Linear(num_scalars, width)
@@ -104,8 +144,8 @@ class LocalLaw(nn.Module):
         self.shared = nn.Sequential(nn.Linear(width+2*self.vector_width, width), nn.SiLU(),
                                     nn.Linear(width, width), nn.SiLU())
         self.scalar_out = nn.Linear(width, 1+num_sources)
-        self.vector_out = nn.Linear(width, 2*(1+num_sources)*self.vector_width)
-        self.dd_dE_readout = nn.Linear(width, 1)
+        self.vector_out = nn.Linear(width, 2*sum(self.outputs())*self.vector_width)
+        self.dd_dE_readout = nn.Linear(width, self.max_l)
         centers = torch.linspace(-energy_range, energy_range, int(round(2*energy_range/resolution))+1)
         self.dos_width = float(centers[1]-centers[0])
         self.register_buffer('dos_centers', centers)
@@ -126,7 +166,15 @@ class LocalLaw(nn.Module):
         self.register_buffer('scalar_unit', torch.ones(num_scalars))
         self.register_buffer('vector_unit', torch.ones(num_vectors))
 
+    def mix(self, scalars, vectors):
+        """The mixture of the layers; a response saved before the mixture reads them side by side."""
+        if 'mixer_scalar' not in self._parameters:
+            return scalars, vectors
+        return (scalars@self.mixer_scalar/math.sqrt(self.mixer_scalar.shape[1]),
+                torch.einsum('...kc,kd->...dc', vectors, self.mixer_vector)/math.sqrt(self.mixer_vector.shape[1]))
+
     def features(self, scalars, vectors):
+        scalars, vectors = self.mix(scalars, vectors)
         chemical = self.chemical_scalar(torch.asinh(scalars)/self.scalar_unit)
         vector = vector_asinh(vectors/self.vector_unit[:, None])
         return chemical, self.chemical_vector(vector.transpose(-1, -2)).transpose(-1, -2)
@@ -141,16 +189,32 @@ class LocalLaw(nn.Module):
                                 torch.asinh((vector*embedded).sum(-1))), -1)
         hidden = self.shared(invariants)
         scalars = self.scalar_out(hidden)
-        gate = self.vector_out(hidden).reshape(*hidden.shape[:-1], 1+self.num_sources, 2*self.vector_width)
-        polar = torch.einsum('bnov,bnvc->bnoc', gate, torch.cat((vector, embedded), -2))/math.sqrt(2*self.vector_width)
         bias = (attrs@self.species_bias+scalars[..., 0])*mask
-        dd_dE = positive(self.dd_dE_readout(hidden))[..., 0]*mask
+        dd_dE = positive(self.dd_dE_readout(hidden))*mask[..., None]
         coefficients = F.softplus(self.dos_readout(hidden)+self.dos_offsets)*mask[..., None]
-        amplitudes = torch.cat((attrs@self.species_source+scalars[..., 1:], polar[..., 1:, :].flatten(-2)), -1)
-        return bias, dd_dE, coefficients, polar[..., 0, :]*mask[..., None], amplitudes*mask[..., None]
+        # The outputs of order l, d0 first, are gated sums of the order l solid harmonics of the vector channels.
+        outputs, channels, max_l = self.outputs(), torch.cat((vector, embedded), -2), getattr(self, 'max_l', 1)
+        harmonics = channels
+        if len(outputs) > 1:
+            harmonics = torch.cat((channels, solid_harmonics(len(outputs), channels)[..., 4:]), -1)
+        gates = self.vector_out(hidden).reshape(*hidden.shape[:-1], sum(outputs), channels.shape[-2])
+        d0, amplitudes, scale = [], [attrs@self.species_source+scalars[..., 1:]], math.sqrt(channels.shape[-2])
+        for l, gate in enumerate(gates.split(outputs, -2) if outputs else (), 1):
+            polar = torch.einsum('bnov,bnvc->bnoc', gate, harmonics[..., l*l-1:(l+1)**2-1])/scale
+            if l <= max_l:
+                d0.append(polar[..., 0, :])
+            amplitudes.append(polar[..., int(l <= max_l):, :].flatten(-2))
+        d0 = torch.cat(d0, -1) if d0 else bias.new_zeros(*bias.shape, 0)
+        return bias, dd_dE, coefficients, d0*mask[..., None], torch.cat(amplitudes, -1)*mask[..., None]
+
+    def outputs(self):
+        """The number of equivariant outputs of every order l >= 1: d0 to max_l, the amplitudes to completion_max_l."""
+        max_l, completion_max_l = getattr(self, 'max_l', 1), getattr(self, 'completion_max_l', 1)
+        return [int(l <= max_l)+self.num_sources*int(l <= completion_max_l)
+                for l in range(1, max(max_l, completion_max_l)+1)]
 
     def charge(self, coefficients, delta):
-        """The charge of the law at the levels delta, and the density of states there."""
+        """The charge of the atoms at the levels delta, and the density of states there."""
         w, centers = self.dos_width, self.dos_centers
         x = (delta[..., None]-centers)/w
         dq = (coefficients*(gaussian_step(x)-gaussian_step(-centers/w))).sum(-1)*w+DOS_FLOOR*delta
@@ -162,6 +226,10 @@ class LocalLaw(nn.Module):
         x = (delta[..., None]-centers)/w
         return (coefficients*(w*(gaussian_ramp(x)-gaussian_ramp(-centers/w))
                               - delta[..., None]*gaussian_step(-centers/w))).sum(-1)*w+.5*DOS_FLOOR*delta.square()
+
+
+# The class of the atomic response in models saved before the renaming.
+LocalLaw = AtomicResponse
 
 
 def reciprocal_grid(cell, cutoff):
@@ -176,8 +244,8 @@ def reciprocal_grid(cell, cutoff):
     return wave, k2, k2 <= float(cutoff)**2, shape, modes
 
 
-class Cell:
-    """Fourier operators, counter charge and boundary terms of a batch, packed as (graphs, atoms)."""
+class FourierSpace:
+    """The Fourier space of a batch: its operators, counter charge and boundary terms, packed as (graphs, atoms)."""
 
     def __init__(self, model, data, positions):
         self.cell = data['cell'].reshape(-1, 3, 3)
@@ -222,32 +290,40 @@ class Cell:
         self.vacuum_reference = self.attrs.sum(1)@model.vacuum_reference_integrals/self.volume*self.slab
         self.counter_charge_sheet(model, data, positions)
 
-        phase = torch.einsum('gkc,gnc->gkn', self.wave, self.pack(positions))
-        co = phase.cos()*self.present[:, None, :]*active[..., None]
-        si = phase.sin()*self.present[:, None, :]*active[..., None]
-        smooth = torch.exp(-.5*self.width**2*self.k2)*active
-        real = torch.cat((smooth[..., None], torch.zeros_like(self.wave)), -1)
-        imag = torch.cat((torch.zeros_like(smooth[..., None]), -smooth[..., None]*self.wave), -1)
-        radial = torch.exp(-.5*self.k2[..., None]*model.source_widths.to(positions).square())*active[..., None]
-        receiver = torch.exp(-.5*self.k2[..., None]*model.receiver_widths.to(positions).square())*active[..., None]
-        zn = ((self.pack(positions)-self.origin[:, None])*self.normal[:, None]).sum(-1)*self.present
-        tensors = (co, si, self.wave, real, imag, radial, receiver, torch.view_as_real(self.ramp(-self.slab_factor)),
-                   torch.view_as_real(self.ramp(self.field)), zn, self.normal, -self.coulomb, self.volume.reciprocal())
-        # Only the nonzero modes inside the cutoff enter the moments and the sampled fields.
-        count = int(active.sum(-1).max())
-        indices = torch.arange(active.shape[1], device=positions.device).expand_as(active)
-        indices = indices.masked_fill(~active, active.shape[1]).sort(-1).values[:, :count]
-        self.selected_mask = indices < active.shape[1]
-        self.selected_indices = indices.clamp_max(active.shape[1]-1)
+        # Only the nonzero modes inside the cutoff enter the multipoles and the sampled fields, a half space of
+        # them first: the Hessian of the multipoles, even in k, sums that half twice.
+        n1, n2, n3 = self.modes.unbind(-1)
+        half = active & ((n1 > 0) | ((n1 == 0) & ((n2 > 0) | ((n2 == 0) & (n3 > 0)))))
+        size = active.shape[1]
+        keys = torch.arange(size, device=positions.device)+size*((~half).long()+2*(~active).long())
+        keys = keys.sort(-1).values[:, :int(active.sum(-1).max())]
+        self.selected_mask = keys < 2*size
+        self.selected_indices = keys % size
+        self.half_count = int(half.sum(-1).max())
+        self.half_mask = keys[:, :self.half_count] < size
 
         def selected(value):
             mask = self.selected_mask.reshape(*self.selected_mask.shape, *([1]*(value.ndim-2)))
             return value[rows[:, None], self.selected_indices]*mask
-        self.tensors = tuple(selected(value) if i < 9 or i == 11 else value for i, value in enumerate(tensors))
+        # The orders of the multipoles and of the local amplitudes; models saved before them stop at l = 1.
+        self.max_l, self.completion_max_l = getattr(model, 'max_l', 1), getattr(model, 'completion_max_l', 1)
+        self.num_moments = (self.max_l+1)**2
+        self.k, k2 = selected(self.wave), selected(self.k2)
+        phase = torch.einsum('gkc,gnc->gkn', self.k, self.pack(positions))
+        self.co = phase.cos()*self.present[:, None, :]*self.selected_mask[..., None]
+        self.si = phase.sin()*self.present[:, None, :]*self.selected_mask[..., None]
+        self.smooth = torch.exp(-.5*self.width**2*k2)*self.selected_mask
+        self.harmonics = solid_harmonics(max(self.max_l, self.completion_max_l, 1), self.k)
+        inside = self.selected_mask[..., None]
+        self.radial, self.receiver = (torch.exp(-.5*k2[..., None]*widths.to(positions).square())*inside
+                                      for widths in (model.source_widths, model.receiver_widths))
+        self.poisson = -selected(self.coulomb)
+        self.zn = ((self.pack(positions)-self.origin[:, None])*self.normal[:, None]).sum(-1)*self.present
+        self.slab_ramp = selected(torch.view_as_real(self.ramp(-self.slab_factor)))
         # The fixed field of the solve: the applied field and the counter charge.
-        self.fixed = self.tensors[8]+selected(torch.view_as_real(self.counter_potential))
+        self.fixed = selected(torch.view_as_real(self.ramp(self.field)+self.counter_potential))
         self.counter_coulomb = selected(torch.view_as_real(-self.coulomb*self.counter_density))
-        self.kernels = coefficient_kernels(self.tensors, self.width, (2*math.pi)**1.5*self.width**3)
+        self.kernels = coefficient_kernels(self, (2*math.pi)**1.5*self.width**3)
 
     def pack(self, values):
         result = values.new_zeros((len(self.counts), self.size, *values.shape[1:]))
@@ -328,14 +404,27 @@ class Cell:
         field's sawtooth, zero at the slab centre, is left out: the level is that of the charges alone.
         """
         L, V, sigma = self.length, self.volume, self.width
-        u = (self.tensors[9]+.5*L[:, None]).remainder(L[:, None])*self.present
-        q = state[..., 0]*self.present
-        d = (state[..., 1:4]*sigma*self.normal[:, None]).sum(-1)*self.present
-        mass, first, second, edge = window_moments(u, torch.full_like(u, sigma), L[:, None])
-        m2 = (q*(second-sigma**2*mass)+d*(2*first-L[:, None].square()*edge)).sum(-1)
+        u = (self.zn+.5*L[:, None]).remainder(L[:, None])*self.present
+        width, length = torch.full_like(u, sigma), L[:, None]
+        mass, first, second, edge = window_moments(u, width, length)
+        m2 = (state[..., 0]*(second-sigma**2*mass)*self.present).sum(-1)
+        if self.max_l > 0:
+            # The planar density of the moment lm is width^l R_lm(normal) (-d/dz)^l of the Gaussian; by parts its
+            # second moment on the window is (-1)^l times end terms and, for l <= 2, the lower moments.
+            scales = sigma**self.normal.new_tensor(component_orders(self.max_l))
+            planar = state[..., :self.num_moments]*(solid_harmonics(self.max_l, self.normal)*scales)[:, None, :]
+            start, end = window_derivatives(u, width, length, self.max_l-1) if self.max_l > 1 else (None, None)
+            for l in range(1, self.max_l+1):
+                if l == 1:
+                    integral = length.square()*edge-2*first
+                elif l == 2:
+                    integral = length.square()*end[1]-2*length*end[0]+2*mass
+                else:
+                    integral = length.square()*end[l-1]-2*length*end[l-2]+2*(end[l-3]-start[l-3])
+                m2 = m2+((-1)**l*integral*planar[..., l*l:(l+1)**2].sum(-1)*self.present).sum(-1)
         u_cc = (((self.counter_center-self.origin)*self.normal).sum(-1)+.5*L).remainder(L)
         m2 = m2+self.counter_charge*window_moments(u_cc, self.counter_width, L)[2]
-        amplitudes = state[..., 4:4+num_sources].sum((-1, -2))
+        amplitudes = state[..., self.num_moments:self.num_moments+num_sources].sum((-1, -2))
         top = -FIELD_CONSTANT/(2*V)*m2-amplitudes*(2*math.pi)**1.5*sigma**3/V+self.vacuum_reference
         return top*self.slab
 
@@ -344,90 +433,163 @@ class Cell:
         return output.scatter_add(1, self.selected_indices[..., None].expand_as(value),
                                   value*self.selected_mask[..., None])
 
+    def multipole_terms(self):
+        """The Hessian of the multipoles and their drive by the counter charge and the uniform field of the slab,
+        flattened as (component, atom). Both depend on the geometry alone and are made once."""
+        if not hasattr(self, 'hessian'):
+            self.hessian = moment_kernels(self)
+            slope = self.field-self.slab_factor*self.counter_moment
+            linear = (slope[:, None]*self.zn)[..., None]
+            if self.max_l > 0:
+                normal = (self.width*slope)[:, None]*self.normal
+                linear = torch.cat((linear, normal[:, None, :].expand(-1, self.size, -1)), -1)
+            drive = moment_projection(self.counter_coulomb, self)+F.pad(linear, (0, self.num_moments-linear.shape[-1]))
+            self.drive = (drive*self.present[..., None]).transpose(1, 2).flatten(1)
+        return self.hessian, self.drive
 
-def coefficient_kernels(tensors, width, source_volume):
-    """Fourier kernels of the state: Gaussian charges and dipoles, then the local amplitudes."""
-    _, _, wave, br, bi, radial, *_, poisson, ivol = tensors
-    scales = br.new_tensor([1., width, width, width])
-    shape_im = (radial[..., None]*wave[:, :, None, :]*(width*source_volume)).flatten(-2)
-    real = torch.cat((br*poisson[..., None]*scales, radial*source_volume, torch.zeros_like(shape_im)), -1)
-    imag = torch.cat((bi*poisson[..., None]*scales, torch.zeros_like(radial), shape_im), -1)
-    return real*ivol[:, None, None], imag*ivol[:, None, None]
+
+def coefficient_kernels(space, source_volume):
+    """Fourier kernels of the state: Gaussian multipoles to max_l, then the local amplitudes to completion_max_l.
+
+    The multipole lm of an atom is the density width^l R_lm(-grad) of its Gaussian charge, of modes
+    (-i width)^l R_lm(k) times the Gaussian; the amplitude lm of a source width is the potential width^l
+    R_lm(grad) of a Gaussian of that width, of modes (i width)^l R_lm(k) times it. R_lm are the solid harmonics.
+    """
+    sigma, count = space.width, space.num_moments
+    scales = space.k.new_tensor([sigma**l for l in component_orders(max(space.max_l, space.completion_max_l))])
+    shapes = space.harmonics[..., :len(scales)]*scales
+    re, im = phase_factors(space.max_l, -1., space.k)
+    multipoles = (space.smooth*space.poisson)[..., None]*shapes[..., :count]
+    real, imag = [multipoles*re], [multipoles*im]
+    re, im = phase_factors(space.completion_max_l, 1., space.k)
+    for l in range(space.completion_max_l+1):
+        block = slice(l*l, (l+1)**2)
+        amplitudes = (space.radial*source_volume)[..., None]*shapes[..., None, block]
+        real.append((amplitudes*re[block]).flatten(-2))
+        imag.append((amplitudes*im[block]).flatten(-2))
+    ivol = space.volume.reciprocal()[:, None, None]
+    return torch.cat(real, -1)*ivol, torch.cat(imag, -1)*ivol
 
 
-def coefficient_contributions(state, tensors, kernels):
-    """Potential modes of the charges and dipoles and of the local amplitudes, as (real, imag)."""
-    cosine, sine = torch.bmm(tensors[0], state), torch.bmm(tensors[1], state)
-    kr, ki = kernels
+def coefficient_contributions(state, space):
+    """Potential modes of the multipoles and of the local amplitudes, as (real, imag)."""
+    cosine, sine = torch.bmm(space.co, state), torch.bmm(space.si, state)
+    kr, ki = space.kernels
     real = kr*cosine+ki*sine
     imag = ki*cosine-kr*sine
-    return (torch.stack((real[..., :4].sum(-1), imag[..., :4].sum(-1)), -1),
-            torch.stack((real[..., 4:].sum(-1), imag[..., 4:].sum(-1)), -1))
+    count = space.num_moments
+    return (torch.stack((real[..., :count].sum(-1), imag[..., :count].sum(-1)), -1),
+            torch.stack((real[..., count:].sum(-1), imag[..., count:].sum(-1)), -1))
 
 
-def total_spectrum(state, tensors, kernels, width, fixed):
+def amplitude_spectrum(amplitudes, space):
+    """Potential modes of the local amplitudes, as (real, imag)."""
+    kr, ki = (kernel[..., space.num_moments:] for kernel in space.kernels)
+    cosine, sine = torch.bmm(space.co, amplitudes), torch.bmm(space.si, amplitudes)
+    return torch.stack(((kr*cosine+ki*sine).sum(-1), (ki*cosine-kr*sine).sum(-1)), -1)
+
+
+def normal_dipole(state, space):
+    """The dipole of the multipoles of each graph along the normal of its slab, from the dipole correction plane."""
+    dipole = state[..., 0]*space.zn
+    if space.max_l > 0:
+        dipole = dipole+(state[..., 1:4]*space.width*space.normal[:, None]).sum(-1)
+    return dipole.sum(-1)
+
+
+def total_spectrum(state, space):
     """Potential modes of the state with its slab dipole field, and the fixed field."""
-    cosine, sine = torch.bmm(tensors[0], state), torch.bmm(tensors[1], state)
-    real, imag = kernels
+    cosine, sine = torch.bmm(space.co, state), torch.bmm(space.si, state)
+    real, imag = space.kernels
     internal = torch.stack(((real*cosine+imag*sine).sum(-1), (imag*cosine-real*sine).sum(-1)), -1)
-    ramp, z, normal = tensors[7], tensors[9], tensors[10]
-    dipole = (state[..., 0]*z+(state[..., 1:4]*width*normal[:, None]).sum(-1)).sum(-1)
-    return internal+dipole[:, None, None]*ramp+fixed
+    return internal+normal_dipole(state, space)[:, None, None]*space.slab_ramp+space.fixed
 
 
-def sample_spectrum(total, tensors):
-    """Gaussian receiver averages of phi (V) and -grad phi (V/A) at every atom, one channel per width."""
-    cosine, sine, wave, _, _, _, receiver, *_ = tensors
-    re = total[..., 0, None]*receiver
-    im = total[..., 1, None]*receiver
-    re_k = (re[..., None]*wave[:, :, None]).flatten(-2)
-    im_k = (im[..., None]*wave[:, :, None]).flatten(-2)
-    sampled = (torch.bmm(cosine.transpose(1, 2), torch.cat((re, im_k), -1))
-               + torch.bmm(sine.transpose(1, 2), torch.cat((-im, re_k), -1)))
-    value, gradient = sampled.split((re.shape[-1], re_k.shape[-1]), -1)
-    return value, gradient.reshape(*value.shape, 3)
+def sample_spectrum(total, space, order, receivers=slice(None)):
+    """R_lm(-grad) phi to order at every atom, averaged over a Gaussian receiver of each width.
+
+    l = 0 is phi (V) and l = 1 is -grad phi (V/A); the result is (graphs, atoms, receivers, components).
+    """
+    count = (order+1)**2
+    re, im = phase_factors(order, -1., space.k)
+    shape = space.receiver[..., receivers, None]*space.harmonics[..., None, :count]
+    a, b = shape*re, -shape*im
+    vr, vi = total[..., 0, None, None], total[..., 1, None, None]
+    sampled = (torch.bmm(space.co.transpose(1, 2), (vr*a+vi*b).flatten(-2))
+               + torch.bmm(space.si.transpose(1, 2), (vr*b-vi*a).flatten(-2)))
+    return sampled.reshape(*sampled.shape[:2], shape.shape[-2], count)
 
 
-def moment_kernels(tensors, kernels, mask, sigma, slab):
-    """The Hessian of the electrostatic energy in the charges and dipoles, and its coupling to the amplitudes."""
-    co, si, wave = tensors[:3]
-    kr, ki = kernels
-    source_re = (co[..., None]*kr[:, :, None, :]+si[..., None]*ki[:, :, None, :]).flatten(-2)
-    source_im = (co[..., None]*ki[:, :, None, :]-si[..., None]*kr[:, :, None, :]).flatten(-2)
-    receiver = tensors[6][..., 0, None, None]
-    observer_re = torch.cat((co[..., None], -sigma*si[..., None]*wave[:, :, None, :]), -1)*receiver
-    observer_im = torch.cat((-si[..., None], -sigma*co[..., None]*wave[:, :, None, :]), -1)*receiver
-    matrix = -(observer_re.flatten(-2).transpose(1, 2)@source_re+observer_im.flatten(-2).transpose(1, 2)@source_im)
-    matrix = matrix.reshape(*matrix.shape[:2], mask.shape[-1], kr.shape[-1])
-    completion = -matrix[..., 4:].flatten(-2)
-    # The slab field of the normal dipole is rank one.
-    dipole = torch.cat((tensors[9][..., None], sigma*tensors[10][:, None, :].expand(-1, mask.shape[1], -1)),
-                       -1).flatten(-2)
-    matrix = matrix[..., :4].flatten(-2)+slab[:, None, None]*dipole[..., None]*dipole[:, None, :]
-    present = mask[..., None].expand(-1, -1, 4).flatten(-2)
-    return matrix*present[..., None]*present[:, None, :], completion
+def moment_projection(total, space):
+    """The energy per multipole coefficient of the potential modes total, width^l R_lm(grad) phi on the density."""
+    scales = space.k.new_tensor([(-space.width)**l for l in component_orders(space.max_l)])
+    return sample_spectrum(total, space, space.max_l, slice(0, 1))[..., 0, :]*scales
 
 
-def screen_dipoles(kernel, completion, drive, dd_dE, d0, amplitudes, mask):
-    """Eliminate the dipoles: the screened kernel of the charges, their drive and the dipoles as d = free - map q."""
-    graphs, atoms = mask.shape
-    index = torch.arange(4*atoms, device=mask.device).reshape(atoms, 4)
-    charge_rows, dipole_rows = index[:, 0], index[:, 1:].reshape(-1)
-    applied = (completion@amplitudes.flatten(1)[..., None]).squeeze(-1)
-    total = applied+drive.flatten(1)
-    k_qq, k_qd = kernel[:, charge_rows][:, :, charge_rows], kernel[:, charge_rows][:, :, dipole_rows]
-    k_dq, k_dd = kernel[:, dipole_rows][:, :, charge_rows], kernel[:, dipole_rows][:, :, dipole_rows]
-    response = (dd_dE[..., None].expand(-1, -1, 3)*mask[..., None]).flatten(1)
-    operator = torch.eye(3*atoms, dtype=kernel.dtype, device=kernel.device)+response[..., None]*k_dd
-    rhs = torch.cat((response[..., None]*k_dq, (d0.flatten(1)+response*total[:, dipole_rows])[..., None]), -1)
-    solved = torch.linalg.solve(operator, rhs)
-    free = solved[..., atoms]
-    return (k_qq-k_qd@solved[..., :atoms], total[:, charge_rows]-(k_qd@free[..., None]).squeeze(-1),
-            solved[..., :atoms], free, applied)
+def moment_kernels(space):
+    """The Hessian of the electrostatic energy in the multipole coefficients, rows and columns (component, atom).
+
+    The modes (-i width)^l R_lm(k) exp(-ik.r) of the multipoles enter as a Gram matrix over the half space of
+    the modes, counted twice since the sum is even in k; the slab field of the normal dipole is rank one.
+    """
+    half, count, size = space.half_count, space.num_moments, space.size
+    re, im = phase_factors(space.max_l, -1., space.k)
+    scales = space.k.new_tensor([space.width**l for l in component_orders(space.max_l)])
+    shape = (space.harmonics[:, :half, :count]*scales)[..., None]
+    co, si = space.co[:, :half, None, :], space.si[:, :half, None, :]
+    modes = torch.cat((shape*(re[:, None]*co+im[:, None]*si), shape*(im[:, None]*co-re[:, None]*si)), 1).flatten(2)
+    weight = (2*space.half_mask*space.smooth[:, :half]*space.receiver[:, :half, 0]*-space.poisson[:, :half]
+              / space.volume[:, None])
+    matrix = modes.transpose(1, 2)@(torch.cat((weight, weight), 1)[..., None]*modes)
+    dipole = [space.zn[:, None, :]]
+    if space.max_l > 0:
+        dipole.append((space.width*space.normal)[..., None].expand(-1, -1, size))
+    dipole = F.pad(torch.cat(dipole, 1), (0, 0, 0, count-min(count, 4))).flatten(1)
+    matrix = matrix+space.slab_factor[:, None, None]*dipole[..., None]*dipole[:, None, :]
+    present = space.present[:, None, :].expand(-1, count, -1).flatten(1)
+    return matrix*present[..., None]*present[:, None, :]
+
+
+def screen_moments(kernel, total, response, d0, size):
+    """Eliminate the moments of order l >= 1, linear in their fields: the screened kernel and drive of the charges.
+
+    The moments are h = d0 + R (t - K_hq q - K_hh h), with R the dd_dE of their order and t their drive. With
+    h = d0 + D y and D = R^1/2, y solves the positive definite (1 + D K_hh D) y = D (t - K_hh d0 - K_hq q) of
+    Cholesky factor C. The charges then see the kernel K_qq - W^T W and the drive t_q - K_qh d0 - W^T u, with
+    W = C^-1 D K_hq and u = C^-1 D (t - K_hh d0), and the moments are d0 + D C^-T (u - W q).
+    """
+    k_qq, t_q = kernel[:, :size, :size], total[:, :size]
+    if kernel.shape[-1] == size:
+        return k_qq, t_q, None
+    k_qh, k_hq, k_hh = kernel[:, :size, size:], kernel[:, size:, :size], kernel[:, size:, size:]
+    # The atoms padding a graph have no response, and no derivative of its root.
+    present = response > 0
+    root = torch.where(present, response, 1.).sqrt()*present
+    system = root[..., None]*k_hh*root[:, None, :]+torch.eye(k_hh.shape[-1], dtype=kernel.dtype, device=kernel.device)
+    factor = torch.linalg.cholesky(system)
+    drive = total[:, size:]-(k_hh@d0[..., None]).squeeze(-1)
+    solved = torch.linalg.solve_triangular(factor, root[..., None]*torch.cat((k_hq, drive[..., None]), -1), upper=False)
+    w, u = solved[..., :size], solved[..., size]
+    t_q = t_q-(k_qh@d0[..., None]).squeeze(-1)-(w.transpose(1, 2)@u[..., None]).squeeze(-1)
+    return k_qq-w.transpose(1, 2)@w, t_q, (factor, root, w, u)
+
+
+def screened_moments(charges, d0, screening):
+    """The moments of order l >= 1 at the charges, from the factors of screen_moments."""
+    factor, root, w, u = screening
+    y = torch.linalg.solve_triangular(factor.transpose(1, 2), (u-(w@charges[..., None]).squeeze(-1))[..., None],
+                                      upper=True)
+    return d0+root*y[..., 0]
+
+
+def upstream_basis(moments, max_l):
+    """The multipoles in the basis of MACE-SCF, the solid harmonics of (y, z, x)."""
+    cycle = moments.new_tensor([[0., 1., 0.], [0., 0., 1.], [1., 0., 0.]])
+    return moments@torch.block_diag(*[o3.Irrep(l, 1).D_from_matrix(cycle) for l in range(max_l+1)]).T
 
 
 def solve_charges(effective, drive, fixed, slope, bias, target, mask):
-    """The charges of the law linearized as fixed + slope (bias + phi - mu), at total charge target."""
+    """The charges of the responses linearized as fixed + slope (bias + phi - mu), at total charge target."""
     operator = torch.eye(mask.shape[-1], dtype=effective.dtype, device=effective.device)+slope[..., None]*effective
     solved = torch.linalg.solve(operator, torch.stack((fixed+slope*(bias+drive), slope), -1))
     mu = ((solved[..., 0]*mask).sum(-1)-target)/(solved[..., 1]*mask).sum(-1)
@@ -435,13 +597,13 @@ def solve_charges(effective, drive, fixed, slope, bias, target, mask):
 
 
 class PotentialResponse(ScaleShiftMACE):
-    """A MACE whose atoms carry the local law of MACE-VOLT, minimized at fixed Q, counter charge and field."""
+    """A MACE whose atoms carry the response of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 
     newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
-                 first_minimum_weight=.1, band_edge_charge=.05, **kwargs):
+                 first_minimum_weight=.1, band_edge_charge=.05, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
@@ -449,13 +611,16 @@ class PotentialResponse(ScaleShiftMACE):
         self.feature_slices = [(sl.start, sl.stop, mul, ir.l) for (mul, ir), sl in zip(irreps, irreps.slices())]
         self.layout = 'mul_ir'
         self.density_width = float(density_width)
+        # The order of the atomic multipoles (atomic_multipoles_max_l) and of the local amplitudes, by default the same.
+        self.max_l = int(max_l)
+        self.completion_max_l = self.max_l if completion_max_l is None else int(completion_max_l)
         # The local amplitudes: Gaussian potentials of the density width and twice it on every atom.
         sources = [self.density_width, 2*self.density_width] if short_range_potential else []
         receivers = [self.density_width]+sorted(set(float(w) for w in field_widths)-{self.density_width})
         self.register_buffer('source_widths', torch.tensor(sources))
         self.register_buffer('receiver_widths', torch.tensor(receivers))
         self.register_buffer('kspace_cutoff', torch.tensor(kspace_cutoff_factor*gto_basis_kspace_cutoff(
-            [self.density_width]+receivers, 1)))
+            [self.density_width]+receivers, max(self.max_l, self.completion_max_l, 1))))
         self.register_buffer('fermi_level_offset', torch.tensor(float(fermi_level_offset)))
         num_elements = len(self.atomic_numbers)
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
@@ -466,9 +631,23 @@ class PotentialResponse(ScaleShiftMACE):
         # The hole and electron charge (e per cell) at which the band edges are read.
         self.band_edge_charge = float(band_edge_charge)
         layers = int(self.num_interactions)
-        self.law = LocalLaw(layers*irreps.count('0e'), layers*irreps.count('1o'), num_elements, len(sources),
-                            len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
-                            resolution=resolution)
+        self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
+                                       len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
+                                       resolution=resolution, max_l=self.max_l,
+                                       completion_max_l=self.completion_max_l)
+
+    def __setstate__(self, state):
+        # Models saved before the renaming hold the atomic response as law.
+        if 'law' in state.get('_modules', {}):
+            state['_modules'] = type(state['_modules'])(('response' if k == 'law' else k, v)
+                                                        for k, v in state['_modules'].items())
+        super().__setstate__(state)
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        # Checkpoints saved before the renaming hold the atomic response as law.
+        for key in [k for k in state_dict if k.startswith(prefix+'law.')]:
+            state_dict[prefix+'response.'+key[len(prefix)+4:]] = state_dict.pop(key)
+        super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def __getstate__(self):
         # The replay head and its frames serve training only; a saved model is MACE-VOLT alone.
@@ -517,35 +696,41 @@ class PotentialResponse(ScaleShiftMACE):
         scalars, vectors = zip(*[self.node_features(feats) for feats in node_feats_list])
         return node_energy, torch.cat(scalars, -1), torch.cat(vectors, -2)
 
-    def minimum(self, law, kernel, completion, drive, mask, charge, start=None):
-        """The exact minimum of one law at total charge charge, from the charges and Fermi level start.
+    def minimum(self, response, space, charge, start=None):
+        """The exact minimum of the responses at total charge charge, from the charges and Fermi level start.
 
         Newton's method on the concave dual D(p, mu) = -p.Kp/2 - mu Q - sum_i A_i(b_i + v_i - (Kp)_i - mu),
-        A_i the integral of the charge law, whose maximum has p = q: each step solves the law linearized at
-        the current levels and a backtracking line search on D makes every step an ascent, so the solve
-        converges for every law. One differentiable solve at the converged levels gives the exact derivatives.
+        A_i the integral of the charge of atom i, whose maximum has p = q: each step solves the responses
+        linearized at the current levels and a backtracking line search on D makes every step an ascent, so the
+        solve converges for every response. One differentiable solve at the converged levels gives the exact
+        derivatives. The moments of order l >= 1, linear in their fields, are eliminated first (screen_moments).
         """
-        bias, dd_dE, coefficients, d0, amplitudes = law
-        effective, drive_q, dipole_map, free, applied = screen_dipoles(kernel, completion, drive, dd_dE, d0,
-                                                                       amplitudes, mask)
+        bias, dd_dE, coefficients, d0, amplitudes = response
+        mask, size, count = space.present, space.size, space.num_moments
+        kernel, drive = space.multipole_terms()
+        # The potential of the local amplitudes on the multipoles; with the drive, the field of each moment.
+        applied = moment_projection(amplitude_spectrum(amplitudes, space), space).transpose(1, 2).flatten(1)
+        orders = torch.tensor(component_orders(space.max_l)[1:], dtype=torch.long, device=mask.device)-1
+        dd_dE, d0 = dd_dE[..., orders].transpose(1, 2).flatten(1), d0.transpose(1, 2).flatten(1)
+        effective, drive_q, screening = screen_moments(kernel, applied+drive, dd_dE, d0, size)
         drive_q = drive_q*mask
         base = (bias+drive_q)*mask
 
         def dual(p, mu, kp):
             delta = (base-kp-mu[:, None])*mask
-            return -.5*(p*kp).sum(-1)-mu*charge-(self.law.energy(coefficients, delta)*mask).sum(-1)
+            return -.5*(p*kp).sum(-1)-mu*charge-(self.response.energy(coefficients, delta)*mask).sum(-1)
 
         def linearized(delta):
-            dq, n = self.law.charge(coefficients, delta)
+            dq, n = self.response.charge(coefficients, delta)
             return solve_charges(effective, drive_q, (dq-n*delta)*mask, n*mask, bias, charge, mask)
         with torch.no_grad():
-            # From the law linearized at the Fermi level, unless a start is given.
+            # From the responses linearized at the Fermi level, unless a start is given.
             p, mu = linearized(torch.zeros_like(mask)) if start is None else start
             p, mu = p.detach().clone(), mu.detach().clone()
             kp = (effective@p[..., None]).squeeze(-1)
             for steps in range(1, self.newton_steps+1):
                 delta = (base-kp-mu[:, None])*mask
-                dq = self.law.charge(coefficients, delta)[0]*mask
+                dq = self.response.charge(coefficients, delta)[0]*mask
                 target, target_mu = linearized(delta)
                 dp, dmu = target-p, target_mu-mu
                 kdp = (effective@dp[..., None]).squeeze(-1)
@@ -568,49 +753,42 @@ class PotentialResponse(ScaleShiftMACE):
         delta = (base-kp-mu[:, None])*mask
         charges, mu = linearized(delta.detach())
         level = (bias+drive_q-(effective@charges[..., None]).squeeze(-1)-mu[:, None])*mask
-        dipoles = free-(dipole_map@charges[..., None]).squeeze(-1)
-        moments = torch.cat((charges[..., None], dipoles.reshape(*mask.shape, 3)), -1).flatten(1)
-        total = (applied+drive.flatten(1)-(kernel@moments[..., None]).squeeze(-1)).reshape(*mask.shape, 4)*mask[..., None]
-        state = torch.cat((moments.reshape(*mask.shape, 4), amplitudes), -1)
-        induced = (dipoles.reshape(*mask.shape, 3)-d0)*mask[..., None]
-        energy = ((charges*level-self.law.energy(coefficients, level)-bias*charges).sum(-1)
-                  + .5*(induced*total[..., 1:4]).sum((-1, -2))-(moments*applied).sum(-1))
+        moments = charges if screening is None else torch.cat((charges, screened_moments(charges, d0, screening)), -1)
+        field = applied+drive-(kernel@moments[..., None]).squeeze(-1)
+        energy = ((charges*level-self.response.energy(coefficients, level)-bias*charges).sum(-1)
+                  + .5*((moments[:, size:]-d0)*field[:, size:]).sum(-1)-(moments*applied).sum(-1))
+        state = torch.cat((moments.reshape(len(mask), count, size).transpose(1, 2), amplitudes), -1)
         return state, energy, mu, (charges.detach(), mu.detach())
 
-    def solve(self, data, cell, positions, scalars, vectors, charge):
-        """The minima of the law: the state of the multipoles and amplitudes, the local energy and mu of each.
+    def solve(self, data, space, positions, scalars, vectors, charge):
+        """The minima of the energy: the state of the multipoles and amplitudes, the local energy and mu of each.
 
-        A fixed point has two, the minimum of the law of the geometry and the final one at the law read there.
+        A fixed point has two, the minimum with the response of the geometry and the final one with the response
+        read there.
         """
-        mask, sigma = cell.present, self.density_width
-        chemical, vector = self.law.features(cell.pack(scalars), cell.pack(vectors))
-        law = self.law(chemical, vector, cell.attrs, mask)
-        kernel, completion = moment_kernels(cell.tensors, cell.kernels, mask, sigma, cell.slab_factor)
-        values, field = sample_spectrum(cell.counter_coulomb, cell.tensors)
-        slope = cell.field-cell.slab_factor*cell.counter_moment
-        values = values[..., 0]+slope[:, None]*cell.tensors[9]
-        field = field[..., 0, :]-slope[:, None, None]*cell.normal[:, None, :]
-        drive = torch.cat((values[..., None], -sigma*field), -1)*mask[..., None]
-        state, energy, mu, start = self.minimum(law, kernel, completion, drive, mask, charge)
+        mask = space.present
+        chemical, vector = self.response.features(space.pack(scalars), space.pack(vectors))
+        response = self.response(chemical, vector, space.attrs, mask)
+        state, energy, mu, start = self.minimum(response, space, charge)
         minima = [(state, energy, mu)]
         if self.fixed_point:
-            transport = neighbour_transport(positions, data['edge_index'], data['shifts'], cell.batch, cell.slot,
-                                            len(cell.counts), cell.size, float(self.r_max),
+            transport = neighbour_transport(positions, data['edge_index'], data['shifts'], space.batch, space.slot,
+                                            len(space.counts), space.size, float(self.r_max),
                                             float(self.receiver_widths.max()))
-            potential, sampled = sample_spectrum(total_spectrum(state, cell.tensors, cell.kernels, sigma, cell.fixed),
-                                                 cell.tensors)
-            levels = (law[0][..., None]+potential-mu[:, None, None])*mask[..., None]
+            sampled = sample_spectrum(total_spectrum(state, space), space, 1)
+            potential, sampled = sampled[..., 0], sampled[..., 1:]
+            levels = (response[0][..., None]+potential-mu[:, None, None])*mask[..., None]
             c = levels.shape[-1]
             messages = torch.bmm(transport, torch.cat((levels, sampled.flatten(-2)), -1))
-            messages = messages.reshape(len(cell.counts), 4, cell.size, 4*c)
+            messages = messages.reshape(len(space.counts), 4, space.size, 4*c)
             radial, directional = messages[:, 0], messages[:, 1:]
-            divergence = directional[..., c:].reshape(len(cell.counts), 3, cell.size, c, 3).diagonal(
+            divergence = directional[..., c:].reshape(len(space.counts), 3, space.size, c, 3).diagonal(
                 dim1=1, dim2=4).sum(-1)
             read = (torch.cat((levels, radial[..., :c], divergence), -1),
                     torch.cat((sampled, radial[..., c:].reshape_as(sampled), directional[..., :c].permute(0, 2, 3, 1)),
                               -2))
-            law = self.law(chemical, vector, cell.attrs, mask, state=read)
-            minima.append(self.minimum(law, kernel, completion, drive, mask, charge, start=start)[:3])
+            response = self.response(chemical, vector, space.attrs, mask, state=read)
+            minima.append(self.minimum(response, space, charge, start=start)[:3])
         return minima
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
@@ -627,22 +805,23 @@ class PotentialResponse(ScaleShiftMACE):
             ctx = prepare_graph(data)
             positions = ctx.positions
             node_energy, scalars, vectors = self.backbone(data, ctx)
-            cell = Cell(self, data, positions)
-            minima = self.solve(data, cell, positions, scalars, vectors, charge.to(cell.volume))
+            space = FourierSpace(self, data, positions)
+            minima = self.solve(data, space, positions, scalars, vectors, charge.to(space.volume))
             state, response_energy, _ = minima[-1]
-            electrostatic, observed = self.observe(cell, state, positions, charge)
-            energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(cell.counts))
+            electrostatic, observed = self.observe(space, state, positions, charge)
+            energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(space.counts))
             energy = energy+electrostatic+response_energy
             inputs = [charge, counter, positions] if compute_force else [charge, counter]
             gradients = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True)
             first = None
             if training and len(minima) > 1 and getattr(self, 'first_minimum_weight', 0.) > 0:
-                # The first minimum of a fixed point, at the law of the geometry, answers to the same electronic
-                # labels: its law stays a law of the data, and the read learns how the law responds to the field.
+                # The first minimum of a fixed point, with the response of the geometry, answers to the same
+                # electronic labels: that response stays one of the data, and the read learns how it changes with
+                # the field.
                 # Its Fermi level is -dE/dQ of that minimum, from the multiplier of its total charge.
                 state, _, mu = minima[0]
-                first = {**self.observe(cell, state, positions, charge)[1],
-                         'fermi_level': mu+self.fermi_level_offset+cell.vacuum_reference,
+                first = {**self.observe(space, state, positions, charge)[1],
+                         'fermi_level': mu+self.fermi_level_offset+space.vacuum_reference,
                          'weight': self.first_minimum_weight}
         forces = None
         if compute_force:
@@ -658,63 +837,64 @@ class PotentialResponse(ScaleShiftMACE):
             **observed,
             'fermi_level': fermi_level,
             'cell_voltage': cell_voltage,
-            'k_vectors': cell.wave,
-            'k_vectors_mask': cell.mask,
-            'k_vectors_grid_shape': torch.tensor(cell.shape, device=positions.device),
+            'k_vectors': space.wave,
+            'k_vectors_mask': space.mask,
+            'k_vectors_grid_shape': torch.tensor(space.shape, device=positions.device),
         }
         for key in ('fourier_density', 'fourier_potential'):
             if data.get(key) is not None and data[key].numel():
-                output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], cell.shape).to(positions)
-                output[key+'_dft_mask'] = (cell.modes[None].abs() <= torch.div(
+                output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], space.shape).to(positions)
+                output[key+'_dft_mask'] = (space.modes[None].abs() <= torch.div(
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
         if first is not None:
             output['first_minimum'] = first
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are Fermi levels of the same energy at a small hole and electron charge: the valence
-            # band maximum at Q + delta and the conduction band minimum at Q - delta. With the law of the geometry
+            # band maximum at Q + delta and the conduction band minimum at Q - delta. With the response of the geometry
             # the multiplier of each minimum is -dE/dQ there exactly; a fixed point takes the multiplier of its
-            # final minimum, at the law read from its own first minimum.
+            # final minimum, with the response read at its own first minimum.
             delta = getattr(self, 'band_edge_charge', .05)
-            edges = [self.solve(data, cell, positions, scalars, vectors, charge.to(cell.volume)+s*delta)[-1][2]
-                     + self.fermi_level_offset+cell.vacuum_reference for s in (1., -1.)]
+            edges = [self.solve(data, space, positions, scalars, vectors, charge.to(space.volume)+s*delta)[-1][2]
+                     + self.fermi_level_offset+space.vacuum_reference for s in (1., -1.)]
             output.update(valence_band_maximum=edges[0], conduction_band_minimum=edges[1], band_gap=edges[1]-edges[0])
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
 
-    def observe(self, cell, state, positions, charge):
+    def observe(self, space, state, positions, charge):
         """The electrostatic energy of a state, and its multipoles, dipole, vacuum potential and Fourier fields.
 
         The raw Fourier density and potential: the Gaussian smoothing of the charges and amplitudes is undone,
         the counter charge keeps its width and the boundary sawtooth is sharp.
         """
-        sigma = self.density_width
-        moments = torch.cat((state[..., :1], state[..., 1:4]*sigma), -1)
-        carrier, regular = (cell.expand(x) for x in coefficient_contributions(state, cell.tensors, cell.kernels))
+        sigma, count = self.density_width, space.num_moments
+        moments = state[..., :count]*state.new_tensor([sigma**l for l in component_orders(space.max_l)])
+        carrier, regular = (space.expand(x) for x in coefficient_contributions(state, space))
         total_charge = state[..., 0].sum(-1)
-        coarse = carrier/torch.where(cell.coulomb > 0, -cell.coulomb, 1.)[..., None]
-        coarse = coarse+torch.stack(((cell.k2 == 0)*(total_charge/cell.volume)[:, None], torch.zeros_like(cell.k2)),
+        coarse = carrier/torch.where(space.coulomb > 0, -space.coulomb, 1.)[..., None]
+        coarse = coarse+torch.stack(((space.k2 == 0)*(total_charge/space.volume)[:, None], torch.zeros_like(space.k2)),
                                     -1)
-        dipole = (moments[..., :1]*(cell.pack(positions)-cell.origin[:, None])+moments[..., 1:4]).sum(1)
-        normal_dipole = (dipole*cell.normal).sum(-1)
-        deformation = cell.coulomb*torch.view_as_complex(coarse.contiguous())-torch.view_as_complex(
+        dipole = moments[..., :1]*(space.pack(positions)-space.origin[:, None])
+        dipole = (dipole+moments[..., 1:4] if count > 1 else dipole).sum(1)
+        normal_dipole = (dipole*space.normal).sum(-1)
+        deformation = space.coulomb*torch.view_as_complex(coarse.contiguous())-torch.view_as_complex(
             regular.contiguous())
-        counter_energy = (cell.volume*(cell.counter_density.conj()*deformation).real.sum(-1)
-                          + cell.slab_factor*normal_dipole*cell.counter_moment+cell.counter_energy)
-        electrostatic = (.5*cell.volume*(coarse.square().sum(-1)*cell.coulomb).sum(-1)
-                         + .5*cell.slab_factor*normal_dipole.square()-(dipole*cell.external).sum(-1)
-                         + counter_energy-(self.fermi_level_offset+cell.vacuum_reference)*charge)
-        smooth = torch.where(cell.mask, torch.exp(-.5*sigma**2*cell.k2), 1.)
-        boundary = cell.field-cell.slab_factor*(normal_dipole+cell.counter_moment)
-        potential = (torch.view_as_complex((carrier+regular).contiguous())/smooth-cell.coulomb*cell.counter_density
-                     + cell.ramp(boundary, width=0.))
+        counter_energy = (space.volume*(space.counter_density.conj()*deformation).real.sum(-1)
+                          + space.slab_factor*normal_dipole*space.counter_moment+space.counter_energy)
+        electrostatic = (.5*space.volume*(coarse.square().sum(-1)*space.coulomb).sum(-1)
+                         + .5*space.slab_factor*normal_dipole.square()-(dipole*space.external).sum(-1)
+                         + counter_energy-(self.fermi_level_offset+space.vacuum_reference)*charge)
+        smooth = torch.where(space.mask, torch.exp(-.5*sigma**2*space.k2), 1.)
+        boundary = space.field-space.slab_factor*(normal_dipole+space.counter_moment)
+        potential = (torch.view_as_complex((carrier+regular).contiguous())/smooth-space.coulomb*space.counter_density
+                     + space.ramp(boundary, width=0.))
         return electrostatic, {
-            'density_coefficients': cell.unpack(moments)[..., [0, 2, 3, 1]],
+            'density_coefficients': space.unpack(upstream_basis(moments, space.max_l)),
             'dipole': dipole,
-            'vacuum_potential': cell.vacuum_level(state, self.law.num_sources),
-            'fourier_density': coarse/smooth[..., None]*cell.ngrid,
-            'fourier_potential': torch.view_as_real(potential)*cell.ngrid,
+            'vacuum_potential': space.vacuum_level(state, self.response.num_sources),
+            'fourier_density': coarse/smooth[..., None]*space.ngrid,
+            'fourier_potential': torch.view_as_real(potential)*space.ngrid,
         }
 
 
@@ -799,7 +979,7 @@ def hats(k2, cutoff, knots):
 
 @torch.no_grad()
 def initialize_potential_response(model, args, train_loader, device):
-    """The neutral atoms of the reference calculations and the feature units of the law, from training data."""
+    """The neutral atoms of the reference calculations and the feature units of the response, from training data."""
     key = next(iter(args.heads.values()))['info_keys'].get('fourier_proto_potential')
     if key is not None:
         frames = []
@@ -813,7 +993,8 @@ def initialize_potential_response(model, args, train_loader, device):
             model.vacuum_reference_integrals[i] = -integrals.get(z, 0.)
             if z in rows:
                 model.neutral_atom_form_factors[i] = torch.as_tensor(rows[z])
-    scalar, vector, count = torch.zeros_like(model.law.scalar_unit), torch.zeros_like(model.law.vector_unit), 0.
+    scalar, vector, count = (torch.zeros_like(model.response.scalar_unit),
+                             torch.zeros_like(model.response.vector_unit), 0.)
     for i, batch in enumerate(train_loader):
         if i*train_loader.batch_size >= 64:
             break
@@ -821,11 +1002,12 @@ def initialize_potential_response(model, args, train_loader, device):
         with torch.enable_grad():
             ctx = prepare_graph(data)
             _, scalars, vectors = model.backbone(data, ctx)
+        scalars, vectors = model.response.mix(scalars, vectors)
         scalar += torch.asinh(scalars).square().sum(0)
         vector += vectors.square().mean(-1).sum(0)
         count += len(scalars)
-    model.law.scalar_unit.copy_((1.+scalar/count).sqrt())
-    model.law.vector_unit.copy_((1.+vector/count).sqrt())
+    model.response.scalar_unit.copy_((1.+scalar/count).sqrt())
+    model.response.vector_unit.copy_((1.+vector/count).sqrt())
 
 
 # The smearing widths (A) at which validation reports the Fourier errors: raw, the density width and the far field.

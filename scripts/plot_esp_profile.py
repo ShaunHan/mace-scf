@@ -17,6 +17,8 @@ FRAME_INDEXES = list(range(10, 20))
 DEVICE = 'cuda:0'
 POTENTIAL_KEY, PROTO_KEY, FERMI_KEY = 'vasp_phi_fftn_shifted', 'vasp_proto_phi_fftn_shifted', 'vasp_efermi'
 VACUUM_KEY = 'vasp_vacuum_potential'
+# The planes of the collected frames, mapped as in the training configs.
+INFO_KEYS = {'dipole_correction_fraction': 'dipole_correction_zfrac', 'counter_charge_fraction': 'counter_charge_zfrac'}
 OUTPUT_DIR, DPI = Path('esp_profiles'), 300
 
 
@@ -142,7 +144,7 @@ def plot_frame(atoms, calculator, index):
 
 
 def main():
-    calculator = MACEPotentialResponse(model_path=MODEL_FILE, device=DEVICE)
+    calculator = MACEPotentialResponse(model_path=MODEL_FILE, device=DEVICE, info_keys=INFO_KEYS)
     frames = read(ATOMS_FILE, index=':')
     for index in FRAME_INDEXES:
         plot_frame(frames[index], calculator, index)

@@ -26,7 +26,9 @@ OXYGEN_PAIRS = {}                               # Optional {index: (O_id, O_id)}
 MAX_WORKERS, REPLICAS = len(RUN_INDEXES), 1     # Workers share one visible GPU.
 DEVICE, ENABLE_CUEQ = 'cuda:0', True
 TARGET_U_SHE = 1.60                             # V vs SHE: <WF> = 4.44 eV + e U*.
-SHEET_HEIGHT, SHEET_WIDTH = 6.0, 1.0            # A above the electrode surface, Gaussian sigma.
+# The dipole correction plane and the counter charge sheet, as fractions along the slab's non-periodic axis
+# (None takes them from each frame), and the Gaussian sigma of the sheet in A.
+DIPOLE_CORRECTION_FRACTION, COUNTER_CHARGE_FRACTION, COUNTER_CHARGE_WIDTH = None, None, 1.0
 CAPACITANCE, TAUPHI_FS = 0.05, 100.0            # C0 (e/V, whole cell) and tau set only the charge relaxation.
 FIXED_DEPTH, WALL_GAP, WALL_K = 6.5, 3.0, 10.0  # A, A, eV/A^2.
 O2_BOND, PAIR_CUTOFF = 1.60, 3.50               # A: an existing O2; adsorbate O to free O.
@@ -39,10 +41,10 @@ TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300.0, 0.5, 0.01
 LOGINTERVAL, SEED = 20, 7777                    # 10 fs records; stage lengths are multiples of it.
 MAX_CHARGE_E, MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1.0, 1000.0, 100.0
 # -------------------------------------------------------------------------- #
-PHYSICAL = ('TARGET_U_SHE SHEET_HEIGHT SHEET_WIDTH CAPACITANCE TAUPHI_FS FIXED_DEPTH WALL_GAP '
-            'WALL_K O2_BOND PAIR_CUTOFF R_MIN R_MAX WINDOW_SPACING UMBRELLA_K RELAX_STEPS ALIGN_STEPS '
-            'ALIGNMENT_CONSTANT_FS EQUIL_STEPS SAMPLE_STEPS TEMPERATURE_K TIMESTEP_FS FRICTION_PER_FS '
-            'LOGINTERVAL SEED').split()
+PHYSICAL = ('TARGET_U_SHE DIPOLE_CORRECTION_FRACTION COUNTER_CHARGE_FRACTION COUNTER_CHARGE_WIDTH CAPACITANCE '
+            'TAUPHI_FS FIXED_DEPTH WALL_GAP WALL_K O2_BOND PAIR_CUTOFF R_MIN R_MAX WINDOW_SPACING UMBRELLA_K '
+            'RELAX_STEPS ALIGN_STEPS ALIGNMENT_CONSTANT_FS EQUIL_STEPS SAMPLE_STEPS TEMPERATURE_K TIMESTEP_FS '
+            'FRICTION_PER_FS LOGINTERVAL SEED').split()
 
 
 def plain(value):
@@ -63,11 +65,28 @@ def write_json(path, value):
     os.replace(temporary, path)
 
 
+def plane(source, name, value):
+    """A plane of the slab as a fraction along its non-periodic axis: the setting, else the frame's name or the
+    collector's key of that axis."""
+    letter = 'xyz'[int(np.flatnonzero(~source.pbc)[0])]
+    for candidate in (value, source.info.get(name), source.info.get(name.replace('_fraction', f'_{letter}frac'))):
+        if candidate is not None:
+            return float(candidate)
+    raise ValueError(f"Set {name.upper()} or give {name} in the frame's info")
+
+
+def open_axis(atoms):
+    """The non-periodic axis of the slab, the unit normal of its periodic plane and the cell height along it."""
+    axis = int(np.flatnonzero(~atoms.pbc)[0])
+    normal = np.cross(*np.delete(atoms.cell.array, axis, axis=0))
+    normal = normal*np.sign(atoms.cell[axis]@normal)/np.linalg.norm(normal)
+    return axis, normal, float(atoms.cell[axis]@normal)
+
+
 def continuous(source):
     """The slab continuous across its largest vacuum gap along its non-periodic axis."""
-    from mace_scf.calculators.potential_response import slab_axis
     atoms = source.copy()
-    axis = slab_axis(atoms)[0]
+    axis = open_axis(atoms)[0]
     atoms.calc = None
     atoms.set_constraint()
     f = atoms.get_scaled_positions(wrap=False)[:, axis]
@@ -110,18 +129,19 @@ def select_pair(atoms, index, mobile, height):
 
 
 def prepare(source, index):
-    """Atoms at Q = 0 with the planes from geometry; fixed atoms, wall height and O-O pair."""
-    from mace_scf.calculators.potential_response import slab_axis, slab_controls
+    """Atoms at Q = 0 with the dipole correction plane and the sheet; fixed atoms, wall height and O-O pair."""
     atoms = continuous(source)
-    _, normal, length = slab_axis(atoms)
+    _, normal, length = open_axis(atoms)
     z = atoms.positions@normal
     if length-np.ptp(z) < 12.:
         raise ValueError(f'{index}: only {length-np.ptp(z):.1f} A of vacuum')
     fixed = [int(i) for i in np.flatnonzero(z < z.min()+FIXED_DEPTH)]
     mobile = [int(o) for o in np.flatnonzero(atoms.numbers == 8) if o not in set(fixed)]
     pair, kind = select_pair(atoms, index, mobile, z)
-    atoms.info = dict(total_charge=0., counter_charge=0.,
-                      **slab_controls(atoms, sheet_height=SHEET_HEIGHT, sheet_width=SHEET_WIDTH))
+    cut = plane(source, 'dipole_correction_fraction', DIPOLE_CORRECTION_FRACTION)
+    sheet = plane(source, 'counter_charge_fraction', COUNTER_CHARGE_FRACTION)
+    atoms.info = dict(total_charge=0., counter_charge=0., counter_charge_width=COUNTER_CHARGE_WIDTH,
+                      dipole_correction_fraction=cut, counter_charge_fraction=sheet)
     return atoms, fixed, mobile, float(z[mobile].max()+WALL_GAP), pair, kind
 
 
@@ -174,7 +194,6 @@ def make_calculator(model_file):
     from mace_scf.calculators.potential_response import MACEPotentialResponse
     torch.set_num_threads(1)
     return MACEPotentialResponse(model_path=model_file, device=DEVICE, default_dtype='float64', constant_potential=True,
-                                 counter_charge_height=SHEET_HEIGHT, counter_charge_width=SHEET_WIDTH,
                                  enable_cueq=ENABLE_CUEQ)
 
 
@@ -197,7 +216,6 @@ def charge_check(atoms, dq=2.e-3):
 
 
 def simulate(source, index, replica, model_file, model_sha, directory):
-    from mace_scf.calculators.potential_response import slab_axis
     from mace_scf.md import NVTPhiLangevin
     atoms, fixed, mobile, wall, pair, kind = prepare(source, index)
     stages = make_stages(atoms.get_distance(*pair, mic=True))
@@ -245,7 +263,7 @@ def simulate(source, index, replica, model_file, model_sha, directory):
                 writer.writeheader()
                 writer.writerows(kept)
     bias = DistanceUmbrella(pair, stages[min(stage_id, len(stages)-1)]['center_A'], UMBRELLA_K)
-    walls = [Hookean(a1=o, a2=(*slab_axis(atoms)[1], -wall), k=WALL_K) for o in mobile]
+    walls = [Hookean(a1=o, a2=(*open_axis(atoms)[1], -wall), k=WALL_K) for o in mobile]
     atoms.set_constraint([bias, FixAtoms(indices=fixed)]+walls)
     atoms.calc = make_calculator(model_file)
     if state is None:
@@ -332,18 +350,16 @@ def run_one(source, index, replica, model_file, model_sha, directory):
 
 
 def main():
-    from mace_scf.calculators.potential_response import slab_axis
     frames = read(ATOMS_FILE, index=':')
     indexes = list(RUN_INDEXES)
     if not indexes or len(set(indexes)) != len(indexes) or not set(indexes) <= set(range(len(frames))):
         raise ValueError('RUN_INDEXES must list distinct frames of ATOMS_FILE')
     for index in indexes:
         atoms, _, _, wall, pair, kind = prepare(frames[index], index)
-        letter = 'xyz'[slab_axis(atoms)[0]]
         stages = make_stages(atoms.get_distance(*pair, mic=True))
         print(f'{index}: {kind} pair {pair} at {atoms.get_distance(*pair, mic=True):.2f} A, {stages[-1]["stage"]} '
               f'over {stages[-1]["window"]+1} windows, {sum(s["steps"] for s in stages)*TIMESTEP_FS/1000:.1f} ps; '
-              f'sheet {letter}frac {atoms.info[f"counter_charge_{letter}frac"]:.3f}, wall {wall:.1f} A', flush=True)
+              f'sheet at fraction {atoms.info["counter_charge_fraction"]:.3f}, wall {wall:.1f} A', flush=True)
     model = Path(MODEL_FILE).resolve(strict=True)
     model_sha, failures = sha256(model), []
     with ProcessPoolExecutor(max_workers=min(MAX_WORKERS, len(indexes)*REPLICAS),

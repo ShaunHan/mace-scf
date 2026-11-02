@@ -11,8 +11,11 @@ ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0_best_wf_final.model"
 TARGET_U_SHE = 1.60           # V vs SHE: imposes <WF> = 4.44 eV + 1.60 eV.
 SHE_OFFSET = None             # <Delta> in V from an earlier run; None aligns it online.
-SHEET_HEIGHT = 6.0            # Angstrom above the electrode surface, inside the water.
-SHEET_WIDTH = 1.0             # Gaussian sigma in Angstrom.
+# The dipole correction plane and the counter charge sheet, as fractions along the slab's non-periodic axis;
+# None takes them from the frame.
+DIPOLE_CORRECTION_FRACTION = None
+COUNTER_CHARGE_FRACTION = None
+COUNTER_CHARGE_WIDTH = 1.0    # Gaussian sigma of the sheet in Angstrom.
 RELAX_FS = 500.0              # At Q = 0 first.
 ALIGN_FS = 1500.0             # Then aligning <Delta> at constant potential.
 ALIGNMENT_CONSTANT_FS = 250.0 # Memory of the online <Delta>.
@@ -32,20 +35,28 @@ LOGFILE = "nvtphi.log"
 LOGINTERVAL = 10
 # -------------------------------------------------------------------------- #
 
+def plane(source, name, value):
+    """A plane of the slab as a fraction along its non-periodic axis: the setting, else the frame's name or the
+    collector's key of that axis."""
+    letter = "xyz"[int(np.flatnonzero(~source.pbc)[0])]
+    for candidate in (value, source.info.get(name), source.info.get(name.replace("_fraction", f"_{letter}frac"))):
+        if candidate is not None:
+            return float(candidate)
+    raise ValueError(f"Set {name.upper()} or give {name} in the frame's info")
+
+
 def prepare_frame(source):
-    """The slab at Q = 0, keeping any planes the frame already fixes along its non-periodic axis."""
-    from mace_scf.calculators.potential_response import slab_axis
+    """The slab at Q = 0 with its dipole correction plane and counter charge sheet."""
     atoms = source.copy()
-    letter = "xyz"[slab_axis(atoms)[0]]
     atoms.calc = None
-    keys = (f"counter_charge_{letter}frac", "counter_charge_width", f"dipole_correction_{letter}frac")
-    atoms.info = {"total_charge": 0., "counter_charge": 0.,
-                  **{key: float(source.info[key]) for key in keys if source.info.get(key) is not None}}
+    atoms.info = {"total_charge": 0., "counter_charge": 0., "counter_charge_width": COUNTER_CHARGE_WIDTH,
+                  "dipole_correction_fraction": plane(source, "dipole_correction_fraction", DIPOLE_CORRECTION_FRACTION),
+                  "counter_charge_fraction": plane(source, "counter_charge_fraction", COUNTER_CHARGE_FRACTION)}
     return atoms
 
 
 def main() -> None:
-    from mace_scf.calculators.potential_response import MACEPotentialResponse, slab_axis
+    from mace_scf.calculators.potential_response import MACEPotentialResponse
     from mace_scf.md import NVTPhiLangevin
 
     for path in (ATOMS_FILE, MODEL_FILE):
@@ -54,8 +65,7 @@ def main() -> None:
     rng = np.random.default_rng(SEED)
     atoms = prepare_frame(read(ATOMS_FILE, index=-1))
     atoms.calc = MACEPotentialResponse(model_path=MODEL_FILE, device=DEVICE, default_dtype="float64",
-                                       constant_potential=True, counter_charge_height=SHEET_HEIGHT,
-                                       counter_charge_width=SHEET_WIDTH)
+                                       constant_potential=True)
     MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=rng)
     Stationary(atoms)
     ZeroRotation(atoms)
@@ -66,12 +76,11 @@ def main() -> None:
                          alignment_constant=ALIGNMENT_CONSTANT_FS*units.fs, C0=CAPACITANCE,
                          tauphi=TAUPHI_FS*units.fs, trajectory=TRAJECTORY, logfile=LOGFILE,
                          loginterval=LOGINTERVAL, rng=rng)
-    axis, _, length = slab_axis(atoms)
-    letter = "xyz"[axis]
-    cut, sheet = atoms.info[f"dipole_correction_{letter}frac"], atoms.info[f"counter_charge_{letter}frac"]
-    z = ((atoms.get_scaled_positions(wrap=True)[:, axis]-cut) % 1.)*length
-    print(f"Heights above the dipole cut (L = {length:.2f} A): atoms {z.min():.2f}..{z.max():.2f}, sheet "
-          f"{((sheet-cut) % 1.)*length:.2f}")
+    axis = int(np.flatnonzero(~atoms.pbc)[0])
+    cut, sheet = atoms.info["dipole_correction_fraction"], atoms.info["counter_charge_fraction"]
+    z = (atoms.get_scaled_positions(wrap=True)[:, axis]-cut) % 1.
+    print(f"Fractions above the dipole correction plane: atoms {z.min():.3f}..{z.max():.3f}, sheet "
+          f"{(sheet-cut) % 1.:.3f}")
 
     def status() -> None:
         r, q = atoms.calc.results, dyn.electrode_charge
