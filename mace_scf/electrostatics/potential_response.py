@@ -554,9 +554,11 @@ def screen_moments(kernel, total, response, d0, size):
     """Eliminate the moments of order l >= 1, linear in their fields: the screened kernel and drive of the charges.
 
     The moments are h = d0 + R (t - K_hq q - K_hh h), with R the dd_dE of their order and t their drive. With
-    h = d0 + D y and D = R^1/2, y solves the positive definite (1 + D K_hh D) y = D (t - K_hh d0 - K_hq q) of
-    Cholesky factor C. The charges then see the kernel K_qq - W^T W and the drive t_q - K_qh d0 - W^T u, with
-    W = C^-1 D K_hq and u = C^-1 D (t - K_hh d0), and the moments are d0 + D C^-T (u - W q).
+    h = d0 + D y and D = R^1/2, y solves S y = D (t - K_hh d0 - K_hq q), S = 1 + D K_hh D positive definite. One
+    solve S [Y, z] = [D K_hq, D (t - K_hh d0)] gives the charges the kernel K_qq - (D K_hq)^T Y and the drive
+    t_q - K_qh d0 - (D K_hq)^T z, and the moments d0 + D (z - Y q). The LU of torch.linalg.solve stays on
+    cuSOLVER and cuBLAS for every batch: batched triangular solves, also inside the derivative of a Cholesky
+    factor, go to MAGMA for large matrices, which fails on some GPUs.
     """
     k_qq, t_q = kernel[:, :size, :size], total[:, :size]
     if kernel.shape[-1] == size:
@@ -566,26 +568,26 @@ def screen_moments(kernel, total, response, d0, size):
     present = response > 0
     root = torch.where(present, response, 1.).sqrt()*present
     system = root[..., None]*k_hh*root[:, None, :]+torch.eye(k_hh.shape[-1], dtype=kernel.dtype, device=kernel.device)
-    factor = torch.linalg.cholesky(system)
-    drive = total[:, size:]-(k_hh@d0[..., None]).squeeze(-1)
-    solved = torch.linalg.solve_triangular(factor, root[..., None]*torch.cat((k_hq, drive[..., None]), -1), upper=False)
-    w, u = solved[..., :size], solved[..., size]
-    t_q = t_q-(k_qh@d0[..., None]).squeeze(-1)-(w.transpose(1, 2)@u[..., None]).squeeze(-1)
-    return k_qq-w.transpose(1, 2)@w, t_q, (factor, root, w, u)
+    coupling = root[..., None]*k_hq
+    drive = root*(total[:, size:]-(k_hh@d0[..., None]).squeeze(-1))
+    solved = torch.linalg.solve(system, torch.cat((coupling, drive[..., None]), -1))
+    y, z = solved[..., :size], solved[..., size]
+    t_q = t_q-(k_qh@d0[..., None]).squeeze(-1)-(coupling.transpose(1, 2)@z[..., None]).squeeze(-1)
+    return k_qq-coupling.transpose(1, 2)@y, t_q, (root, y, z)
 
 
 def screened_moments(charges, d0, screening):
-    """The moments of order l >= 1 at the charges, from the factors of screen_moments."""
-    factor, root, w, u = screening
-    y = torch.linalg.solve_triangular(factor.transpose(1, 2), (u-(w@charges[..., None]).squeeze(-1))[..., None],
-                                      upper=True)
-    return d0+root*y[..., 0]
+    """The moments of order l >= 1 at the charges, from the solve of screen_moments."""
+    root, y, z = screening
+    return d0+root*(z-(y@charges[..., None]).squeeze(-1))
 
 
 def upstream_basis(moments, max_l):
     """The multipoles in the basis of MACE-SCF, the solid harmonics of (y, z, x)."""
-    cycle = moments.new_tensor([[0., 1., 0.], [0., 0., 1.], [1., 0., 0.]])
-    return moments@torch.block_diag(*[o3.Irrep(l, 1).D_from_matrix(cycle) for l in range(max_l+1)]).T
+    # On the CPU, so that no linear algebra of e3nn runs on the GPU.
+    cycle = torch.tensor([[0., 1., 0.], [0., 0., 1.], [1., 0., 0.]], dtype=moments.dtype)
+    rotation = torch.block_diag(*[o3.Irrep(l, 1).D_from_matrix(cycle) for l in range(max_l+1)])
+    return moments@rotation.T.to(moments.device)
 
 
 def solve_charges(effective, drive, fixed, slope, bias, target, mask):
