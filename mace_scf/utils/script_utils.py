@@ -18,6 +18,7 @@ from mace.tools.tables_utils import custom_key  as mace_table_custom_key
 from mace import data
 from ..data import ExtAtomicData
 from .train import evaluate
+from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS
 
 
 
@@ -122,8 +123,8 @@ def create_error_table(
             "RMSE F / meV / A",
             "relative F RMSE %",
             "RMSE dipole / me A / atom",
-            "RMSE rho / me / A^3",
-            "RMSE ESP / mV",
+            f"RMSE rho {'/'.join(f'{w:g}' for w in REPORTED_SMEARING_WIDTHS['fourier_density'])} A / me / A^3",
+            f"RMSE ESP {'/'.join(f'{w:g}' for w in REPORTED_SMEARING_WIDTHS['fourier_potential'])} A / mV",
             "RMSE EF / meV",
             "RMSE WF / meV",
         ]
@@ -173,9 +174,7 @@ def create_error_table(
             "rmse_polarizability_per_atom",
             "rmse_fermi_level",
             "rmse_workfunction",
-            "rmse_fourier_density",
-            "rmse_fourier_potential",
-        ]
+        ] + [f"rmse_{key}_{w:g}A" for key, widths in REPORTED_SMEARING_WIDTHS.items() for w in widths]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
                 metrics[metric_name] = "not found"
@@ -267,8 +266,8 @@ def create_error_table(
                     metrics['rmse_f'],
                     metrics['rel_rmse_f'],
                     metrics['rmse_mu_per_atom'],
-                    metrics['rmse_fourier_density'],
-                    metrics['rmse_fourier_potential'],
+                    "/".join(metrics[f"rmse_fourier_density_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_density"]),
+                    "/".join(metrics[f"rmse_fourier_potential_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_potential"]),
                     metrics['rmse_fermi_level'],
                     metrics['rmse_workfunction'],
                 ]

@@ -12,9 +12,9 @@ from mace.modules.loss import (
 )
 from .utils import compute_effective_index
 from .potential_response import (
+    FourierDensityError,
+    FourierPotentialError,
     replay_loss,
-    weighted_mean_squared_error_fourier_density,
-    weighted_mean_squared_error_fourier_potential,
     weighted_mean_squared_error_workfunction,
 )
 import logging
@@ -269,8 +269,8 @@ _LOSS_FUNCTIONS = {
     "final_terms_fixedpoint_scf_stability": final_terms_fixedpoint_scf_stability,
     "field_features": weighted_mean_squared_error_field_feats,
     "workfunction": weighted_mean_squared_error_workfunction,
-    "fourier_density": weighted_mean_squared_error_fourier_density,
-    "fourier_potential": weighted_mean_squared_error_fourier_potential,
+    "fourier_density": FourierDensityError,
+    "fourier_potential": FourierPotentialError,
     "replay": replay_loss,
 }
 
@@ -288,7 +288,7 @@ class WeightedLoss(torch.nn.Module):
             if not name in _LOSS_FUNCTIONS:
                 raise ValueError(f"requested `{name}` in loss, which is not recognised")
             self.loss_weights[name] = options["weight"]
-            if len(options) > 1:
+            if len(options) > 1 or isinstance(_LOSS_FUNCTIONS[name], type):
                 options.pop("weight")
                 self.loss_fns[name] = _LOSS_FUNCTIONS[name](**options)
             else:
@@ -314,4 +314,6 @@ class WeightedLoss(torch.nn.Module):
         string = f"{self.__class__.__name__}("
         for name in self.loss_fns:
             string += f"{name}_weight={self.loss_weights[name]}, "
+            if hasattr(self.loss_fns[name], "smearing_widths"):
+                string += f"{name}_smearing_widths={self.loss_fns[name].smearing_widths}, "
         return string + ")"

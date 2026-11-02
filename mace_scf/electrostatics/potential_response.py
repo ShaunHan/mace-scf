@@ -1,3 +1,4 @@
+import ast
 import logging
 import math
 
@@ -646,13 +647,12 @@ class PotentialResponse(ScaleShiftMACE):
         # dE/dQ along Q_cc = -Q, the voltage between the electrode and the counter charge
         cell_voltage = -fermi_level-(gradients[1] if gradients[1] is not None else torch.zeros_like(fermi_level))
         workfunction = cell.vacuum_level(state, self.law.num_sources)-fermi_level
-        # The Fourier density and potential undo the Gaussian smoothing of the charges and amplitudes.
-        smooth = torch.exp(-.5*sigma**2*cell.k2)
-        learned = torch.view_as_complex((carrier+regular).contiguous())
+        # The raw Fourier density and potential: the Gaussian smoothing of the charges and amplitudes is undone,
+        # the counter charge keeps its width and the boundary sawtooth is sharp.
+        smooth = torch.where(cell.mask, torch.exp(-.5*sigma**2*cell.k2), 1.)
         boundary = cell.field-cell.slab_factor*(normal_dipole+cell.counter_moment)
-        raw = learned/torch.where(cell.mask, smooth, 1.)-cell.coulomb*cell.counter_density
-        prescribed = cell.ramp(boundary, width=0.)-cell.coulomb*cell.counter_density
-        farfield = torch.exp(-.5*(self.receiver_widths.max()**2-sigma**2)*cell.k2)[..., None]
+        potential = (torch.view_as_complex((carrier+regular).contiguous())/smooth-cell.coulomb*cell.counter_density
+                     + cell.ramp(boundary, width=0.))
         output = {
             'energy': energy,
             'forces': forces,
@@ -663,9 +663,8 @@ class PotentialResponse(ScaleShiftMACE):
             'fermi_level': fermi_level,
             'workfunction': workfunction,
             'cell_voltage': cell_voltage,
-            'fourier_farfield_density': coarse*farfield*cell.ngrid,
-            'fourier_potential': torch.view_as_real(raw+cell.ramp(boundary, width=0.))*cell.ngrid,
-            'smooth_fourier_potential': torch.view_as_real(learned+prescribed*smooth)*cell.ngrid,
+            'fourier_density': coarse/smooth[..., None]*cell.ngrid,
+            'fourier_potential': torch.view_as_real(potential)*cell.ngrid,
             'k_vectors': cell.wave,
             'k_vectors_mask': cell.mask,
             'k_vectors_grid_shape': torch.tensor(cell.shape, device=positions.device),
@@ -675,11 +674,6 @@ class PotentialResponse(ScaleShiftMACE):
                 output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], cell.shape).to(positions)
                 output[key+'_dft_mask'] = (cell.modes[None].abs() <= torch.div(
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
-        if 'fourier_density_dft' in output:
-            output['fourier_farfield_density_dft'] = output['fourier_density_dft']*farfield/torch.exp(
-                .5*sigma**2*cell.k2)[..., None]
-        if 'fourier_potential_dft' in output:
-            output['smooth_fourier_potential_dft'] = output['fourier_potential_dft']*smooth[..., None]
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
@@ -795,28 +789,54 @@ def initialize_potential_response(model, args, train_loader, device):
     model.law.vector_unit.copy_((1.+vector/count).sqrt())
 
 
-def spectral_errors(ref, pred, key):
-    """Parseval mean square of a Fourier prediction minus its label; potentials modulo a constant."""
-    label = 'fourier_potential' if key.endswith('potential') else 'fourier_density'
-    weights = ref.weight*getattr(ref, label+'_weight')
+# The smearing widths (A) at which validation reports the Fourier errors: raw, the density width and the far field.
+REPORTED_SMEARING_WIDTHS = {'fourier_density': (0., 1.5, 3.), 'fourier_potential': (0., 1.5)}
+
+
+def spectral_errors(ref, pred, key, width=0.):
+    """Parseval mean square of a Fourier prediction minus its label, both smeared by a Gaussian of width (A).
+
+    Width zero compares the raw fields; potentials are compared modulo a constant.
+    """
+    weights = ref.weight*getattr(ref, key+'_weight')
     if pred.get(key+'_dft') is None:
         return weights*0.
-    active = pred['k_vectors_mask'] & pred[label+'_dft_mask'] & (weights > 0)[:, None]
-    if label == 'fourier_potential':
-        active = active & (pred['k_vectors'].square().sum(-1) > 0)
-    difference = torch.where(active[..., None], pred[key]-pred[key+'_dft'], 0.)
+    k2 = pred['k_vectors'].square().sum(-1)
+    active = pred['k_vectors_mask'] & pred[key+'_dft_mask'] & (weights > 0)[:, None]
+    if key == 'fourier_potential':
+        active = active & (k2 > 0)
+    difference = torch.where(active[..., None], (pred[key]-pred[key+'_dft'])*torch.exp(-.5*width**2*k2)[..., None], 0.)
     return weights*difference.square().sum((-1, -2))/pred['k_vectors_grid_shape'].prod().to(difference).square()
 
 
-def weighted_mean_squared_error_fourier_density(ref, pred):
-    # far-field density, in (me/A^3)^2
-    return torch.mean(spectral_errors(ref, pred, 'fourier_farfield_density'))/1.e-6
+class FourierError:
+    """Parseval mean square error of a Fourier field, summed over its smearing widths (A), zero for raw."""
+    key, scale = '', 1.
+
+    def __init__(self, smearing_widths):
+        widths = ast.literal_eval(smearing_widths) if isinstance(smearing_widths, str) else smearing_widths
+        self.smearing_widths = [float(w) for w in np.atleast_1d(widths)]
+        if not self.smearing_widths or not all(0. <= w < math.inf for w in self.smearing_widths):
+            raise ValueError(f'{self.key} smearing_widths must be widths >= 0 in A, not {smearing_widths!r}')
+
+    def __call__(self, ref, pred):
+        return torch.mean(sum(spectral_errors(ref, pred, self.key, w) for w in self.smearing_widths))/self.scale
 
 
-def weighted_mean_squared_error_fourier_potential(ref, pred):
-    # raw and smoothed deformation potential, in V^2
-    return torch.mean(spectral_errors(ref, pred, 'fourier_potential')
-                      + spectral_errors(ref, pred, 'smooth_fourier_potential'))
+class FourierDensityError(FourierError):
+    # density, in (me/A^3)^2
+    key, scale = 'fourier_density', 1.e-6
+
+    def __init__(self, smearing_widths=(3.,)):
+        super().__init__(smearing_widths)
+
+
+class FourierPotentialError(FourierError):
+    # deformation potential, in V^2
+    key = 'fourier_potential'
+
+    def __init__(self, smearing_widths=(0., 1.5)):
+        super().__init__(smearing_widths)
 
 
 def weighted_mean_squared_error_workfunction(ref, pred):

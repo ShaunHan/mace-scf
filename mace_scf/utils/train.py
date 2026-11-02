@@ -24,7 +24,7 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import spectral_errors
+from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, spectral_errors
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -466,7 +466,7 @@ def evaluate(
     fermi_level_computed = False
     delta_fermi_level_list = []
     delta_workfunction_list = []
-    fourier_density_list, fourier_potential_list = [], []
+    fourier_errors = {}
     batch = None  # for pylint
 
     for name, param in model.named_parameters():
@@ -541,12 +541,12 @@ def evaluate(
         if output.get("workfunction") is not None:
             observed = batch.workfunction_weight > 0.0
             delta_workfunction_list.append((batch.workfunction - output["workfunction"])[observed])
-        if output.get("fourier_density_dft") is not None:
-            observed = batch.fourier_density_weight > 0.0
-            fourier_density_list.append(spectral_errors(batch, output, "fourier_farfield_density")[observed])
-        if output.get("fourier_potential_dft") is not None:
-            observed = batch.fourier_potential_weight > 0.0
-            fourier_potential_list.append(spectral_errors(batch, output, "smooth_fourier_potential")[observed])
+        for key, widths in REPORTED_SMEARING_WIDTHS.items():
+            if output.get(key + "_dft") is not None:
+                observed = getattr(batch, key + "_weight") > 0.0
+                for width in widths:
+                    fourier_errors.setdefault(f"rmse_{key}_{width:g}A", []).append(
+                        spectral_errors(batch, output, key, width)[observed])
         if output.get("dipole") is not None and batch.dipole is not None:
             dipole_components_to_include = batch.dipole_weight.view(-1, 3) > 0.0
             if torch.any(dipole_components_to_include):
@@ -686,10 +686,8 @@ def evaluate(
         delta_workfunction = to_numpy(torch.cat(delta_workfunction_list, dim=0))
         aux["mae_workfunction"] = compute_mae(delta_workfunction)
         aux["rmse_workfunction"] = compute_rmse(delta_workfunction)
-    if fourier_density_list:
-        aux["rmse_fourier_density"] = float(np.sqrt(to_numpy(torch.cat(fourier_density_list)).mean()))
-    if fourier_potential_list:
-        aux["rmse_fourier_potential"] = float(np.sqrt(to_numpy(torch.cat(fourier_potential_list)).mean()))
+    for name, errors in fourier_errors.items():
+        aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
     aux["time"] = time.time() - start_time
 
@@ -722,11 +720,14 @@ def valid_err_log(
         error_f = eval_metrics["rmse_f"] * 1e3
         error_ef = eval_metrics["rmse_fermi_level"] * 1e3
         error_wf = eval_metrics["rmse_workfunction"] * 1e3
-        error_rho = eval_metrics.get("rmse_fourier_density", float("nan")) * 1e3
-        error_esp = eval_metrics.get("rmse_fourier_potential", float("nan")) * 1e3
+        widths_rho, widths_esp = ("/".join(f"{w:g}" for w in REPORTED_SMEARING_WIDTHS[key]) for key in REPORTED_SMEARING_WIDTHS)
+        error_rho = "/".join(f"{eval_metrics.get(f'rmse_fourier_density_{w:g}A', float('nan')) * 1e3:.2f}"
+                             for w in REPORTED_SMEARING_WIDTHS["fourier_density"])
+        error_esp = "/".join(f"{eval_metrics.get(f'rmse_fourier_potential_{w:g}A', float('nan')) * 1e3:.1f}"
+                             for w in REPORTED_SMEARING_WIDTHS["fourier_potential"])
         error_mu = eval_metrics.get("rmse_mu_per_atom", float("nan")) * 1e3
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho={error_rho:.2f} me / A^3, RMSE_ESP={error_esp:.1f} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV"
         )
     elif (
         log_errors == "PerAtomRMSEstressvirials"
