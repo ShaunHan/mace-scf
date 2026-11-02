@@ -150,4 +150,3 @@ train_schedule:
       fermi_level: 100.0
 potential_response_config:
   fixed_point: true
-  first_minimum_weight: 0.1

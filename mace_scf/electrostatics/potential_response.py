@@ -605,7 +605,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
-                 first_minimum_weight=.1, band_edge_charge=.05, max_l=1, completion_max_l=None, **kwargs):
+                 band_edge_charge=.05, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
@@ -628,8 +628,6 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
-        # A fixed point answers in training for the state of its first minimum too, at this fraction of the weights.
-        self.first_minimum_weight = float(first_minimum_weight)
         # The hole and electron charge (e per cell) at which the band edges are read.
         self.band_edge_charge = float(band_edge_charge)
         layers = int(self.num_interactions)
@@ -815,16 +813,6 @@ class PotentialResponse(ScaleShiftMACE):
             energy = energy+electrostatic+response_energy
             inputs = [charge, counter, positions] if compute_force else [charge, counter]
             gradients = torch.autograd.grad(energy.sum(), inputs, create_graph=training, allow_unused=True)
-            first = None
-            if training and len(minima) > 1 and getattr(self, 'first_minimum_weight', 0.) > 0:
-                # The first minimum of a fixed point, with the response of the geometry, answers to the same
-                # electronic labels: that response stays one of the data, and the read learns how it changes with
-                # the field.
-                # Its Fermi level is -dE/dQ of that minimum, from the multiplier of its total charge.
-                state, _, mu = minima[0]
-                first = {**self.observe(space, state, positions, charge)[1],
-                         'fermi_level': mu+self.fermi_level_offset+space.vacuum_reference,
-                         'weight': self.first_minimum_weight}
         forces = None
         if compute_force:
             forces = -gradients[2] if gradients[2] is not None else torch.zeros_like(positions)
@@ -848,8 +836,6 @@ class PotentialResponse(ScaleShiftMACE):
                 output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], space.shape).to(positions)
                 output[key+'_dft_mask'] = (space.modes[None].abs() <= torch.div(
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
-        if first is not None:
-            output['first_minimum'] = first
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are Fermi levels of the same energy at a small hole and electron charge: the valence

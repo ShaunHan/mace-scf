@@ -80,20 +80,26 @@ def adopt_foundation(model, foundation):
 
 @torch.no_grad()
 def condition_energy(model, loader, device):
-    """Energy zeros by element, so that the local energies start at the training energies."""
-    counts, residuals = [], []
-    for i, batch in enumerate(loader):
-        if i*loader.batch_size >= 64:
-            break
+    """Energy zeros by element: the least squares fit of the energies per atom of every training frame.
+
+    The fit has the weights of the energy loss. A panel of a few frames leaves directions of the composition such
+    as the number of protons loose by about an eV per proton, an error the network never fully learns away.
+    """
+    fractions, residuals, weights = [], [], []
+    for batch in torch_geometric.dataloader.DataLoader(loader.dataset, batch_size=loader.batch_size, shuffle=False):
         batch = batch.to(device)
         output = model(batch.to_dict(), compute_force=False)
-        n = scatter_sum(batch.node_attrs, batch.batch, dim=0)
-        counts.append(n)
-        residuals.append(batch.energy-output['energy'].detach())
-    a, b = torch.cat(counts), torch.cat(residuals)
-    delta = torch.linalg.lstsq(a.cpu(), b[:, None].cpu(), rcond=1.e-6).solution[:, 0]
+        counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)
+        size = counts.sum(-1)
+        fractions.append(counts/size[:, None])
+        residuals.append((batch.energy-output['energy'].detach())/size)
+        weights.append(batch.weight*batch.energy_weight)
+    a, b, w = torch.cat(fractions).cpu(), torch.cat(residuals).cpu(), torch.cat(weights).cpu()
+    a, b, w = a[w > 0], b[w > 0], w[w > 0].sqrt()
+    delta = torch.linalg.lstsq(a*w[:, None], (b*w)[:, None], driver='gelsd').solution[:, 0]
     model.atomic_energies_fn.atomic_energies.add_(delta.to(device).reshape_as(model.atomic_energies_fn.atomic_energies))
-    logging.info(f'Energy zeros shifted by {delta.tolist()} eV')
+    logging.info(f'Energy zeros shifted by {delta.tolist()} eV, from {len(b)} training frames: energy per atom '
+                 f'{float(b.square().mean().sqrt())*1e3:.1f} -> {float((b-a@delta).square().mean().sqrt())*1e3:.1f} meV')
 
 
 class FusedConvolution(torch.nn.Module):
