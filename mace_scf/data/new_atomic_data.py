@@ -65,6 +65,8 @@ def applied_sawtooth(cell, pbc, external_field):
 VOLT_KEYS = (
     "vacuum_potential",
     "vacuum_potential_weight",
+    "band_gap",
+    "band_gap_weight",
     "fourier_density",
     "fourier_density_shape",
     "fourier_density_weight",
@@ -92,6 +94,8 @@ class ExtAtomicData(AtomicData):
     hardness: torch.Tensor
     vacuum_potential: torch.Tensor
     vacuum_potential_weight: torch.Tensor
+    band_gap: torch.Tensor
+    band_gap_weight: torch.Tensor
     fourier_density: torch.Tensor
     fourier_density_shape: torch.Tensor
     fourier_density_weight: torch.Tensor
@@ -340,6 +344,8 @@ class ExtAtomicData(AtomicData):
             # field-free: the vacuum potential of the charges, without the applied sawtooth
             vacuum_potential=label("vacuum_potential", 0.0) - applied_sawtooth(config.cell, config.pbc, external_field),
             vacuum_potential_weight=weight("vacuum_potential"),
+            band_gap=label("band_gap", 0.0),
+            band_gap_weight=weight("band_gap"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,
             fourier_density_weight=weight("fourier_density"),

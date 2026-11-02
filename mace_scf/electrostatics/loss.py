@@ -15,6 +15,7 @@ from .potential_response import (
     FourierDensityError,
     FourierPotentialError,
     replay_loss,
+    weighted_mean_squared_error_band_gap,
     weighted_mean_squared_error_vacuum_potential,
 )
 import logging
@@ -269,6 +270,7 @@ _LOSS_FUNCTIONS = {
     "final_terms_fixedpoint_scf_stability": final_terms_fixedpoint_scf_stability,
     "field_features": weighted_mean_squared_error_field_feats,
     "vacuum_potential": weighted_mean_squared_error_vacuum_potential,
+    "band_gap": weighted_mean_squared_error_band_gap,
     "fourier_density": FourierDensityError,
     "fourier_potential": FourierPotentialError,
     "replay": replay_loss,

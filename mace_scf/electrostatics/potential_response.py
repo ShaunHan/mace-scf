@@ -441,7 +441,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
-                 first_minimum_weight=.1, **kwargs):
+                 first_minimum_weight=.1, band_edge_charge=.05, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
@@ -463,6 +463,8 @@ class PotentialResponse(ScaleShiftMACE):
         self.fixed_point = bool(fixed_point)
         # A fixed point answers in training for the state of its first minimum too, at this fraction of the weights.
         self.first_minimum_weight = float(first_minimum_weight)
+        # The hole and electron charge (e per cell) at which the band edges are read.
+        self.band_edge_charge = float(band_edge_charge)
         layers = int(self.num_interactions)
         self.law = LocalLaw(layers*irreps.count('0e'), layers*irreps.count('1o'), num_elements, len(sources),
                             len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
@@ -612,7 +614,7 @@ class PotentialResponse(ScaleShiftMACE):
         return minima
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
-                **kwargs):
+                band_edges=False, **kwargs):
         if compute_virials or compute_stress:
             raise NotImplementedError('PotentialResponse computes no stress')
         if data['positions'].is_cuda and torch.backends.cuda.preferred_linalg_library().name != 'Cusolver':
@@ -667,6 +669,16 @@ class PotentialResponse(ScaleShiftMACE):
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
         if first is not None:
             output['first_minimum'] = first
+        labelled = data.get('band_gap_weight')
+        if band_edges or (labelled is not None and bool((labelled > 0).any())):
+            # The band edges are Fermi levels of the same energy at a small hole and electron charge: the valence
+            # band maximum at Q + delta and the conduction band minimum at Q - delta. With the law of the geometry
+            # the multiplier of each minimum is -dE/dQ there exactly; a fixed point takes the multiplier of its
+            # final minimum, at the law read from its own first minimum.
+            delta = getattr(self, 'band_edge_charge', .05)
+            edges = [self.solve(data, cell, positions, scalars, vectors, charge.to(cell.volume)+s*delta)[-1][2]
+                     + self.fermi_level_offset+cell.vacuum_reference for s in (1., -1.)]
+            output.update(valence_band_maximum=edges[0], conduction_band_minimum=edges[1], band_gap=edges[1]-edges[0])
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
@@ -870,6 +882,14 @@ def weighted_mean_squared_error_vacuum_potential(ref, pred):
     # vacuum_potential: [n_graphs, ]
     configs_weight = ref.weight*ref.vacuum_potential_weight
     return torch.mean(configs_weight*torch.square(ref['vacuum_potential']-pred['vacuum_potential']))
+
+
+def weighted_mean_squared_error_band_gap(ref, pred):
+    # band_gap: [n_graphs, ], predicted for batches with band gap labels only
+    if pred.get('band_gap') is None:
+        return ref.weight.new_zeros(())
+    configs_weight = ref.weight*ref.band_gap_weight
+    return torch.mean(configs_weight*torch.square(ref['band_gap']-pred['band_gap']))
 
 
 def replay_loss(ref, pred):

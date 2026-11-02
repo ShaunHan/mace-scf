@@ -56,15 +56,17 @@ class MACEPotentialResponse(Calculator):
 
     With constant_potential the counter charge stands for solvated ions and acts through electrostatics only,
     and a slab without one gets a sheet counter_charge_height above its electrode surface, along its one
-    non-periodic axis, on the first call, kept for the trajectory (slab_controls).
+    non-periodic axis, on the first call, kept for the trajectory (slab_controls). With band_edges it also
+    returns the valence band maximum, the conduction band minimum and the band gap.
     """
 
     implemented_properties = ['energy', 'free_energy', 'forces', 'dipole', 'charges', 'fermi_level',
                               'vacuum_potential', 'work_function', 'cell_voltage', 'she_offset',
-                              'electrode_potential_she']
+                              'electrode_potential_she', 'valence_band_maximum', 'conduction_band_minimum',
+                              'band_gap']
 
     def __init__(self, model_path, device='cuda', default_dtype='float64', constant_potential=False,
-                 counter_charge_height=6., counter_charge_width=1., enable_cueq=False, **kwargs):
+                 counter_charge_height=6., counter_charge_width=1., enable_cueq=False, band_edges=False, **kwargs):
         Calculator.__init__(self, **kwargs)
         torch_tools.set_default_dtype(default_dtype)
         self.device = torch_tools.init_device(device)
@@ -75,6 +77,7 @@ class MACEPotentialResponse(Calculator):
         self.model.counter_charge_overlap = not constant_potential
         self.model.eval().requires_grad_(False)
         self.constant_potential = constant_potential
+        self.band_edges = bool(band_edges)
         self.counter_charge_height = float(counter_charge_height)
         self.counter_charge_width = float(counter_charge_width)
         self.z_table = AtomicNumberTable([int(z) for z in self.model.atomic_numbers])
@@ -102,7 +105,7 @@ class MACEPotentialResponse(Calculator):
         config = mace.data.config_from_atoms(self.atoms, key_specification=self.keyspec)
         data = mace_scf.data.ExtAtomicData.from_config(config, z_table=self.z_table, cutoff=float(self.model.r_max))
         batch = torch_geometric.batch.Batch.from_data_list([data]).to(self.device)
-        output = self.model(batch.to_dict(), compute_force=True)
+        output = self.model(batch.to_dict(), compute_force=True, band_edges=self.band_edges)
         output = {key: value.detach() if isinstance(value, torch.Tensor) else value for key, value in output.items()}
         fermi_level, vacuum_potential = float(output['fermi_level'][0]), float(output['vacuum_potential'][0])
         work_function, cell_voltage = vacuum_potential-fermi_level, float(output['cell_voltage'][0])
@@ -121,3 +124,6 @@ class MACEPotentialResponse(Calculator):
         }
         for key in ('fourier_potential', 'k_vectors_grid_shape', 'k_vectors_mask'):
             self.results[key] = output[key].cpu().numpy()
+        if self.band_edges:
+            for key in ('valence_band_maximum', 'conduction_band_minimum', 'band_gap'):
+                self.results[key] = float(output[key][0])
