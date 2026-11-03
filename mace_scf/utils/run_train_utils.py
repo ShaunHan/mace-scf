@@ -344,6 +344,13 @@ def get_param_options(model, args):
                 "weight_decay": 0.0,
             }
         )
+        param_options["params"].append(
+            {
+                "name": "energy_zeros",
+                "params": [model.atomic_energies_fn.atomic_energies],
+                "weight_decay": 0.0,
+            }
+        )
         if hasattr(model, "replay_head"):
             # its backbone is the model's own
             param_options["params"].append(

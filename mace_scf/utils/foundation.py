@@ -80,13 +80,14 @@ def adopt_foundation(model, foundation):
 
 @torch.no_grad()
 def condition_energy(model, loader, device):
-    """Energy zeros by element: the least squares fit of the energies per atom of every training frame.
-
-    The fit has the weights of the energy loss. A panel of a few frames leaves directions of the composition such
-    as the number of protons loose by about an eV per proton, an error the network never fully learns away.
+    """Starting energy zeros by element: the least squares fit of the energies per atom of 64 evenly spaced
+    training frames, with the weights of the energy loss. The model trains them further.
     """
     fractions, residuals, weights = [], [], []
-    for batch in torch_geometric.dataloader.DataLoader(loader.dataset, batch_size=loader.batch_size, shuffle=False):
+    dataset = loader.dataset
+    panel = torch.linspace(0, len(dataset)-1, min(len(dataset), 64)).round().long().unique().tolist()
+    for batch in torch_geometric.dataloader.DataLoader([dataset[i] for i in panel], batch_size=loader.batch_size,
+                                                       shuffle=False):
         batch = batch.to(device)
         output = model(batch.to_dict(), compute_force=False)
         counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)

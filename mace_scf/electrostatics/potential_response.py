@@ -125,9 +125,10 @@ class AtomicResponse(nn.Module):
     the density width: for l = 1 dd_dE times the density width squared is the dipole per field. The outputs of
     order l are gated sums of the order l solid harmonics of the vector channels. The density of states is a
     sum of Gaussian bumps of width resolution on [-energy_range, energy_range] eV over a background of
-    DOS_FLOOR, and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. With fixed_point the
-    response also reads the levels and fields of the atom and its neighbours; at zero levels and field that read
-    is the response of the geometry.
+    DOS_FLOOR, and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. The local amplitudes of
+    the geometry have readouts of their own. With fixed_point the response also reads the levels and fields of the
+    atom and its neighbours, the atom's own from a random start and the neighbours' from zero; at zero levels and
+    field that read is the response of the geometry, and it changes the amplitudes by the change of the readouts.
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
@@ -154,15 +155,23 @@ class AtomicResponse(nn.Module):
         self.dos_readout = nn.Linear(width, len(centers))
         self.species_bias = nn.Parameter(torch.zeros(num_elements))
         self.species_source = nn.Parameter(torch.zeros(num_elements, num_sources))
-        layers = [self.scalar_out, self.vector_out, self.dd_dE_readout, self.dos_readout]
-        if fixed_point:
-            self.state_scalar = nn.Linear(3*num_receivers, width, bias=False)
-            self.state_vector = nn.Linear(3*num_receivers, self.vector_width, bias=False)
-            layers += [self.state_scalar, self.state_vector]
+        # The amplitudes of the geometry: linear maps of the hidden features and of each order of the vector channels.
+        self.local_source_scalar = nn.Linear(width, num_sources, bias=False)
+        self.local_source_vectors = nn.ModuleList(nn.Linear(self.vector_width, num_sources, bias=False)
+                                                  for _ in range(self.completion_max_l))
+        layers = [self.scalar_out, self.vector_out, self.dd_dE_readout, self.dos_readout, self.local_source_scalar,
+                  *self.local_source_vectors]
         for layer in layers:
             nn.init.zeros_(layer.weight)
             if layer.bias is not None:
                 nn.init.zeros_(layer.bias)
+        if fixed_point:
+            # The read of the atom's own levels and fields starts as a random linear map, its neighbours' at zero.
+            self.state_scalar = nn.Linear(3*num_receivers, width, bias=False)
+            self.state_vector = nn.Linear(3*num_receivers, self.vector_width, bias=False)
+            for layer in (self.state_scalar, self.state_vector):
+                nn.init.zeros_(layer.weight)
+                nn.init.uniform_(layer.weight[:, :num_receivers], -num_receivers**-.5, num_receivers**-.5)
         self.register_buffer('scalar_unit', torch.ones(num_scalars))
         self.register_buffer('vector_unit', torch.ones(num_vectors))
 
@@ -180,18 +189,26 @@ class AtomicResponse(nn.Module):
         return chemical, self.chemical_vector(vector.transpose(-1, -2)).transpose(-1, -2)
 
     def forward(self, chemical, vector, attrs, mask, state=None):
-        embedded = vector
+        hidden, scalars, d0, shared = self.readouts(chemical, vector, vector, attrs)
+        # A response saved before the readouts of its own takes the amplitudes of the geometry from the shared ones.
+        amplitudes = self.local_amplitudes(hidden, vector, attrs) if hasattr(self, 'local_source_scalar') else shared
         if state is not None:
             scalar, polar = state
-            chemical = chemical+self.state_scalar(torch.asinh(scalar))
             embedded = vector+self.state_vector(vector_asinh(polar).transpose(-1, -2)).transpose(-1, -2)
+            hidden, scalars, d0, read = self.readouts(chemical+self.state_scalar(torch.asinh(scalar)), vector,
+                                                      embedded, attrs)
+            amplitudes = amplitudes+read-shared
+        bias = (attrs@self.species_bias+scalars[..., 0])*mask
+        dd_dE = positive(self.dd_dE_readout(hidden))*mask[..., None]
+        coefficients = F.softplus(self.dos_readout(hidden)+self.dos_offsets)*mask[..., None]
+        return bias, dd_dE, coefficients, d0*mask[..., None], amplitudes*mask[..., None]
+
+    def readouts(self, chemical, vector, embedded, attrs):
+        """The hidden features, the scalar outputs, d0 and the amplitudes of the shared readouts."""
         invariants = torch.cat((chemical, torch.asinh(embedded.square().sum(-1)),
                                 torch.asinh((vector*embedded).sum(-1))), -1)
         hidden = self.shared(invariants)
         scalars = self.scalar_out(hidden)
-        bias = (attrs@self.species_bias+scalars[..., 0])*mask
-        dd_dE = positive(self.dd_dE_readout(hidden))*mask[..., None]
-        coefficients = F.softplus(self.dos_readout(hidden)+self.dos_offsets)*mask[..., None]
         # The outputs of order l, d0 first, are gated sums of the order l solid harmonics of the vector channels.
         outputs, channels, max_l = self.outputs(), torch.cat((vector, embedded), -2), getattr(self, 'max_l', 1)
         harmonics = channels
@@ -204,8 +221,17 @@ class AtomicResponse(nn.Module):
             if l <= max_l:
                 d0.append(polar[..., 0, :])
             amplitudes.append(polar[..., int(l <= max_l):, :].flatten(-2))
-        d0 = torch.cat(d0, -1) if d0 else bias.new_zeros(*bias.shape, 0)
-        return bias, dd_dE, coefficients, d0*mask[..., None], torch.cat(amplitudes, -1)*mask[..., None]
+        d0 = torch.cat(d0, -1) if d0 else scalars.new_zeros(*scalars.shape[:-1], 0)
+        return hidden, scalars, d0, torch.cat(amplitudes, -1)
+
+    def local_amplitudes(self, hidden, vector, attrs):
+        """The amplitudes of the geometry from their own readouts, in the order of the shared ones."""
+        amplitudes = [attrs@self.species_source+self.local_source_scalar(hidden)]
+        orders = len(self.local_source_vectors)
+        harmonics = vector if orders <= 1 else torch.cat((vector, solid_harmonics(orders, vector)[..., 4:]), -1)
+        for l, layer in enumerate(self.local_source_vectors, 1):
+            amplitudes.append(layer(harmonics[..., l*l-1:(l+1)**2-1].transpose(-1, -2)).transpose(-1, -2).flatten(-2))
+        return torch.cat(amplitudes, -1)
 
     def outputs(self):
         """The number of equivariant outputs of every order l >= 1: d0 to max_l, the amplitudes to completion_max_l."""
@@ -607,6 +633,9 @@ class PotentialResponse(ScaleShiftMACE):
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
                  band_edge_charge=.05, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
+        # The energy zeros of the elements are trained with the model: the energy of the response moves along
+        # directions of the composition, such as the number of protons, while the response learns.
+        self.atomic_energies_fn.atomic_energies = nn.Parameter(self.atomic_energies_fn.atomic_energies.clone())
         irreps = o3.Irreps(str(self.products[0].linear.irreps_out))
         if {ir for _, ir in irreps} != {o3.Irrep('0e'), o3.Irrep('1o')}:
             raise ValueError('PotentialResponse needs scalar and vector features in every layer, e.g. 64x0e + 64x1o')
