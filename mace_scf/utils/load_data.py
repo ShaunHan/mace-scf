@@ -184,6 +184,18 @@ def check_low_density_periodic_configs(
             )
 
 
+def check_weighted_losses_have_labels(collections, train_schedule) -> None:
+    """A loss term with a weight needs labelled training frames. A label that no frame carries, such as a band gap
+    that the data were collected without, would give its term a zero loss without notice."""
+    weighted = {name.removesuffix("_per_atom") for stage in train_schedule
+                for name, options in stage["loss"].items() if options["weight"] > 0.0}
+    missing = sorted(name for name in weighted & set(collections.train[0].property_weights)
+                     if not any(np.any(np.asarray(config.property_weights[name]) > 0.0) for config in collections.train))
+    if missing:
+        raise ValueError(f"No training frame has a label for the loss terms {missing}: collect the data with "
+                         "scripts/collect_vasp_data.py, which labels every frame, or set these weights to zero")
+
+
 def check_formal_charges_in_oxidation_state_range(collections, oxidation_state_range) -> None:
     """Warn about per-atom formal charges outside the oxidation-state embedding's range.
     """
@@ -238,6 +250,7 @@ def load_train_valid_sets_from_xyz(args: argparse.Namespace,  config_type_weight
         max_volume_per_atom=args.low_density_pbc_max_volume_per_atom,
         allow_low_density_pbc=args.allow_low_density_pbc,
     )
+    check_weighted_losses_have_labels(collections, args.train_schedule)
     if args.model == "LocalSplitCharges" and args.formal_charges_from_data:
         check_formal_charges_in_oxidation_state_range(
             collections, ast.literal_eval(args.oxidation_state_range)

@@ -32,6 +32,7 @@ DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in d
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
 BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap, any other by its Fermi level.
+OCCUPATION_TOL = 0.01  # A state filled by more than this and less than 1 - this is in a band at the Fermi level.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -322,17 +323,19 @@ def plugin_forces(outdir, forces, normal):
 def band_edges(kpoints):
     """The valence band maximum and conduction band minimum over all k points and spins, or None.
 
-    A state is occupied above half the occupation of the fullest state, so that ISPIN, spinors and ASE's doubled
-    occupations of spin-degenerate runs need no special case.
+    None also when a state is partly filled: the Fermi level then lies in a band, as in a metal or a half-filled
+    level, which the half occupation of a filled state would count as empty. The fullest state sets the occupation
+    of a filled one, so that ISPIN, spinors and ASE's doubled occupations of spin-degenerate runs need no special case.
     """
     if not kpoints:
         return None
     full = max(float(np.max(k.f_n)) for k in kpoints)
-    occupied = np.concatenate([np.asarray(k.eps_n)[np.asarray(k.f_n) > 0.5 * full] for k in kpoints])
-    empty = np.concatenate([np.asarray(k.eps_n)[np.asarray(k.f_n) <= 0.5 * full] for k in kpoints])
-    if not len(occupied) or not len(empty):
+    energies = np.concatenate([np.asarray(k.eps_n) for k in kpoints])
+    filling = np.concatenate([np.asarray(k.f_n) for k in kpoints]) / full
+    occupied = filling > 0.5
+    if np.abs(filling - occupied).max() > OCCUPATION_TOL or occupied.all() or not occupied.any():
         return None
-    return float(occupied.max()), float(empty.min())
+    return float(energies[occupied].max()), float(energies[~occupied].min())
 
 
 def collect_job(outdir):

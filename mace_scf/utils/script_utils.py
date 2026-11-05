@@ -278,7 +278,7 @@ def create_error_table(
         # add new tables here...
 
     # the vacuum potential and the band gap only when the data have their labels
-    for title, values in (("RMSE vac / mV", vacuum_potentials), ("RMSE gap / meV", band_gaps)):
+    for title, values in (("RMSE ESPvac / mV", vacuum_potentials), ("RMSE Eg / meV", band_gaps)):
         if any(value is not None for value in values):
             table.add_column(title, ["not found" if value is None else f"{1000 * value:.2f}" for value in values])
     return table

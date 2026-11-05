@@ -743,8 +743,8 @@ def valid_err_log(
                              for w in REPORTED_SMEARING_WIDTHS["fourier_potential"])
         error_mu = eval_metrics.get("rmse_mu_per_atom", float("nan")) * 1e3
         # the vacuum potential and the band gap only when the data have their labels
-        error_vac = f", RMSE_vac={eval_metrics['rmse_vacuum_potential'] * 1e3:.1f} mV" if "rmse_vacuum_potential" in eval_metrics else ""
-        error_gap = f", RMSE_gap={eval_metrics['rmse_band_gap'] * 1e3:.1f} meV" if "rmse_band_gap" in eval_metrics else ""
+        error_vac = f", RMSE_ESPvac={eval_metrics['rmse_vacuum_potential'] * 1e3:.1f} mV" if "rmse_vacuum_potential" in eval_metrics else ""
+        error_gap = f", RMSE_Eg={eval_metrics['rmse_band_gap'] * 1e3:.1f} meV" if "rmse_band_gap" in eval_metrics else ""
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}"
         )
