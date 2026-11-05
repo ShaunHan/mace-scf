@@ -31,8 +31,9 @@ SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at ED
 DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
-BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap, any other by its Fermi level.
+BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap too.
 OCCUPATION_TOL = 0.01  # A state filled by more than this and less than 1 - this is in a band at the Fermi level.
+FERMI_LEVEL_TOL = 0.1  # eV: largest difference of VASP's Fermi level of a gapped cell from its intrinsic level.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -320,22 +321,27 @@ def plugin_forces(outdir, forces, normal):
     return forces + (difference.mean(0) @ normal) * normal
 
 
-def band_edges(kpoints):
-    """The valence band maximum and conduction band minimum over all k points and spins, or None.
+def band_edges(kpoints, sigma):
+    """The valence band maximum, conduction band minimum and intrinsic Fermi level over all k points and spins, or None.
 
     None also when a state is partly filled: the Fermi level then lies in a band, as in a metal or a half-filled
     level, which the half occupation of a filled state would count as empty. The fullest state sets the occupation
     of a filled one, so that ISPIN, spinors and ASE's doubled occupations of spin-degenerate runs need no special case.
+    The intrinsic level is where the Fermi-Dirac tails of width sigma hold as many holes in the valence band as
+    electrons in the conduction band: exp(2 mu / sigma) = sum_v w exp(e / sigma) / sum_c w exp(-e / sigma).
     """
     if not kpoints:
         return None
     full = max(float(np.max(k.f_n)) for k in kpoints)
     energies = np.concatenate([np.asarray(k.eps_n) for k in kpoints])
+    weights = np.concatenate([np.full(len(k.eps_n), np.log(k.weight)) for k in kpoints])
     filling = np.concatenate([np.asarray(k.f_n) for k in kpoints]) / full
     occupied = filling > 0.5
     if np.abs(filling - occupied).max() > OCCUPATION_TOL or occupied.all() or not occupied.any():
         return None
-    return float(energies[occupied].max()), float(energies[~occupied].min())
+    intrinsic = 0.5 * sigma * (np.logaddexp.reduce(weights[occupied] + energies[occupied] / sigma)
+                               - np.logaddexp.reduce(weights[~occupied] - energies[~occupied] / sigma))
+    return float(energies[occupied].max()), float(energies[~occupied].min()), float(intrinsic)
 
 
 def collect_job(outdir):
@@ -401,12 +407,14 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
-    # Every cell is labelled by one level. A neutral cell with a gap, bulk or slab such as a water film, has no
-    # Fermi level of its own: every level in the gap gives the same state and VASP reports where its search stops,
-    # so its label is the gap. A metal, or a charged cell with the Fermi level in a band, has a zero gap and its
-    # Fermi level as label.
-    edges = band_edges(kpoints)
+    # A neutral cell with a gap, bulk or slab such as a water film, is labelled by its gap, and by its Fermi level
+    # where that is defined. With Fermi-Dirac occupations (ISMEAR = -1) it is the intrinsic level, where the few
+    # holes of the valence band equal the few electrons of the conduction band, and VASP finds it unless a wide
+    # gap leaves those tails below double precision. Other smearings, and such a gap, leave it wherever VASP's
+    # search stops. A metal, or a charged cell with the Fermi level in a band, has a zero gap.
+    edges = band_edges(kpoints, float(parameters["sigma"]))
     gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN
+    intrinsic = gapped and parameters["ismear"] == -1 and abs(fermi - edges[2]) < FERMI_LEVEL_TOL
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),
@@ -417,12 +425,12 @@ def collect_job(outdir):
         "external_field": external_field,
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
-        "config_fermi_level_weight": float(not gapped),
+        "config_fermi_level_weight": float(intrinsic or not gapped),
         "config_band_gap_weight": float(gapped),
     }
     if gapped:
         # The band edges in the origin of vasp_efermi.
-        atoms.info["vasp_valence_band_maximum"], atoms.info["vasp_conduction_band_minimum"] = edges
+        atoms.info["vasp_valence_band_maximum"], atoms.info["vasp_conduction_band_minimum"] = edges[:2]
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
     places = [key for key in COUNTER_CHARGE_PLACES if key in meta]
