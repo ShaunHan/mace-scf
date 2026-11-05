@@ -466,6 +466,7 @@ def evaluate(
     fermi_level_computed = False
     delta_fermi_level_list = []
     delta_work_function_list = []
+    delta_vacuum_potential_list = []
     delta_band_gap_list = []
     fourier_errors = {}
     batch = None  # for pylint
@@ -540,8 +541,10 @@ def evaluate(
             observed = batch.fermi_level_weight > 0.0
             delta_fermi_level_list.append((batch.fermi_level - output["fermi_level"])[observed])
         if output.get("vacuum_potential") is not None:
+            observed = batch.vacuum_potential_weight > 0.0
+            delta_vacuum_potential_list.append((batch.vacuum_potential - output["vacuum_potential"])[observed])
             # the work function is the vacuum potential minus the Fermi level
-            observed = (batch.vacuum_potential_weight > 0.0) & (batch.fermi_level_weight > 0.0)
+            observed = observed & (batch.fermi_level_weight > 0.0)
             delta_work_function_list.append((batch.vacuum_potential - batch.fermi_level
                                              - output["vacuum_potential"] + output["fermi_level"])[observed])
         if output.get("band_gap") is not None:
@@ -692,6 +695,9 @@ def evaluate(
         delta_work_function = to_numpy(torch.cat(delta_work_function_list, dim=0))
         aux["mae_work_function"] = compute_mae(delta_work_function)
         aux["rmse_work_function"] = compute_rmse(delta_work_function)
+    delta_vacuum_potential = to_numpy(torch.cat(delta_vacuum_potential_list)) if delta_vacuum_potential_list else []
+    if len(delta_vacuum_potential):
+        aux["rmse_vacuum_potential"] = compute_rmse(delta_vacuum_potential)
     if delta_band_gap_list:
         delta_band_gap = to_numpy(torch.cat(delta_band_gap_list, dim=0))
         aux["mae_band_gap"] = compute_mae(delta_band_gap)
@@ -736,10 +742,11 @@ def valid_err_log(
         error_esp = "/".join(f"{eval_metrics.get(f'rmse_fourier_potential_{w:g}A', float('nan')) * 1e3:.1f}"
                              for w in REPORTED_SMEARING_WIDTHS["fourier_potential"])
         error_mu = eval_metrics.get("rmse_mu_per_atom", float("nan")) * 1e3
-        # the band gap only when the data have band gap labels
+        # the vacuum potential and the band gap only when the data have their labels
+        error_vac = f", RMSE_vac={eval_metrics['rmse_vacuum_potential'] * 1e3:.1f} mV" if "rmse_vacuum_potential" in eval_metrics else ""
         error_gap = f", RMSE_gap={eval_metrics['rmse_band_gap'] * 1e3:.1f} meV" if "rmse_band_gap" in eval_metrics else ""
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_gap}"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}"
         )
     elif (
         log_errors == "PerAtomRMSEstressvirials"

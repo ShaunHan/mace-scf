@@ -10,15 +10,15 @@ from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
 ATOMS_FILE = "IrO2_water_interface.traj"
 MODEL_FILE = "fit_0_best_wf_final.model"
 TARGET_U_SHE = 1.60           # V vs SHE: imposes <WF> = 4.44 eV + 1.60 eV.
-SHE_OFFSET = None             # <Delta> in V from an earlier run; None aligns it online.
+SHE_OFFSET = None             # <Delta> in V that an earlier run printed; None aligns it first.
 # The dipole correction plane and the counter charge sheet, as fractions along the slab's non-periodic axis;
 # None takes them from the frame.
 DIPOLE_CORRECTION_FRACTION = None
 COUNTER_CHARGE_FRACTION = None
 COUNTER_CHARGE_WIDTH = 1.0    # Gaussian sigma of the sheet in Angstrom.
 RELAX_FS = 500.0              # At Q = 0 first.
-ALIGN_FS = 1500.0             # Then aligning <Delta> at constant potential.
-ALIGNMENT_CONSTANT_FS = 250.0 # Memory of the online <Delta>.
+ALIGN_FS = 1500.0             # Then averaging <Delta> at constant potential, frozen for the production;
+                              # 0 takes Delta of the first frame.
 
 TEMPERATURE_K = 300.0
 TIMESTEP_FS = 0.5
@@ -72,10 +72,8 @@ def main() -> None:
     relax, align = int(round(RELAX_FS/TIMESTEP_FS)), 0 if SHE_OFFSET is not None else int(round(ALIGN_FS/TIMESTEP_FS))
     dyn = NVTPhiLangevin(atoms=atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K,
                          friction=FRICTION_PER_FS/units.fs, target_potential=TARGET_U_SHE, she_offset=SHE_OFFSET,
-                         alignment_time=(relax+align)*TIMESTEP_FS*units.fs,
-                         alignment_constant=ALIGNMENT_CONSTANT_FS*units.fs, C0=CAPACITANCE,
-                         tauphi=TAUPHI_FS*units.fs, trajectory=TRAJECTORY, logfile=LOGFILE,
-                         loginterval=LOGINTERVAL, rng=rng)
+                         alignment_time=align*TIMESTEP_FS*units.fs, C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs,
+                         trajectory=TRAJECTORY, logfile=LOGFILE, loginterval=LOGINTERVAL, rng=rng)
     axis = int(np.flatnonzero(~atoms.pbc)[0])
     cut, sheet = atoms.info["dipole_correction_fraction"], atoms.info["counter_charge_fraction"]
     z = (atoms.get_scaled_positions(wrap=True)[:, axis]-cut) % 1.
@@ -95,7 +93,10 @@ def main() -> None:
     dyn.run(relax)
     dyn.frozen = False
     dyn.run(align+STEPS)
-    print(f"<Delta> = {dyn.mean_offset:.5f} V; reuse it as SHE_OFFSET to skip the alignment.")
+    if dyn.sampled_potential is not None:
+        print(f"At V* = {dyn.target_cell_voltage:.5f} V the run sampled <U> = {dyn.sampled_potential:+.4f} V vs SHE "
+              f"(target {TARGET_U_SHE:+.4f} V), with <Delta> = {dyn.sampled_offset:.5f} V over "
+              f"{dyn.sampled_time/units.fs:.0f} fs: give it as SHE_OFFSET to skip the alignment.")
 
 
 if __name__ == "__main__":

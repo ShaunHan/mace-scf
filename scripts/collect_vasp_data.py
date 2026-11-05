@@ -31,7 +31,7 @@ SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at ED
 DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
 PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
-BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap gets vasp_band_gap; smaller gaps are metals.
+BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap, any other by its Fermi level.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -398,23 +398,28 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
+    # Every cell is labelled by one level. A neutral cell with a gap, bulk or slab such as a water film, has no
+    # Fermi level of its own: every level in the gap gives the same state and VASP reports where its search stops,
+    # so its label is the gap. A metal, or a charged cell with the Fermi level in a band, has a zero gap and its
+    # Fermi level as label.
+    edges = band_edges(kpoints)
+    gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),
         "vasp_efermi": fermi,
+        "vasp_band_gap": edges[1] - edges[0] if gapped else 0.0,
         "total_charge": float(charge),
         "counter_charge": float(counter),
         "external_field": external_field,
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
-        # A charged bulk cell has its Fermi level in a band, on the zero mean potential of the model.
-        "config_fermi_level_weight": float(slab or abs(charge) > 1e-6),
+        "config_fermi_level_weight": float(not gapped),
+        "config_band_gap_weight": float(gapped),
     }
-    edges = band_edges(kpoints)
-    if abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN:
-        # A neutral insulator: its band edges in the origin of vasp_efermi, and the gap between them.
+    if gapped:
+        # The band edges in the origin of vasp_efermi.
         atoms.info["vasp_valence_band_maximum"], atoms.info["vasp_conduction_band_minimum"] = edges
-        atoms.info["vasp_band_gap"] = edges[1] - edges[0]
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
     places = [key for key in COUNTER_CHARGE_PLACES if key in meta]

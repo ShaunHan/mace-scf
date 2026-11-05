@@ -21,7 +21,6 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
         cell_voltage: Optional[float] = None,
         she_offset: Optional[float] = None,
         alignment_time: float = 1000.0 * units.fs,
-        alignment_constant: float = 250.0 * units.fs,
         counter_charge_key: str = "counter_charge",
         total_charge_key: str = "total_charge",
         trajectory: Optional[str] = None,
@@ -34,7 +33,7 @@ class NVTPhiVelocityVerlet(NVTPhiMixin, MolecularDynamics):
         self._set_potentiostat_parameters(
             temperature_K, target_potential, C0, tauphi, counter_charge_key, total_charge_key,
             cell_voltage=cell_voltage, she_offset=she_offset,
-            alignment_time=alignment_time, alignment_constant=alignment_constant)
+            alignment_time=alignment_time)
         MolecularDynamics.__init__(
             self,
             atoms,

@@ -8,6 +8,7 @@ heads:
       external_field: external_field
       fermi_level: vasp_efermi
       vacuum_potential: vasp_vacuum_potential
+      band_gap: vasp_band_gap
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
@@ -80,6 +81,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
+      band_gap: 10.0
   1:
     name: stage1
     start: 10
@@ -97,6 +99,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
+      band_gap: 10.0
   2:
     name: stage2
     start: 50
@@ -114,6 +117,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
+      band_gap: 10.0
   3:
     name: stage3
     start: 150
@@ -131,6 +135,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
+      band_gap: 10.0
   4:
     name: stage4
     start: 250
@@ -148,5 +153,6 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
+      band_gap: 10.0
 potential_response_config:
   fixed_point: true

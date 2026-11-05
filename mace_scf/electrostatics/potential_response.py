@@ -658,7 +658,7 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
-        # The hole and electron charge (e per cell) at which the band edges are read.
+        # The hole and electron charge (e per cell) at which the band edges are read, and twice it.
         self.band_edge_charge = float(band_edge_charge)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
@@ -790,21 +790,29 @@ class PotentialResponse(ScaleShiftMACE):
         state = torch.cat((moments.reshape(len(mask), count, size).transpose(1, 2), amplitudes), -1)
         return state, energy, mu, (charges.detach(), mu.detach())
 
-    def solve(self, data, space, positions, scalars, vectors, charge):
-        """The minima of the energy: the state of the multipoles and amplitudes, the local energy and mu of each.
+    def geometry(self, data, space, positions, scalars, vectors):
+        """What the solves at every charge share: the features and the response of the geometry and, for a fixed
+        point, the transport of the levels to the neighbours."""
+        chemical, vector = self.response.features(space.pack(scalars), space.pack(vectors))
+        transport = None
+        if self.fixed_point:
+            transport = neighbour_transport(positions, data['edge_index'], data['shifts'], space.batch, space.slot,
+                                            len(space.counts), space.size, float(self.r_max),
+                                            float(self.receiver_widths.max()))
+        return chemical, vector, self.response(chemical, vector, space.attrs, space.present), transport
+
+    def solve(self, space, geometry, charge, start=None):
+        """The minima of the energy: the state of the multipoles and amplitudes, the local energy and mu of each,
+        and the charges and Fermi level of the first, from which a solve at a nearby charge starts.
 
         A fixed point has two, the minimum with the response of the geometry and the final one with the response
         read there.
         """
         mask = space.present
-        chemical, vector = self.response.features(space.pack(scalars), space.pack(vectors))
-        response = self.response(chemical, vector, space.attrs, mask)
-        state, energy, mu, start = self.minimum(response, space, charge)
+        chemical, vector, response, transport = geometry
+        state, energy, mu, start = self.minimum(response, space, charge, start=start)
         minima = [(state, energy, mu)]
         if self.fixed_point:
-            transport = neighbour_transport(positions, data['edge_index'], data['shifts'], space.batch, space.slot,
-                                            len(space.counts), space.size, float(self.r_max),
-                                            float(self.receiver_widths.max()))
             sampled = sample_spectrum(total_spectrum(state, space), space, 1)
             potential, sampled = sampled[..., 0], sampled[..., 1:]
             levels = (response[0][..., None]+potential-mu[:, None, None])*mask[..., None]
@@ -819,7 +827,7 @@ class PotentialResponse(ScaleShiftMACE):
                               -2))
             response = self.response(chemical, vector, space.attrs, mask, state=read)
             minima.append(self.minimum(response, space, charge, start=start)[:3])
-        return minima
+        return minima, start
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 band_edges=False, **kwargs):
@@ -836,7 +844,8 @@ class PotentialResponse(ScaleShiftMACE):
             positions = ctx.positions
             node_energy, scalars, vectors = self.backbone(data, ctx)
             space = FourierSpace(self, data, positions)
-            minima = self.solve(data, space, positions, scalars, vectors, charge.to(space.volume))
+            geometry = self.geometry(data, space, positions, scalars, vectors)
+            minima, start = self.solve(space, geometry, charge.to(space.volume))
             state, response_energy, _ = minima[-1]
             electrostatic, observed = self.observe(space, state, positions, charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(space.counts))
@@ -869,12 +878,19 @@ class PotentialResponse(ScaleShiftMACE):
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are Fermi levels of the same energy at a small hole and electron charge: the valence
-            # band maximum at Q + delta and the conduction band minimum at Q - delta. With the response of the geometry
-            # the multiplier of each minimum is -dE/dQ there exactly; a fixed point takes the multiplier of its
-            # final minimum, with the response read at its own first minimum.
-            delta = getattr(self, 'band_edge_charge', .05)
-            edges = [self.solve(data, space, positions, scalars, vectors, charge.to(space.volume)+s*delta)[-1][2]
-                     + self.fermi_level_offset+space.vacuum_reference for s in (1., -1.)]
+            # band maximum at Q + delta and the conduction band minimum at Q - delta, each extrapolated linearly to
+            # zero charge from delta and 2 delta. The extrapolation removes the charging energy of the cell and the
+            # filling of the edge, both linear in the charge and largest in a slab, so the edges are those of the
+            # neutral cell, as its DFT eigenvalues give them. With the response of the geometry the multiplier of
+            # each minimum is -dE/dQ there exactly; a fixed point takes the multiplier of its final minimum, with
+            # the response read at its own first minimum. Each solve starts from the minimum at the nearer charge.
+            delta, edges = getattr(self, 'band_edge_charge', .05), []
+            for sign in (1., -1.):
+                levels, near = [], start
+                for extra in (delta, 2*delta):
+                    minima, near = self.solve(space, geometry, charge.to(space.volume)+sign*extra, start=near)
+                    levels.append(minima[-1][2])
+                edges.append(2*levels[0]-levels[1]+self.fermi_level_offset+space.vacuum_reference)
             output.update(valence_band_maximum=edges[0], conduction_band_minimum=edges[1], band_gap=edges[1]-edges[0])
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)

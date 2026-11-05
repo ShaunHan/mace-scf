@@ -129,7 +129,7 @@ def create_error_table(
             "RMSE WF / meV",
         ]
     # add new tables here...
-    band_gaps = []
+    vacuum_potentials, band_gaps = [], []
 
     for name in sorted(all_data_loaders, key=mace_table_custom_key):
         data_loader = all_data_loaders[name]
@@ -273,10 +273,12 @@ def create_error_table(
                     metrics['rmse_work_function'],
                 ]
             )
+            vacuum_potentials.append(metrics.get('rmse_vacuum_potential'))
             band_gaps.append(metrics.get('rmse_band_gap'))
         # add new tables here...
 
-    # the band gap only when the data have band gap labels
-    if any(gap is not None for gap in band_gaps):
-        table.add_column("RMSE gap / meV", ["not found" if gap is None else f"{1000 * gap:.2f}" for gap in band_gaps])
+    # the vacuum potential and the band gap only when the data have their labels
+    for title, values in (("RMSE vac / mV", vacuum_potentials), ("RMSE gap / meV", band_gaps)):
+        if any(value is not None for value in values):
+            table.add_column(title, ["not found" if value is None else f"{1000 * value:.2f}" for value in values])
     return table

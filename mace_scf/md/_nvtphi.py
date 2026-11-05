@@ -16,8 +16,13 @@ class NVTPhiMixin:
     al., PRL 126, 136803), with V = dE/dQ. At fixed R, before every step, Q makes the exact Ornstein-Uhlenbeck
     move Q' = Q - C0 (V - V*) (1 - g) + sqrt(kT C0 (1 - g^2)) xi, g = exp(-dt/tauphi), whose stationary weight is
     exp(-Omega/kT) for any C0. U_SHE = WF/e - 4.44 V and Delta = WF - eV, so a target U* runs at
-    V* = 4.44 V + U* - <Delta>/e, with <Delta> given (she_offset) or averaged online for alignment_time and then
-    frozen. With frozen = True the charge stays fixed while the average runs.
+    V* = 4.44 V + U* - <Delta>/e. Delta, the potential of the vacuum over the counter charge, is the drop across the
+    water beyond the counter charge and its surface. It fluctuates with the water and only its mean enters V*,
+    which stays constant while the run samples. <Delta> is given (she_offset), or it is the time average of Delta
+    over alignment_time at constant potential, then frozen; alignment_time 0 takes Delta of the first frame. At
+    fixed V* the average of Delta continues (sampled_offset): the run samples <U> = V* + <Delta>/e - 4.44 V
+    (sampled_potential), and that <Delta> is the she_offset of the next run. With frozen = True the charge stays
+    fixed and the averages wait.
     """
 
     def _set_potentiostat_parameters(
@@ -31,13 +36,13 @@ class NVTPhiMixin:
         cell_voltage: Optional[float] = None,
         she_offset: Optional[float] = None,
         alignment_time: float = 1000.0 * units.fs,
-        alignment_constant: float = 250.0 * units.fs,
     ) -> None:
         """Store controller settings before ASE's constructor can call todict.
 
         Either give cell_voltage (V*, absolute ensemble) or target_potential
         (U* vs SHE). With target_potential, she_offset fixes <Delta>; when it
-        is None, <Delta> is aligned online for alignment_time and then frozen.
+        is None, <Delta> is the time average over alignment_time at constant
+        potential, then frozen.
         """
         if not np.isfinite([capacitance, time_constant]).all() or capacitance <= 0.0 or time_constant <= 0.0:
             raise ValueError("capacitance and time_constant must be finite and positive")
@@ -50,8 +55,8 @@ class NVTPhiMixin:
         for value in (target_potential, cell_voltage, she_offset):
             if value is not None and not np.isfinite(value):
                 raise ValueError("Potential settings must be finite")
-        if alignment_time < 0.0 or alignment_constant <= 0.0:
-            raise ValueError("alignment_time must be nonnegative and alignment_constant positive")
+        if not alignment_time >= 0.0:
+            raise ValueError("alignment_time must be nonnegative")
         self._phi_kbt = units.kB * float(temperature_K)
         self.target_potential = None if target_potential is None else float(target_potential)
         self.capacitance = float(capacitance)
@@ -60,11 +65,11 @@ class NVTPhiMixin:
         self.total_charge_key = total_charge_key
         self.cell_voltage = None if cell_voltage is None else float(cell_voltage)
         self.alignment_time = float(alignment_time)
-        self.alignment_constant = float(alignment_constant)
-        # Online <Delta> while aligning; frozen when the alignment period ends.
+        # Delta is averaged until aligned; a given she_offset or cell_voltage is aligned from the start.
         self.aligned = cell_voltage is not None or she_offset is not None or alignment_time == 0.0
         self.mean_offset = None if she_offset is None else float(she_offset)
-        self.alignment_elapsed = 0.0
+        self.averaged_time = 0.0
+        self.sampled_offset, self.sampled_time = 0.0, 0.0
         self.frozen = False
 
     def _init_potentiostat_state(self, communicator, rng) -> None:
@@ -117,6 +122,13 @@ class NVTPhiMixin:
             return self.cell_voltage
         return SHE_ABSOLUTE_V + self.target_potential - self.mean_offset
 
+    @property
+    def sampled_potential(self) -> Optional[float]:
+        """<U> vs SHE in volts of the steps at fixed V*, V* + <Delta> - 4.44 V; None before the first."""
+        if not self.sampled_time:
+            return None
+        return self.target_cell_voltage + self.sampled_offset - SHE_ABSOLUTE_V
+
     def grand_potential(self) -> float:
         """Omega = E - e V* Q in eV, for the current state (restraints excluded)."""
         energy = self.atoms.get_potential_energy(apply_constraint=False)
@@ -131,14 +143,18 @@ class NVTPhiMixin:
     def _update_charge(self) -> None:
         """One OU step of Q at fixed R, with the cached evaluation at (R, Q)."""
         voltage = self._observation("cell_voltage")
-        if not self.aligned:
-            weight = 1.0 - np.exp(-self.dt / self.alignment_constant)
-            self.mean_offset += weight * (self._observation("she_offset") - self.mean_offset)
-            self.alignment_elapsed += self.dt
-            if self.alignment_elapsed >= self.alignment_time:
-                self.aligned = True
         if self.frozen:
             return
+        offset = self._observation("she_offset")
+        if not self.aligned:
+            # The time average of Delta over alignment_time at constant potential, then frozen in V*.
+            self.averaged_time += self.dt
+            self.mean_offset += self.dt / self.averaged_time * (offset - self.mean_offset)
+            self.aligned = self.averaged_time >= self.alignment_time
+        else:
+            # At fixed V*, the average of Delta that gives the potential the run samples.
+            self.sampled_time += self.dt
+            self.sampled_offset += self.dt / self.sampled_time * (offset - self.sampled_offset)
         decay = np.exp(-self.dt / self.time_constant)
         charge = self.electrode_charge
         charge -= self.capacitance * (voltage - self.target_cell_voltage) * (1.0 - decay)
@@ -152,8 +168,9 @@ class NVTPhiMixin:
             "target_cell_voltage_V": self.target_cell_voltage,
             "she_offset_V": self.mean_offset,
             "aligned": self.aligned,
-            "alignment_elapsed_fs": self.alignment_elapsed / units.fs,
+            "averaged_time_fs": self.averaged_time / units.fs,
             "alignment_time_fs": self.alignment_time / units.fs,
+            "sampled_time_fs": self.sampled_time / units.fs,
             "capacitance_e_per_V": self.capacitance,
             "time_constant_fs": self.time_constant / units.fs,
             "counter_charge_key": self.counter_charge_key,
@@ -161,11 +178,13 @@ class NVTPhiMixin:
         }
 
     def potentiostat_state(self) -> dict:
-        """Restart record of the controller (alignment average and flag)."""
-        return dict(mean_offset=self.mean_offset, aligned=self.aligned,
-                    alignment_elapsed=self.alignment_elapsed)
+        """Restart record of the controller (the averages of Delta, their times and the flag)."""
+        return dict(mean_offset=self.mean_offset, aligned=self.aligned, averaged_time=self.averaged_time,
+                    sampled_offset=self.sampled_offset, sampled_time=self.sampled_time)
 
     def restore_potentiostat_state(self, state: dict) -> None:
         self.mean_offset = None if state["mean_offset"] is None else float(state["mean_offset"])
         self.aligned = bool(state["aligned"])
-        self.alignment_elapsed = float(state["alignment_elapsed"])
+        self.averaged_time = float(state.get("averaged_time", 0.0))
+        self.sampled_offset = float(state.get("sampled_offset", 0.0))
+        self.sampled_time = float(state.get("sampled_time", 0.0))

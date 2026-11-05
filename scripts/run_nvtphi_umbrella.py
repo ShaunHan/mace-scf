@@ -34,8 +34,8 @@ FIXED_DEPTH, WALL_GAP, WALL_K = 6.5, 3.0, 10.0  # A, A, eV/A^2.
 O2_BOND, PAIR_CUTOFF = 1.60, 3.50               # A: an existing O2; adsorbate O to free O.
 R_MIN, R_MAX, WINDOW_SPACING = 1.20, 3.50, 0.10  # A: one grid of umbrella centers.
 UMBRELLA_K = 20.0                               # eV/A^2: thermal width 0.036 A at 300 K.
-RELAX_STEPS, ALIGN_STEPS = 1000, 3000           # 0.5 ps at Q = 0, then 1.5 ps aligning <Delta>.
-ALIGNMENT_CONSTANT_FS = 250.0                   # Memory of the online <Delta>.
+RELAX_STEPS, ALIGN_STEPS = 1000, 3000           # 0.5 ps at Q = 0, then 1.5 ps averaging <Delta> for the windows.
+SHE_OFFSET = None                               # <Delta> in V that an earlier run printed skips the align stage.
 EQUIL_STEPS, SAMPLE_STEPS = 500, 1000           # 0.25 ps + 0.5 ps per window.
 TEMPERATURE_K, TIMESTEP_FS, FRICTION_PER_FS = 300.0, 0.5, 0.01
 LOGINTERVAL, SEED = 20, 7777                    # 10 fs records; stage lengths are multiples of it.
@@ -43,7 +43,7 @@ MAX_CHARGE_E, MAX_TEMPERATURE_K, MAX_FORCE_EV_A = 1.0, 1000.0, 100.0
 # -------------------------------------------------------------------------- #
 PHYSICAL = ('TARGET_U_SHE DIPOLE_CORRECTION_FRACTION COUNTER_CHARGE_FRACTION COUNTER_CHARGE_WIDTH CAPACITANCE '
             'TAUPHI_FS FIXED_DEPTH WALL_GAP WALL_K O2_BOND PAIR_CUTOFF R_MIN R_MAX WINDOW_SPACING UMBRELLA_K '
-            'RELAX_STEPS ALIGN_STEPS ALIGNMENT_CONSTANT_FS EQUIL_STEPS SAMPLE_STEPS TEMPERATURE_K TIMESTEP_FS '
+            'RELAX_STEPS ALIGN_STEPS SHE_OFFSET EQUIL_STEPS SAMPLE_STEPS TEMPERATURE_K TIMESTEP_FS '
             'FRICTION_PER_FS LOGINTERVAL SEED').split()
 
 
@@ -179,8 +179,9 @@ def make_stages(distance):
     start = int(np.argmin(np.abs(grid-distance)))
     direction, centers = (('cleavage', grid[start:]) if distance < .5*(R_MIN+R_MAX) else
                           ('formation', grid[start::-1]))
-    stages = [dict(stage='relax', window=-1, center_A=float(distance), steps=RELAX_STEPS),
-              dict(stage='align', window=-1, center_A=float(distance), steps=ALIGN_STEPS)]
+    stages = [dict(stage='relax', window=-1, center_A=float(distance), steps=RELAX_STEPS)]
+    if SHE_OFFSET is None:
+        stages.append(dict(stage='align', window=-1, center_A=float(distance), steps=ALIGN_STEPS))
     for window, center in enumerate(centers):
         stages += [dict(stage=f'{direction} {phase}', window=window, center_A=float(center), steps=steps)
                    for phase, steps in (('equil', EQUIL_STEPS), ('sample', SAMPLE_STEPS))]
@@ -272,9 +273,9 @@ def simulate(source, index, replica, model_file, model_sha, directory):
     with ExitStack() as stack:
         dyn = stack.enter_context(NVTPhiLangevin(
             atoms, timestep=TIMESTEP_FS*units.fs, temperature_K=TEMPERATURE_K, friction=FRICTION_PER_FS/units.fs,
-            target_potential=TARGET_U_SHE, alignment_time=(RELAX_STEPS+ALIGN_STEPS)*TIMESTEP_FS*units.fs,
-            alignment_constant=ALIGNMENT_CONSTANT_FS*units.fs, C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs,
-            fixcm=False, rng=rng, logfile=str(directory/'md.log'), loginterval=LOGINTERVAL))
+            target_potential=TARGET_U_SHE, she_offset=SHE_OFFSET, alignment_time=ALIGN_STEPS*TIMESTEP_FS*units.fs,
+            C0=CAPACITANCE, tauphi=TAUPHI_FS*units.fs, fixcm=False, rng=rng, logfile=str(directory/'md.log'),
+            loginterval=LOGINTERVAL))
         if state is not None:
             dyn.nsteps = state['step']
             dyn.restore_potentiostat_state(state['potentiostat'])
@@ -326,7 +327,8 @@ def simulate(source, index, replica, model_file, model_sha, directory):
                   f'{stage["steps"]-done} steps', flush=True)
             dyn.run(stage['steps']-done)
             stage_id, done = stage_id+1, 0
-    print(f'Complete at step {dyn.nsteps}', flush=True)
+    print(f'Complete at step {dyn.nsteps}: the windows sampled <U> = {dyn.sampled_potential:+.4f} V vs SHE with '
+          f'<Delta> = {dyn.sampled_offset:.5f} V, the SHE_OFFSET of later runs', flush=True)
 
 
 def run_one(source, index, replica, model_file, model_sha, directory):
