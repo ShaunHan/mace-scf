@@ -312,8 +312,9 @@ class FourierSpace:
         self.order = self.modes[None].expand(len(self.counts), -1, -1).gather(
             -1, self.axes[:, None, None].expand(-1, len(self.modes), 1)).squeeze(-1)
         self.attrs = self.pack(data['node_attrs'])
-        # The vacuum level of the neutral atoms in the zero-mean origin of periodic DFT.
-        self.vacuum_reference = self.attrs.sum(1)@model.vacuum_reference_integrals/self.volume*self.slab
+        # The vacuum level of the neutral atoms in the zero-mean origin of periodic DFT. In bulk it is the same
+        # shift of every level, so it enters the Fermi level and band edges of bulk and slab cells alike.
+        self.vacuum_reference = self.attrs.sum(1)@model.vacuum_reference_integrals/self.volume
         self.counter_charge_sheet(model, data, positions)
 
         # Only the nonzero modes inside the cutoff enter the multipoles and the sampled fields, a half space of

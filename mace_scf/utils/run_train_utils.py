@@ -463,7 +463,9 @@ def get_fermi_level_offset(dataloader, args, device):
         num_values += 1
 
     if num_values == 0:
-        raise ValueError("No Fermi level data found, can't compute an average fermi level")
+        # Neutral bulk sets, such as band gap sets, have no Fermi level labels.
+        logging.info("No Fermi level data found, using Fermi level offset 0")
+        return 0.0
 
     fermi_level_offset = fermi_sum / num_values
     logging.info("computed Fermi level offset %s", fermi_level_offset)
