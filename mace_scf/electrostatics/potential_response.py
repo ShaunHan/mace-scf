@@ -803,7 +803,8 @@ class PotentialResponse(ScaleShiftMACE):
 
     def solve(self, space, geometry, charge, start=None):
         """The minima of the energy: the state of the multipoles and amplitudes, the local energy and mu of each,
-        and the charges and Fermi level of the first, from which a solve at a nearby charge starts.
+        the charges and Fermi level of the final one, from which a solve at a nearby charge starts, and its
+        response.
 
         A fixed point has two, the minimum with the response of the geometry and the final one with the response
         read there.
@@ -826,8 +827,9 @@ class PotentialResponse(ScaleShiftMACE):
                     torch.cat((sampled, radial[..., c:].reshape_as(sampled), directional[..., :c].permute(0, 2, 3, 1)),
                               -2))
             response = self.response(chemical, vector, space.attrs, mask, state=read)
-            minima.append(self.minimum(response, space, charge, start=start)[:3])
-        return minima, start
+            state, energy, mu, start = self.minimum(response, space, charge, start=start)
+            minima.append((state, energy, mu))
+        return minima, start, response
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 band_edges=False, **kwargs):
@@ -845,7 +847,7 @@ class PotentialResponse(ScaleShiftMACE):
             node_energy, scalars, vectors = self.backbone(data, ctx)
             space = FourierSpace(self, data, positions)
             geometry = self.geometry(data, space, positions, scalars, vectors)
-            minima, start = self.solve(space, geometry, charge.to(space.volume))
+            minima, start, response = self.solve(space, geometry, charge.to(space.volume))
             state, response_energy, _ = minima[-1]
             electrostatic, observed = self.observe(space, state, positions, charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(space.counts))
@@ -881,15 +883,24 @@ class PotentialResponse(ScaleShiftMACE):
             # band maximum at Q + delta and the conduction band minimum at Q - delta, each extrapolated linearly to
             # zero charge from delta and 2 delta. The extrapolation removes the charging energy of the cell and the
             # filling of the edge, both linear in the charge and largest in a slab, so the edges are those of the
-            # neutral cell, as its DFT eigenvalues give them. With the response of the geometry the multiplier of
-            # each minimum is -dE/dQ there exactly; a fixed point takes the multiplier of its final minimum, with
-            # the response read at its own first minimum. Each solve starts from the minimum at the nearer charge.
+            # neutral cell, as its DFT eigenvalues give them. The charges are added to the final response of the
+            # neutral cell, kept fixed, as DFT band edges are eigenvalues of the ground-state Hamiltonian; the
+            # multiplier of each minimum is then -dE/dQ of that response exactly. A fixed point does not read its
+            # response again at the added charge: in a gapped cell mu jumps to a band edge at any charge, so a read
+            # of the levels against mu there would change the response by half the gap however small the charge.
+            # Each solve starts from the minimum at the nearer charge. The gap is the width of the bands at the
+            # Fermi level, so its loss trains the density of states alone: the levels, dipoles and local amplitudes
+            # that place the bands are those of the ground state, trained by its own labels. A gap loss on the
+            # levels would move the electronegativities of the elements, and with them the charge transfer and the
+            # potentials of every interface. The values of the edges are the same either way.
             delta, edges = getattr(self, 'band_edge_charge', .05), []
+            bias, dd_dE, coefficients, d0, amplitudes = response
+            response = (bias.detach(), dd_dE.detach(), coefficients, d0.detach(), amplitudes.detach())
             for sign in (1., -1.):
                 levels, near = [], start
                 for extra in (delta, 2*delta):
-                    minima, near = self.solve(space, geometry, charge.to(space.volume)+sign*extra, start=near)
-                    levels.append(minima[-1][2])
+                    _, _, mu, near = self.minimum(response, space, charge.to(space.volume)+sign*extra, start=near)
+                    levels.append(mu)
                 edges.append(2*levels[0]-levels[1]+self.fermi_level_offset+space.vacuum_reference)
             output.update(valence_band_maximum=edges[0], conduction_band_minimum=edges[1], band_gap=edges[1]-edges[0])
         if training and getattr(self, 'replay', None) is not None:
