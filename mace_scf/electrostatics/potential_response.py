@@ -253,6 +253,47 @@ class AtomicResponse(nn.Module):
         return (coefficients*(w*(gaussian_ramp(x)-gaussian_ramp(-centers/w))
                               - delta[..., None]*gaussian_step(-centers/w))).sum(-1)*w+.5*DOS_FLOOR*delta.square()
 
+    def band_edges(self, coefficients, level, mask, count, tolerance=1.e-10):
+        """How far the valence band maximum lies below the Fermi level and the conduction band minimum above it.
+
+        The states of the atoms at their levels (level, the bias and potential of each atom minus the Fermi
+        level) are those of the ground state, its potential held fixed, as DFT band edges are eigenvalues of the
+        ground-state Hamiltonian. An edge is where they hold count holes, below the Fermi level, or count
+        electrons, above it, per cell. The count rises monotonically with the distance, by at least DOS_FLOOR
+        per atom and volt, so each distance is the root of a monotone function: Newton steps kept inside a
+        bracket find it, and one differentiable Newton step at the root gives its exact derivative.
+        """
+        with torch.no_grad():
+            fixed, start = coefficients.detach(), level.detach()
+            ground = self.charge(fixed, start)[0]
+        distances = []
+        for sign in (1., -1.):
+            def held(distance):
+                charges, states = self.charge(fixed, start+sign*distance[:, None])
+                return sign*((charges-ground)*mask).sum(-1)-count, (states*mask).sum(-1)
+            with torch.no_grad():
+                low, high = torch.zeros_like(mask[:, 0]), torch.ones_like(mask[:, 0])
+                for _ in range(64):
+                    short = held(high)[0] < 0.
+                    if not bool(short.any()):
+                        break
+                    low, high = torch.where(short, high, low), torch.where(short, 2.*high, high)
+                distance = .5*(low+high)
+                for _ in range(200):
+                    value, slope = held(distance)
+                    low, high = torch.where(value < 0., distance, low), torch.where(value < 0., high, distance)
+                    step = distance-value/slope
+                    step = torch.where((step > low) & (step < high), step, .5*(low+high))
+                    if float((step-distance).abs().max()) < tolerance:
+                        distance = step
+                        break
+                    distance = step
+                slope = held(distance)[1]
+            charges = self.charge(coefficients, start+sign*distance[:, None])[0]
+            value = sign*((charges-self.charge(coefficients, start)[0])*mask).sum(-1)-count
+            distances.append(distance-value/slope)
+        return distances
+
 
 # The class of the atomic response in models saved before the renaming.
 LocalLaw = AtomicResponse
@@ -658,7 +699,8 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
-        # The hole and electron charge (e per cell) at which the band edges are read, and twice it.
+        # The holes and electrons (e per cell) that the ground-state states between each band edge and the Fermi
+        # level hold.
         self.band_edge_charge = float(band_edge_charge)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
@@ -734,6 +776,8 @@ class PotentialResponse(ScaleShiftMACE):
         linearized at the current levels and a backtracking line search on D makes every step an ascent, so the
         solve converges for every response. One differentiable solve at the converged levels gives the exact
         derivatives. The moments of order l >= 1, linear in their fields, are eliminated first (screen_moments).
+        Returns the state, the local energy, mu, the charges and mu from which a nearby solve starts, and the
+        levels b_i + v_i - (Kp)_i - mu of the atoms.
         """
         bias, dd_dE, coefficients, d0, amplitudes = response
         mask, size, count = space.present, space.size, space.num_moments
@@ -788,7 +832,7 @@ class PotentialResponse(ScaleShiftMACE):
         energy = ((charges*level-self.response.energy(coefficients, level)-bias*charges).sum(-1)
                   + .5*((moments[:, size:]-d0)*field[:, size:]).sum(-1)-(moments*applied).sum(-1))
         state = torch.cat((moments.reshape(len(mask), count, size).transpose(1, 2), amplitudes), -1)
-        return state, energy, mu, (charges.detach(), mu.detach())
+        return state, energy, mu, (charges.detach(), mu.detach()), level
 
     def geometry(self, data, space, positions, scalars, vectors):
         """What the solves at every charge share: the features and the response of the geometry and, for a fixed
@@ -801,18 +845,18 @@ class PotentialResponse(ScaleShiftMACE):
                                             float(self.receiver_widths.max()))
         return chemical, vector, self.response(chemical, vector, space.attrs, space.present), transport
 
-    def solve(self, space, geometry, charge, start=None):
-        """The minima of the energy: the state of the multipoles and amplitudes, the local energy and mu of each,
-        the charges and Fermi level of the final one, from which a solve at a nearby charge starts, and its
-        response.
+    def solve(self, space, geometry, charge):
+        """The minima of the energy, each as its state of the multipoles and amplitudes, local energy, mu and
+        levels of the atoms (bias and potential minus mu), the response of the final one, and the levels and
+        fields it was read from.
 
         A fixed point has two, the minimum with the response of the geometry and the final one with the response
         read there.
         """
         mask = space.present
         chemical, vector, response, transport = geometry
-        state, energy, mu, start = self.minimum(response, space, charge, start=start)
-        minima = [(state, energy, mu)]
+        state, energy, mu, start, level = self.minimum(response, space, charge)
+        minima, read = [(state, energy, mu, level)], None
         if self.fixed_point:
             sampled = sample_spectrum(total_spectrum(state, space), space, 1)
             potential, sampled = sampled[..., 0], sampled[..., 1:]
@@ -827,9 +871,9 @@ class PotentialResponse(ScaleShiftMACE):
                     torch.cat((sampled, radial[..., c:].reshape_as(sampled), directional[..., :c].permute(0, 2, 3, 1)),
                               -2))
             response = self.response(chemical, vector, space.attrs, mask, state=read)
-            state, energy, mu, start = self.minimum(response, space, charge, start=start)
-            minima.append((state, energy, mu))
-        return minima, start, response
+            state, energy, mu, _, level = self.minimum(response, space, charge, start=start)
+            minima.append((state, energy, mu, level))
+        return minima, response, read
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 band_edges=False, **kwargs):
@@ -847,8 +891,8 @@ class PotentialResponse(ScaleShiftMACE):
             node_energy, scalars, vectors = self.backbone(data, ctx)
             space = FourierSpace(self, data, positions)
             geometry = self.geometry(data, space, positions, scalars, vectors)
-            minima, start, response = self.solve(space, geometry, charge.to(space.volume))
-            state, response_energy, _ = minima[-1]
+            minima, response, read = self.solve(space, geometry, charge.to(space.volume))
+            state, response_energy, mu, level = minima[-1]
             electrostatic, observed = self.observe(space, state, positions, charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(space.counts))
             energy = energy+electrostatic+response_energy
@@ -879,30 +923,26 @@ class PotentialResponse(ScaleShiftMACE):
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
-            # The band edges are Fermi levels of the same energy at a small hole and electron charge: the valence
-            # band maximum at Q + delta and the conduction band minimum at Q - delta, each extrapolated linearly to
-            # zero charge from delta and 2 delta. The extrapolation removes the charging energy of the cell and the
-            # filling of the edge, both linear in the charge and largest in a slab, so the edges are those of the
-            # neutral cell, as its DFT eigenvalues give them. The charges are added to the final response of the
-            # neutral cell, kept fixed, as DFT band edges are eigenvalues of the ground-state Hamiltonian; the
-            # multiplier of each minimum is then -dE/dQ of that response exactly. A fixed point does not read its
-            # response again at the added charge: in a gapped cell mu jumps to a band edge at any charge, so a read
-            # of the levels against mu there would change the response by half the gap however small the charge.
-            # Each solve starts from the minimum at the nearer charge. The gap is the width of the bands at the
-            # Fermi level, so its loss trains the density of states alone: the levels, dipoles and local amplitudes
-            # that place the bands are those of the ground state, trained by its own labels. A gap loss on the
-            # levels would move the electronegativities of the elements, and with them the charge transfer and the
-            # potentials of every interface. The values of the edges are the same either way.
-            delta, edges = getattr(self, 'band_edge_charge', .05), []
-            bias, dd_dE, coefficients, d0, amplitudes = response
-            response = (bias.detach(), dd_dE.detach(), coefficients, d0.detach(), amplitudes.detach())
-            for sign in (1., -1.):
-                levels, near = [], start
-                for extra in (delta, 2*delta):
-                    _, _, mu, near = self.minimum(response, space, charge.to(space.volume)+sign*extra, start=near)
-                    levels.append(mu)
-                edges.append(2*levels[0]-levels[1]+self.fermi_level_offset+space.vacuum_reference)
-            output.update(valence_band_maximum=edges[0], conduction_band_minimum=edges[1], band_gap=edges[1]-edges[0])
+            # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
+            # Hamiltonian: the states of the final minimum's response at its levels, the potential held fixed, hold
+            # band_edge_charge holes between the valence band maximum and the Fermi level, and as many electrons
+            # between it and the conduction band minimum. No charge is added to the cell, so no charging energy or
+            # screening of an added charge enters the edges, in a slab or in bulk. The gap is the width of the
+            # bands at the Fermi level, so its loss trains the density of states alone: the levels, dipoles and
+            # local amplitudes that place the bands are those of the ground state, trained by its own labels. A gap
+            # loss on the levels would move the electronegativities of the elements, and with them the charge
+            # transfer and the potentials of every interface. A fixed point reads its states at the levels and
+            # fields of its first minimum; the gap loss keeps that read as it is and trains how the states follow
+            # from it.
+            coefficients = response[2]
+            if read is not None:
+                coefficients = self.response(*geometry[:2], space.attrs, space.present,
+                                             state=tuple(x.detach() for x in read))[2]
+            below, above = self.response.band_edges(coefficients, level, space.present,
+                                                    getattr(self, 'band_edge_charge', .05))
+            reference = mu+self.fermi_level_offset+space.vacuum_reference
+            output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
+                          band_gap=below+above)
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
