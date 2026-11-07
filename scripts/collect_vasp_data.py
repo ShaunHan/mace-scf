@@ -34,7 +34,8 @@ PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
 BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap too.
 OCCUPATION_TOL = 0.01  # A state filled by more than this and less than 1 - this is in a band at the Fermi level.
 FERMI_LEVEL_TOL = 0.1  # eV: largest difference of VASP's Fermi level of a gapped cell from its intrinsic level.
-REPEAT_LABEL_TOL = 1e-4  # eV or V: repeats whose energy, Fermi level or vacuum level differ more are reported.
+REPEAT_LABEL_TOL = 1e-4  # eV or V: a repeated job has the energy, Fermi level and vacuum level of the first to this.
+REPEAT_FORCE_TOL = 1e-3  # eV/A: and its forces.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -486,28 +487,36 @@ def collect_job(outdir):
     return atoms, outdir.parent.name, outdir
 
 
+def same_results(atoms, other):
+    """Whether two jobs gave the same energy, forces, Fermi level and vacuum level."""
+    labels = ("vasp_free_energy", "vasp_efermi", "vasp_vacuum_potential")
+    return (all(abs(atoms.info[key] - other.info[key]) <= REPEAT_LABEL_TOL for key in labels
+                if key in atoms.info and key in other.info)
+            and np.abs(atoms.arrays["vasp_forces"] - other.arrays["vasp_forces"]).max() <= REPEAT_FORCE_TOL)
+
+
 def drop_repeats(records):
-    """The first of each calculation, in batch order. A repeat has the atoms, cell, positions and INPUT_KEYS of an
-    earlier job, such as a zero-field point that is part of several field series; the same structure in another
-    field or at another charge is another calculation. A repeat whose labels differ by more than REPEAT_LABEL_TOL is
-    reported."""
-    kept, first = [], {}
+    """Drops a job that repeats an earlier one: the same atoms, cell, positions and INPUT_KEYS, and the same results.
+
+    Such a job is the same calculation run again, as when a structure's zero-field point is part of several field
+    series. The same structure in another field or at another charge is another calculation. Jobs with the same
+    inputs but different results are all kept and reported.
+    """
+    kept, earlier = [], {}
     for atoms, group, outdir in records:
         names = tuple(key for key in INPUT_KEYS if key in atoms.info)
         values = (atoms.cell.array, atoms.positions, *(atoms.info[key] for key in names))
         key = (tuple(atoms.get_chemical_symbols()), tuple(atoms.pbc), names,
                *((np.round(np.asarray(value, dtype=float), 6) + 0.0).tobytes() for value in values))
-        if key not in first:
-            first[key] = atoms, outdir
-            kept.append((atoms, group))
+        jobs = earlier.setdefault(key, [])
+        match = next((path for other, path in jobs if same_results(atoms, other)), None)
+        if match is not None:
+            print(f"Skipping {outdir}: repeats {match}")
             continue
-        original, path = first[key]
-        changed = [f"{name} by {abs(atoms.info[name] - original.info[name]):.1e}"
-                   for name in ("vasp_free_energy", "vasp_efermi", "vasp_vacuum_potential")
-                   if name in atoms.info and abs(atoms.info[name] - original.info[name]) > REPEAT_LABEL_TOL]
-        print(f"{'Warning' if changed else 'Skipping'} {outdir}: repeats {path}"
-              + (f" but differs in {', '.join(changed)}; the first is kept" if changed else ""))
-    print(f"Dropped {len(records) - len(kept)} repeated calculations of {len(records)}")
+        if jobs:
+            print(f"Note {outdir}: same inputs as {jobs[0][1]} but other results; both are kept")
+        jobs.append((atoms, outdir))
+        kept.append((atoms, group))
     return kept
 
 
@@ -544,7 +553,10 @@ def collect():
     records = [record for record in records if record is not None]
     if not records:
         raise SystemExit("No configurations collected")
+    collected = len(records)
     records = drop_repeats(records)
+    print(f"{len(paths)} jobs: {len(paths) - collected} skipped by the checks above, "
+          f"{collected - len(records)} repeats dropped, {len(records)} kept")
     train, valid = split_configs(records)
     for path, configs in ((OUT_XYZ, [a for a, _ in records]),
                           (OUT_TRAIN_XYZ, train), (OUT_VALID_XYZ, valid)):
