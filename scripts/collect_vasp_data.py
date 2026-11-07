@@ -35,12 +35,6 @@ BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by it
 OCCUPATION_TOL = 0.01  # A state filled by more than this and less than 1 - this is in a band at the Fermi level.
 FERMI_LEVEL_TOL = 0.1  # eV: largest difference of VASP's Fermi level of a gapped cell from its intrinsic level.
 REPEAT_LABEL_TOL = 1e-4  # eV or V: repeats whose energy, Fermi level or vacuum level differ more are reported.
-# With the atoms, positions and cell, these define a calculation: the DFT settings and k points, and the inputs
-# stored in atoms.info. Two jobs that agree in all of them are the same calculation run twice.
-SETTINGS_KEYS = ("encut", "prec", "gga", "metagga", "ivdw", "ispin", "ismear", "sigma", "lasph", "enaug", "lreal")
-INPUT_KEYS = ("config_type", "total_charge", "counter_charge", "external_field", "counter_charge_width",
-              "counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac",
-              "dipole_correction_xfrac", "dipole_correction_yfrac", "dipole_correction_zfrac")
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
@@ -49,6 +43,9 @@ OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
 
 COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
                          "counter_charge_zfrac")
+# With the atoms, cell and positions, these inputs define a calculation.
+INPUT_KEYS = ("total_charge", "counter_charge", "external_field", "counter_charge_width", *COUNTER_CHARGE_PLACES,
+              "dipole_correction_xfrac", "dipole_correction_yfrac", "dipole_correction_zfrac")
 
 
 def get_output_dirs():
@@ -486,45 +483,30 @@ def collect_job(outdir):
         # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
         add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
     print(f"Collected {outdir}")
-    settings = (tuple(str(parameters.get(key)) for key in SETTINGS_KEYS),
-                tuple(round(float(point.weight), 10) for point in kpoints))
-    return atoms, outdir.parent.name, str(outdir), settings
-
-
-def calculation_key(atoms, settings):
-    """What defines a calculation: the DFT settings, atoms, cell, positions and the inputs of INPUT_KEYS."""
-    rounded = lambda value, places: (np.round(np.asarray(value, dtype=float), places) + 0.0).tobytes()
-    inputs = tuple((key, atoms.info[key] if key == "config_type" else rounded(atoms.info[key], 8))
-                   for key in INPUT_KEYS if key in atoms.info)
-    return (settings, tuple(atoms.get_chemical_symbols()), tuple(atoms.pbc), rounded(atoms.cell.array, 6),
-            rounded(atoms.positions, 6), inputs)
+    return atoms, outdir.parent.name, outdir
 
 
 def drop_repeats(records):
-    """The first record of each calculation, in the order of the batches.
-
-    A repeat has the atoms, positions, cell, DFT settings, total charge, counter charge and its placement, field and
-    dipole correction plane of an earlier record: the same calculation run again, as when a structure's zero-field
-    point is part of every field series built on it. Records that differ in any of these, such as the same
-    structure in another field or at another charge, are different calculations and are all kept. A repeat whose
-    energy, Fermi level or vacuum level differs from the first by more than REPEAT_LABEL_TOL is reported.
-    """
+    """The first of each calculation, in batch order. A repeat has the atoms, cell, positions and INPUT_KEYS of an
+    earlier job, such as a zero-field point that is part of several field series; the same structure in another
+    field or at another charge is another calculation. A repeat whose labels differ by more than REPEAT_LABEL_TOL is
+    reported."""
     kept, first = [], {}
-    for atoms, group, outdir, settings in records:
-        key = calculation_key(atoms, settings)
+    for atoms, group, outdir in records:
+        names = tuple(key for key in INPUT_KEYS if key in atoms.info)
+        values = (atoms.cell.array, atoms.positions, *(atoms.info[key] for key in names))
+        key = (tuple(atoms.get_chemical_symbols()), tuple(atoms.pbc), names,
+               *((np.round(np.asarray(value, dtype=float), 6) + 0.0).tobytes() for value in values))
         if key not in first:
             first[key] = atoms, outdir
             kept.append((atoms, group))
             continue
         original, path = first[key]
-        differences = {name: abs(float(atoms.info[name]) - float(original.info[name]))
-                       for name in ("vasp_free_energy", "vasp_efermi", "vasp_vacuum_potential")
-                       if name in atoms.info and name in original.info}
-        large = ", ".join(f"{name} by {value:.2e}" for name, value in differences.items() if value > REPEAT_LABEL_TOL)
-        if large:
-            print(f"Warning {outdir}: repeats {path} but differs in {large}; the first is kept")
-        else:
-            print(f"Skipping {outdir}: repeats {path}")
+        changed = [f"{name} by {abs(atoms.info[name] - original.info[name]):.1e}"
+                   for name in ("vasp_free_energy", "vasp_efermi", "vasp_vacuum_potential")
+                   if name in atoms.info and abs(atoms.info[name] - original.info[name]) > REPEAT_LABEL_TOL]
+        print(f"{'Warning' if changed else 'Skipping'} {outdir}: repeats {path}"
+              + (f" but differs in {', '.join(changed)}; the first is kept" if changed else ""))
     print(f"Dropped {len(records) - len(kept)} repeated calculations of {len(records)}")
     return kept
 

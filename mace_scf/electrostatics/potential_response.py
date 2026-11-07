@@ -847,8 +847,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def solve(self, space, geometry, charge):
         """The minima of the energy, each as its state of the multipoles and amplitudes, local energy, mu and
-        levels of the atoms (bias and potential minus mu), the response of the final one, and the levels and
-        fields it was read from.
+        levels of the atoms (bias and potential minus mu), and the response of the final one.
 
         A fixed point has two, the minimum with the response of the geometry and the final one with the response
         read there.
@@ -856,7 +855,7 @@ class PotentialResponse(ScaleShiftMACE):
         mask = space.present
         chemical, vector, response, transport = geometry
         state, energy, mu, start, level = self.minimum(response, space, charge)
-        minima, read = [(state, energy, mu, level)], None
+        minima = [(state, energy, mu, level)]
         if self.fixed_point:
             sampled = sample_spectrum(total_spectrum(state, space), space, 1)
             potential, sampled = sampled[..., 0], sampled[..., 1:]
@@ -873,7 +872,7 @@ class PotentialResponse(ScaleShiftMACE):
             response = self.response(chemical, vector, space.attrs, mask, state=read)
             state, energy, mu, _, level = self.minimum(response, space, charge, start=start)
             minima.append((state, energy, mu, level))
-        return minima, response, read
+        return minima, response
 
     def forward(self, data, training=False, compute_force=True, compute_virials=False, compute_stress=False,
                 band_edges=False, **kwargs):
@@ -891,7 +890,7 @@ class PotentialResponse(ScaleShiftMACE):
             node_energy, scalars, vectors = self.backbone(data, ctx)
             space = FourierSpace(self, data, positions)
             geometry = self.geometry(data, space, positions, scalars, vectors)
-            minima, response, read = self.solve(space, geometry, charge.to(space.volume))
+            minima, response = self.solve(space, geometry, charge.to(space.volume))
             state, response_energy, mu, level = minima[-1]
             electrostatic, observed = self.observe(space, state, positions, charge)
             energy = scatter_sum(node_energy, data['batch'], dim=0, dim_size=len(space.counts))
@@ -931,14 +930,8 @@ class PotentialResponse(ScaleShiftMACE):
             # bands at the Fermi level, so its loss trains the density of states alone: the levels, dipoles and
             # local amplitudes that place the bands are those of the ground state, trained by its own labels. A gap
             # loss on the levels would move the electronegativities of the elements, and with them the charge
-            # transfer and the potentials of every interface. A fixed point reads its states at the levels and
-            # fields of its first minimum; the gap loss keeps that read as it is and trains how the states follow
-            # from it.
-            coefficients = response[2]
-            if read is not None:
-                coefficients = self.response(*geometry[:2], space.attrs, space.present,
-                                             state=tuple(x.detach() for x in read))[2]
-            below, above = self.response.band_edges(coefficients, level, space.present,
+            # transfer and the potentials of every interface.
+            below, above = self.response.band_edges(response[2], level, space.present,
                                                     getattr(self, 'band_edge_charge', .05))
             reference = mu+self.fermi_level_offset+space.vacuum_reference
             output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
