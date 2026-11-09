@@ -259,9 +259,10 @@ class AtomicResponse(nn.Module):
         The states of the atoms at their levels (level, the bias and potential of each atom minus the Fermi
         level) are those of the ground state, its potential held fixed, as DFT band edges are eigenvalues of the
         ground-state Hamiltonian. An edge is where they hold count holes, below the Fermi level, or count
-        electrons, above it, per cell. The count rises monotonically with the distance, by at least DOS_FLOOR
+        electrons, above it, in each cell. The count rises monotonically with the distance, by at least DOS_FLOOR
         per atom and volt, so each distance is the root of a monotone function: Newton steps kept inside a
-        bracket find it, and one differentiable Newton step at the root gives its exact derivative.
+        bracket find it, and one differentiable Newton step at the root gives its exact derivative in the
+        coefficients and in the levels; a level passed detached is held.
         """
         with torch.no_grad():
             fixed, start = coefficients.detach(), level.detach()
@@ -289,8 +290,8 @@ class AtomicResponse(nn.Module):
                         break
                     distance = step
                 slope = held(distance)[1]
-            charges = self.charge(coefficients, start+sign*distance[:, None])[0]
-            value = sign*((charges-self.charge(coefficients, start)[0])*mask).sum(-1)-count
+            charges = self.charge(coefficients, level+sign*distance[:, None])[0]
+            value = sign*((charges-self.charge(coefficients, level)[0])*mask).sum(-1)-count
             distances.append(distance-value/slope)
         return distances
 
@@ -673,7 +674,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
-                 band_edge_charge=.05, max_l=1, completion_max_l=None, **kwargs):
+                 band_edge_states=5.e-4, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
         # directions of the composition, such as the number of protons, while the response learns.
@@ -699,9 +700,9 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
-        # The holes and electrons (e per cell) that the ground-state states between each band edge and the Fermi
-        # level hold.
-        self.band_edge_charge = float(band_edge_charge)
+        # The holes and electrons per atom (e) that the ground-state states between each band edge and the Fermi
+        # level hold. Per atom, so that a supercell has the band edges of its cell.
+        self.band_edge_states = float(band_edge_states)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
                                        len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
@@ -924,15 +925,19 @@ class PotentialResponse(ScaleShiftMACE):
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
             # Hamiltonian: the states of the final minimum's response at its levels, the potential held fixed, hold
-            # band_edge_charge holes between the valence band maximum and the Fermi level, and as many electrons
-            # between it and the conduction band minimum. No charge is added to the cell, so no charging energy or
-            # screening of an added charge enters the edges, in a slab or in bulk. The gap is the width of the
-            # bands at the Fermi level, so its loss trains the density of states alone: the levels, dipoles and
-            # local amplitudes that place the bands are those of the ground state, trained by its own labels. A gap
-            # loss on the levels would move the electronegativities of the elements, and with them the charge
-            # transfer and the potentials of every interface.
-            below, above = self.response.band_edges(response[2], level, space.present,
-                                                    getattr(self, 'band_edge_charge', .05))
+            # band_edge_states holes per atom between the valence band maximum and the Fermi level, and as many
+            # electrons between it and the conduction band minimum. A count per cell would put the edges of a
+            # supercell deeper in the tails of its bands than those of its cell. No charge is added to the cell, so
+            # no charging energy or screening of an added charge enters the edges, in a slab or in bulk. A fixed
+            # point reads its states at
+            # the levels of its first minimum, so it places a gap at the level it finds: its gap loss trains the
+            # states and the read, and the levels that place the bands are those of the ground state, trained by its
+            # own labels. The states of a functional follow from the geometry alone and cannot follow its levels, so
+            # its gap loss trains the levels as well: with the states alone it reshapes them, and the shared layers
+            # under them, against every other label.
+            count = getattr(self, 'band_edge_states', 5.e-4)*space.present.sum(-1)
+            below, above = self.response.band_edges(response[2], level.detach() if self.fixed_point else level,
+                                                    space.present, count)
             reference = mu+self.fermi_level_offset+space.vacuum_reference
             output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
                           band_gap=below+above)
@@ -1019,6 +1024,9 @@ def fit_neutral_atoms(frames, knots=64, max_frames=32):
         waves = 2*np.pi*modes@np.linalg.inv(cell).T
         k2 = np.square(waves).sum(-1)
         use = (k2 > 0) & (k2 <= bandwidth**2)
+        if not use.any():
+            # A small cell, such as one atom of bulk silicon, may have no mode below the common bandwidth.
+            continue
         values = (proto[0]+1j*proto[1]).reshape(-1)[use]/np.prod(shape)
         structure = np.stack([np.exp(-1j*waves[use]@positions[numbers == z].T).sum(-1) for z in elements], -1)
         radial = hats(k2[use], bandwidth, knots)
@@ -1071,6 +1079,23 @@ def initialize_potential_response(model, args, train_loader, device):
             model.vacuum_reference_integrals[i] = -integrals.get(z, 0.)
             if z in rows:
                 model.neutral_atom_form_factors[i] = torch.as_tensor(rows[z])
+        # Every Fermi level of the model carries the vacuum reference of the neutral atoms of its cell, a few volts
+        # in a slab and 6 to 21 V in dense bulk silica and silicon. The offset computed as the mean Fermi level
+        # label would start them all that far off: it becomes the mean label less the reference of its cell. An
+        # offset set by hand is kept.
+        labels, references = [], []
+        integrals = model.vacuum_reference_integrals.detach().cpu()
+        for data in train_loader.dataset:
+            weight = getattr(data, 'fermi_level_weight', None)
+            if weight is None or not bool((weight > 0).all()):
+                continue
+            volume = abs(float(torch.linalg.det(data.cell.reshape(3, 3).double())))
+            references.append(float(data.node_attrs.sum(0).to(integrals)@integrals)/volume)
+            labels.append(float(data.fermi_level))
+        if references and abs(float(model.fermi_level_offset)-float(np.mean(labels))) < 1.e-6:
+            model.fermi_level_offset.fill_(float(np.mean(labels))-float(np.mean(references)))
+            logging.info(f'Fermi level offset {float(model.fermi_level_offset):.4f} V: the mean label '
+                         f'{np.mean(labels):.4f} less the mean vacuum reference {np.mean(references):.4f} V')
     scalar, vector, count = (torch.zeros_like(model.response.scalar_unit),
                              torch.zeros_like(model.response.vector_unit), 0.)
     for i, batch in enumerate(train_loader):

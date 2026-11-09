@@ -19,7 +19,7 @@ K_CUTOFF = 18.0  # HDF bandwidth in inverse Angstrom.
 FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cutoff.
 DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
-FMAX_TOL = 6.0
+FMAX_TOL = 10.0  # eV/A: largest atomic force of a kept frame.
 PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a uniform net force.
 VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
@@ -416,7 +416,8 @@ def collect_job(outdir):
     # where that is defined. With Fermi-Dirac occupations (ISMEAR = -1) it is the intrinsic level, where the few
     # holes of the valence band equal the few electrons of the conduction band, and VASP finds it unless a wide
     # gap leaves those tails below double precision. Other smearings, and such a gap, leave it wherever VASP's
-    # search stops. A metal, or a charged cell with the Fermi level in a band, has a zero gap.
+    # search stops. A neutral metal is labelled by its zero gap, so that metals and gapped cells are told apart.
+    # A charged cell has no gap label: its Fermi level lies in the band that holds the charge.
     edges = band_edges(kpoints, float(parameters["sigma"]))
     gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN
     intrinsic = gapped and parameters["ismear"] == -1 and abs(fermi - edges[2]) < FERMI_LEVEL_TOL
@@ -431,7 +432,7 @@ def collect_job(outdir):
         "vasp_dipole": dipole,
         "config_dipole_weight": np.eye(3)[axis] if slab else np.zeros(3),
         "config_fermi_level_weight": float(intrinsic or not gapped),
-        "config_band_gap_weight": float(gapped),
+        "config_band_gap_weight": float(abs(charge) < 1e-6),
     }
     if gapped:
         # The band edges in the origin of vasp_efermi.
