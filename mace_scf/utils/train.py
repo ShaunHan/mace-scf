@@ -468,6 +468,7 @@ def evaluate(
     delta_work_function_list = []
     delta_vacuum_potential_list = []
     delta_band_gap_list = []
+    work_function_frames, band_gap_frames = [], []
     fourier_errors = {}
     batch = None  # for pylint
 
@@ -547,9 +548,11 @@ def evaluate(
             observed = observed & (batch.fermi_level_weight > 0.0)
             delta_work_function_list.append((batch.vacuum_potential - batch.fermi_level
                                              - output["vacuum_potential"] + output["fermi_level"])[observed])
+            work_function_frames.append(batch.energy[observed])
         if output.get("band_gap") is not None:
             observed = batch.band_gap_weight > 0.0
             delta_band_gap_list.append((batch.band_gap - output["band_gap"])[observed])
+            band_gap_frames.append(batch.energy[observed])
         for key, widths in REPORTED_SMEARING_WIDTHS.items():
             if output.get(key + "_dft") is not None:
                 observed = getattr(batch, key + "_weight") > 0.0
@@ -695,6 +698,7 @@ def evaluate(
         delta_work_function = to_numpy(torch.cat(delta_work_function_list, dim=0))
         aux["mae_work_function"] = compute_mae(delta_work_function)
         aux["rmse_work_function"] = compute_rmse(delta_work_function)
+        aux["largest_work_function"] = largest_errors(delta_work_function, work_function_frames)
     delta_vacuum_potential = to_numpy(torch.cat(delta_vacuum_potential_list)) if delta_vacuum_potential_list else []
     if len(delta_vacuum_potential):
         aux["rmse_vacuum_potential"] = compute_rmse(delta_vacuum_potential)
@@ -702,6 +706,7 @@ def evaluate(
         delta_band_gap = to_numpy(torch.cat(delta_band_gap_list, dim=0))
         aux["mae_band_gap"] = compute_mae(delta_band_gap)
         aux["rmse_band_gap"] = compute_rmse(delta_band_gap)
+        aux["largest_band_gap"] = largest_errors(delta_band_gap, band_gap_frames)
     for name, errors in fourier_errors.items():
         aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
@@ -712,6 +717,12 @@ def evaluate(
 
     return avg_loss, aux
 
+
+def largest_errors(delta, energies, count=5):
+    """The frames with the largest errors, named by their energy labels: label - model in meV, share of the squared error."""
+    delta, energies = np.ravel(delta), to_numpy(torch.cat(energies))
+    return ", ".join(f"{energies[i]:.4f}: {1e3 * delta[i]:+.0f} ({100 * delta[i]**2 / (delta**2).sum():.0f}%)"
+                     for i in np.argsort(-np.abs(delta))[:count])
 
 
 def valid_err_log(
@@ -748,6 +759,11 @@ def valid_err_log(
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}"
         )
+        # a few frames can hold most of a squared error: a label to check, or conditions the training frames lack
+        largest = "; ".join(f"{name} {eval_metrics[key]}" for name, key in (("WF", "largest_work_function"), ("Eg", "largest_band_gap"))
+                            if eval_metrics.get(key))
+        if largest:
+            logging.info(f"Largest validation errors, energy label (eV): label - model (meV) and share of the squared error; {largest}")
     elif (
         log_errors == "PerAtomRMSEstressvirials"
         and eval_metrics["rmse_stress_per_atom"] is not None
