@@ -1,4 +1,5 @@
 import dataclasses
+import gc
 import logging
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -322,13 +323,26 @@ def take_step(
     batch_dict = batch.to_dict()
 
     # do not set ema when training
-    output = model_eval_wrapper(
-        model,
-        batch_dict,
-        training=True,
-    )
-    loss = loss_fn(pred=output, ref=batch)
-    loss.backward()
+    for attempt in range(2):
+        try:
+            output = model_eval_wrapper(
+                model,
+                batch_dict,
+                training=True,
+            )
+            loss = loss_fn(pred=output, ref=batch)
+            loss.backward()
+            break
+        except RuntimeError as error:
+            # The cuEq kernels of the backbone take their work space from the GPU itself, next to PyTorch's pool. A
+            # step that finds no memory is repeated once with the blocks that PyTorch keeps cached given back.
+            if attempt or "out of memory" not in str(error).lower():
+                raise
+            logging.warning(f"Out of GPU memory in training step {opt_step}; repeating it with PyTorch's cache released")
+        output = loss = None
+        optimizer.zero_grad(set_to_none=True)
+        gc.collect()
+        torch.cuda.empty_cache()
     del output
     loss_dict = {
         "loss": to_numpy(loss),
