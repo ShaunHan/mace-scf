@@ -148,3 +148,4 @@ train_schedule:
       replay: 1.0
 potential_response_config:
   energy_range: 10.0
+  dos_start: 0.01

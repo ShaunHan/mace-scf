@@ -17,6 +17,11 @@ from torch.nn import functional as F
 RESPONSE_SCALE = .02
 # A background density of states (e/V per atom) at all energies, so that every charge has one finite level.
 DOS_FLOOR = 1.e-5
+# The density of states of every atom of a functional at the start (e/V), the same at every energy, unless dos_start
+# is given. It is of the order of 1/U, U = 5.4 V/e the Coulomb energy of a charge of the density width 1.5 A, where
+# the states and the Coulomb energy resist a charge alike: far fewer states at the level make an insulator, far
+# more a metal.
+DOS_START = .1
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -125,14 +130,26 @@ class AtomicResponse(nn.Module):
     the density width: for l = 1 dd_dE times the density width squared is the dipole per field. The outputs of
     order l are gated sums of the order l solid harmonics of the vector channels. The density of states is a
     sum of Gaussian bumps of width resolution on [-energy_range, energy_range] eV over a background of
-    DOS_FLOOR, and starts at 1 e/V in the bands and 0.0025 e/V within 1 eV of the level. The local amplitudes of
-    the geometry have readouts of their own. With fixed_point the response also reads the levels and fields of the
-    atom and its neighbours, the atom's own from a random start and the neighbours' from zero; at zero levels and
-    field that read is the response of the geometry, and it changes the amplitudes by the change of the readouts.
+    DOS_FLOOR. The local amplitudes of the geometry have readouts of their own. With fixed_point the response
+    also reads the levels and fields of the atom and its neighbours, the atom's own from a random start and the
+    neighbours' from zero; at zero levels and field that read is the response of the geometry, and it changes
+    the amplitudes by the change of the readouts.
+
+    The start of the density of states. An atom exchanges charge only through the states at its level. The
+    labels can take them away, with a band gap or with a field the atom does not screen, but they do not give
+    them back: a metal that lost them still fits its training frames, with moments read from the geometry frame
+    by frame in place of the equilibrium with the Fermi level, and fails on new frames. The states of a
+    functional follow from the geometry alone, so it starts with dos_start at every energy, no gap and no band
+    edge built in. By default that is DOS_START, from where the labels reach a metal and an insulator alike.
+    Where every frame carries a band gap label, the zero of a metal included, the labels also give states back,
+    and a start half-way to an insulator on the scale of the readout, 0.01 e/V, spares the insulators the
+    removal. A fixed point reads its levels, which brings its atoms into that equilibrium without states at the
+    level, and starts with a gap of 2 eV at the level, 0.0025 e/V, between bands of 1 e/V.
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
-                 fixed_point=False, energy_range=6., resolution=.25, width=64, max_l=1, completion_max_l=1):
+                 fixed_point=False, energy_range=6., resolution=.25, width=64, max_l=1, completion_max_l=1,
+                 dos_start=DOS_START):
         super().__init__()
         # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
         self.mixer_scalar = nn.Parameter(torch.randn(num_layers*num_scalars, num_scalars))
@@ -150,8 +167,11 @@ class AtomicResponse(nn.Module):
         centers = torch.linspace(-energy_range, energy_range, int(round(2*energy_range/resolution))+1)
         self.dos_width = float(centers[1]-centers[0])
         self.register_buffer('dos_centers', centers)
-        self.register_buffer('dos_offsets', torch.where(centers.abs() < 1.-1.e-9, math.log(math.expm1(.0025)),
-                                                        math.log(math.expm1(1.))))
+        if fixed_point:
+            offsets = torch.where(centers.abs() < 1.-1.e-9, math.log(math.expm1(.0025)), math.log(math.expm1(1.)))
+        else:
+            offsets = torch.full_like(centers, math.log(math.expm1(dos_start)))
+        self.register_buffer('dos_offsets', offsets)
         self.dos_readout = nn.Linear(width, len(centers))
         self.species_bias = nn.Parameter(torch.zeros(num_elements))
         self.species_source = nn.Parameter(torch.zeros(num_elements, num_sources))
@@ -674,7 +694,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
                  fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
-                 band_edge_states=5.e-4, max_l=1, completion_max_l=None, **kwargs):
+                 band_edge_states=5.e-4, dos_start=DOS_START, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
         # directions of the composition, such as the number of protons, while the response learns.
@@ -707,7 +727,7 @@ class PotentialResponse(ScaleShiftMACE):
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
                                        len(receivers), fixed_point=self.fixed_point, energy_range=energy_range,
                                        resolution=resolution, max_l=self.max_l,
-                                       completion_max_l=self.completion_max_l)
+                                       completion_max_l=self.completion_max_l, dos_start=float(dos_start))
 
     def __setstate__(self, state):
         # Models saved before the renaming hold the atomic response as law.
