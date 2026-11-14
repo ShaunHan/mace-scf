@@ -777,7 +777,7 @@ def valid_err_log(
         largest = "; ".join(f"{name} {eval_metrics[key]}" for name, key in (("WF", "largest_work_function"), ("Eg", "largest_band_gap"))
                             if eval_metrics.get(key))
         if largest:
-            logging.info(f"Largest validation errors, energy label (eV): label - model (meV) and share of the squared error; {largest}")
+            logging.debug(f"Largest validation errors, energy label (eV): label - model (meV) and share of the squared error; {largest}")
     elif (
         log_errors == "PerAtomRMSEstressvirials"
         and eval_metrics["rmse_stress_per_atom"] is not None

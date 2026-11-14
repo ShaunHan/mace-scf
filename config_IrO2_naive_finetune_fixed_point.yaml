@@ -81,7 +81,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 0.0
+      band_gap: 100.0
   1:
     name: stage1
     start: 10
@@ -99,7 +99,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 0.0
+      band_gap: 100.0
   2:
     name: stage2
     start: 50
@@ -117,7 +117,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
+      band_gap: 100.0
   3:
     name: stage3
     start: 150
@@ -135,7 +135,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
+      band_gap: 100.0
   4:
     name: stage4
     start: 250
@@ -153,6 +153,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
+      band_gap: 100.0
 potential_response_config:
   fixed_point: true
+  band_edge_states: 0.01

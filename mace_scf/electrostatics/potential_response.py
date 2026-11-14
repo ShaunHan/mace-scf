@@ -721,7 +721,11 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
         # The holes and electrons per atom (e) that the ground-state states between each band edge and the Fermi
-        # level hold. Per atom, so that a supercell has the band edges of its cell.
+        # level hold. Per atom, so that a supercell has the band edges of its cell. The states are smeared by the
+        # resolution, so the count sets how far in the tail of the first state its edge is read. 0.01 is about
+        # half a state of a cell of a hundred atoms, at its eigenvalue: where a band edge meets the Fermi level,
+        # as at a charged interface, the edges and the charges then agree. A small count reads the edge well
+        # inside the eigenvalue, and keeps the gap of a metal, twice the count over its density of states, at zero.
         self.band_edge_states = float(band_edge_states)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
@@ -948,16 +952,13 @@ class PotentialResponse(ScaleShiftMACE):
             # band_edge_states holes per atom between the valence band maximum and the Fermi level, and as many
             # electrons between it and the conduction band minimum. A count per cell would put the edges of a
             # supercell deeper in the tails of its bands than those of its cell. No charge is added to the cell, so
-            # no charging energy or screening of an added charge enters the edges, in a slab or in bulk. A fixed
-            # point reads its states at
-            # the levels of its first minimum, so it places a gap at the level it finds: its gap loss trains the
-            # states and the read, and the levels that place the bands are those of the ground state, trained by its
-            # own labels. The states of a functional follow from the geometry alone and cannot follow its levels, so
-            # its gap loss trains the levels as well: with the states alone it reshapes them, and the shared layers
-            # under them, against every other label.
+            # no charging energy or screening of an added charge enters the edges, in a slab or in bulk. A band gap
+            # label trains the states alone, in both models: the levels at which they are counted are held, as the
+            # potential and the Fermi level that set them have labels of their own. Trained through the levels, a
+            # band gap label moves the potential of every frame whose atoms share the readouts of the labelled
+            # ones.
             count = getattr(self, 'band_edge_states', 5.e-4)*space.present.sum(-1)
-            below, above = self.response.band_edges(response[2], level.detach() if self.fixed_point else level,
-                                                    space.present, count)
+            below, above = self.response.band_edges(response[2], level.detach(), space.present, count)
             reference = mu+self.fermi_level_offset+space.vacuum_reference
             output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
                           band_gap=below+above)
