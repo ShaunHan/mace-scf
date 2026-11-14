@@ -22,6 +22,13 @@ DOS_FLOOR = 1.e-5
 # the states and the Coulomb energy resist a charge alike: far fewer states at the level make an insulator, far
 # more a metal.
 DOS_START = .1
+# The energies of the density of states of an atom reach ENERGY_RANGE (eV) to either side of its neutral level.
+# The band edges of an insulator lie about half its gap from the levels of its atoms, and the levels move by
+# volts with the potential, so the range holds band gaps up to about 15 eV. Beyond it an atom has DOS_FLOOR alone.
+ENERGY_RANGE = 10.
+# The band gap error (eV) up to which the band gap loss is the square of the error; beyond it the loss is linear.
+# It is the spacing of the energies of the density of states, the resolution of a band edge.
+BAND_GAP_DELTA = .25
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -142,14 +149,15 @@ class AtomicResponse(nn.Module):
     functional follow from the geometry alone, so it starts with dos_start at every energy, no gap and no band
     edge built in. By default that is DOS_START, from where the labels reach a metal and an insulator alike.
     Where every frame carries a band gap label, the zero of a metal included, the labels also give states back,
-    and a start half-way to an insulator on the scale of the readout, 0.01 e/V, spares the insulators the
-    removal. A fixed point reads its levels, which brings its atoms into that equilibrium without states at the
-    level, and starts with a gap of 2 eV at the level, 0.0025 e/V, between bands of 1 e/V.
+    and a start of 0.01 e/V spares ionic insulators a detour: from DOS_START they first build the charges of
+    their ions from the states at the level, which their band gap labels then have to take out again. A fixed
+    point reads its levels, which brings its atoms into that equilibrium without states at the level, and
+    starts with a gap of 2 eV at the level, 0.0025 e/V, between bands of 1 e/V.
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
-                 fixed_point=False, energy_range=6., resolution=.25, width=64, max_l=1, completion_max_l=1,
-                 dos_start=DOS_START):
+                 fixed_point=False, energy_range=ENERGY_RANGE, resolution=.25, width=64, max_l=1,
+                 completion_max_l=1, dos_start=DOS_START):
         super().__init__()
         # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
         self.mixer_scalar = nn.Parameter(torch.randn(num_layers*num_scalars, num_scalars))
@@ -278,11 +286,21 @@ class AtomicResponse(nn.Module):
 
         The states of the atoms at their levels (level, the bias and potential of each atom minus the Fermi
         level) are those of the ground state, its potential held fixed, as DFT band edges are eigenvalues of the
-        ground-state Hamiltonian. An edge is where they hold count holes, below the Fermi level, or count
-        electrons, above it, in each cell. The count rises monotonically with the distance, by at least DOS_FLOOR
-        per atom and volt, so each distance is the root of a monotone function: Newton steps kept inside a
-        bracket find it, and one differentiable Newton step at the root gives its exact derivative in the
-        coefficients and in the levels; a level passed detached is held.
+        ground-state Hamiltonian. The first state on each side of the Fermi level is found where the states hold
+        count holes, below it, or count electrons, above it, in each cell. The count rises monotonically with
+        the distance, by at least DOS_FLOOR per atom and volt, so each distance is the root of a monotone
+        function: Newton steps kept inside a bracket find it, and one differentiable Newton step at the root
+        gives its exact derivative in the coefficients and in the levels; a level passed detached is held.
+
+        The states are smeared by the resolution, so the count is met in the tail of that state, some tenths of
+        an eV before its energy and by an amount that depends on the count and on the weight of the state. The
+        edge is the energy of the state itself, as a DFT band edge is an eigenvalue: a state smeared to a
+        Gaussian of variance s^2 lies s^2 times the logarithmic slope of the states beyond any point of its tail,
+        and the distance is moved out by that. Where the states are level, as at the Fermi level of a metal,
+        nothing is added, and its gap reads twice the count over its density of states. The offset is held in
+        the derivative: the energy of a state does not change with the number of states it holds, so the
+        derivative of the edge itself nearly vanishes at the first states of a band, and the tail keeps the
+        derivative through which a label moves the edge.
         """
         with torch.no_grad():
             fixed, start = coefficients.detach(), level.detach()
@@ -312,7 +330,13 @@ class AtomicResponse(nn.Module):
                 slope = held(distance)[1]
             charges = self.charge(coefficients, level+sign*distance[:, None])[0]
             value = sign*((charges-self.charge(coefficients, level)[0])*mask).sum(-1)-count
-            distances.append(distance-value/slope)
+            tail = distance-value/slope
+            with torch.no_grad():
+                x = ((level+sign*tail[:, None])[..., None]-self.dos_centers)/self.dos_width
+                states = coefficients*gaussian(x)
+                rise = -sign*self.dos_width*((x*states).sum(-1)*mask).sum(-1)
+                offset = rise/((states.sum(-1)+DOS_FLOOR)*mask).sum(-1)
+            distances.append(tail+offset)
         return distances
 
 
@@ -693,7 +717,7 @@ class PotentialResponse(ScaleShiftMACE):
     newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
-                 fixed_point=False, short_range_potential=True, energy_range=6., resolution=.25,
+                 fixed_point=False, short_range_potential=True, energy_range=ENERGY_RANGE, resolution=.25,
                  band_edge_states=5.e-4, dos_start=DOS_START, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
@@ -720,12 +744,12 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
-        # The holes and electrons per atom (e) that the ground-state states between each band edge and the Fermi
-        # level hold. Per atom, so that a supercell has the band edges of its cell. The states are smeared by the
-        # resolution, so the count sets how far in the tail of the first state its edge is read. 0.01 is about
-        # half a state of a cell of a hundred atoms, at its eigenvalue: where a band edge meets the Fermi level,
-        # as at a charged interface, the edges and the charges then agree. A small count reads the edge well
-        # inside the eigenvalue, and keeps the gap of a metal, twice the count over its density of states, at zero.
+        # The holes and electrons per atom (e) by which band_edges finds the first state on each side of the Fermi
+        # level. Per atom, so that a supercell has the band edges of its cell. A band edge is the energy of that
+        # state and not the point of its smeared tail where the count is met, so the edges, and with them the
+        # charge that a band takes up where its edge meets the Fermi level, as at a charged interface, do not
+        # depend on the count. The count is small, so that the gap of a metal, twice the count over its density
+        # of states, reads zero: 0.01 eV at 0.1 e/V.
         self.band_edge_states = float(band_edge_states)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
@@ -948,15 +972,14 @@ class PotentialResponse(ScaleShiftMACE):
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
-            # Hamiltonian: the states of the final minimum's response at its levels, the potential held fixed, hold
-            # band_edge_states holes per atom between the valence band maximum and the Fermi level, and as many
-            # electrons between it and the conduction band minimum. A count per cell would put the edges of a
-            # supercell deeper in the tails of its bands than those of its cell. No charge is added to the cell, so
-            # no charging energy or screening of an added charge enters the edges, in a slab or in bulk. A band gap
-            # label trains the states alone, in both models: the levels at which they are counted are held, as the
-            # potential and the Fermi level that set them have labels of their own. Trained through the levels, a
-            # band gap label moves the potential of every frame whose atoms share the readouts of the labelled
-            # ones.
+            # Hamiltonian: the first states of the final minimum's response on each side of the Fermi level, found
+            # where the states at their levels, the potential held fixed, hold band_edge_states holes or electrons
+            # per atom. A count per cell would find the states of a supercell deeper in the tails of its bands than
+            # those of its cell. No charge is added to the cell, so no charging energy or screening of an added
+            # charge enters the edges, in a slab or in bulk. A band gap label trains the states alone, in both
+            # models: the levels at which they are counted are held, as the potential and the Fermi level that set
+            # them have labels of their own. Trained through the levels, a band gap label moves the potential of
+            # every frame whose atoms share the readouts of the labelled ones.
             count = getattr(self, 'band_edge_states', 5.e-4)*space.present.sum(-1)
             below, above = self.response.band_edges(response[2], level.detach(), space.present, count)
             reference = mu+self.fermi_level_offset+space.vacuum_reference
@@ -1190,12 +1213,16 @@ def weighted_mean_squared_error_vacuum_potential(ref, pred):
     return torch.mean(configs_weight*torch.square(ref['vacuum_potential']-pred['vacuum_potential']))
 
 
-def weighted_mean_squared_error_band_gap(ref, pred):
-    # band_gap: [n_graphs, ], predicted for batches with band gap labels only
+def weighted_huber_error_band_gap(ref, pred):
+    # band_gap: [n_graphs, ], predicted for batches with band gap labels only. The square of the error up to
+    # BAND_GAP_DELTA and linear beyond it, with the slope of the square there. Band gaps span electron volts: at the
+    # start of a training, and in the few cells whose gap a single state sets, the square of an error of electron
+    # volts outweighs every other term of the loss.
     if pred.get('band_gap') is None:
         return ref.weight.new_zeros(())
     configs_weight = ref.weight*ref.band_gap_weight
-    return torch.mean(configs_weight*torch.square(ref['band_gap']-pred['band_gap']))
+    error = 2.*F.huber_loss(pred['band_gap'], ref['band_gap'], reduction='none', delta=BAND_GAP_DELTA)
+    return torch.mean(configs_weight*error)
 
 
 def replay_loss(ref, pred):

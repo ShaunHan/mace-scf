@@ -148,4 +148,3 @@ train_schedule:
       replay: 1.0
 potential_response_config:
   fixed_point: true
-  energy_range: 10.0

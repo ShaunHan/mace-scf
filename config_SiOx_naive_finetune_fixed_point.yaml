@@ -142,4 +142,3 @@ train_schedule:
       band_gap: 100.0
 potential_response_config:
   fixed_point: true
-  energy_range: 10.0

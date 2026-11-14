@@ -160,5 +160,3 @@ train_schedule:
       fermi_level: 100.0
       band_gap: 100.0
       replay: 1.0
-potential_response_config:
-  band_edge_states: 0.01

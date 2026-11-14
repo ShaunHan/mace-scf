@@ -162,4 +162,3 @@ train_schedule:
       replay: 1.0
 potential_response_config:
   fixed_point: true
-  band_edge_states: 0.01

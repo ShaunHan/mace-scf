@@ -119,5 +119,4 @@ train_schedule:
       fermi_level: 100.0
       band_gap: 100.0
 potential_response_config:
-  energy_range: 10.0
   dos_start: 0.01
