@@ -25,7 +25,7 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, spectral_errors
+from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, dos_errors, spectral_errors
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -482,6 +482,7 @@ def evaluate(
     delta_work_function_list = []
     delta_vacuum_potential_list = []
     delta_band_gap_list = []
+    dos_error_list = []
     work_function_frames, band_gap_frames = [], []
     fourier_errors = {}
     batch = None  # for pylint
@@ -567,6 +568,9 @@ def evaluate(
             observed = batch.band_gap_weight > 0.0
             delta_band_gap_list.append((batch.band_gap - output["band_gap"])[observed])
             band_gap_frames.append(batch.energy[observed])
+        if output.get("atomic_electrons") is not None and batch.dos.numel() > 0:
+            errors = dos_errors(batch, output)
+            dos_error_list.append(errors[torch.isfinite(errors) & (batch.dos_weight > 0.0)].detach())
         for key, widths in REPORTED_SMEARING_WIDTHS.items():
             if output.get(key + "_dft") is not None:
                 observed = getattr(batch, key + "_weight") > 0.0
@@ -721,6 +725,9 @@ def evaluate(
         aux["mae_band_gap"] = compute_mae(delta_band_gap)
         aux["rmse_band_gap"] = compute_rmse(delta_band_gap)
         aux["largest_band_gap"] = largest_errors(delta_band_gap, band_gap_frames)
+    if dos_error_list and sum(len(errors) for errors in dos_error_list):
+        # the root of the mean squared error per atom and energy, averaged over the frames
+        aux["rmse_dos"] = float(np.sqrt(to_numpy(torch.cat(dos_error_list)).mean()))
     for name, errors in fourier_errors.items():
         aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
@@ -770,8 +777,9 @@ def valid_err_log(
         # the vacuum potential and the band gap only when the data have their labels
         error_vac = f", RMSE_ESPvac={eval_metrics['rmse_vacuum_potential'] * 1e3:.1f} mV" if "rmse_vacuum_potential" in eval_metrics else ""
         error_gap = f", RMSE_Eg={eval_metrics['rmse_band_gap'] * 1e3:.1f} meV" if "rmse_band_gap" in eval_metrics else ""
+        error_dos = f", RMSE_DOS={eval_metrics['rmse_dos'] * 1e3:.1f} me" if "rmse_dos" in eval_metrics else ""
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}{error_dos}"
         )
         # a few frames can hold most of a squared error: a label to check, or conditions the training frames lack
         largest = "; ".join(f"{name} {eval_metrics[key]}" for name, key in (("WF", "largest_work_function"), ("Eg", "largest_band_gap"))

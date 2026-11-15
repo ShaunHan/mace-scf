@@ -67,6 +67,11 @@ VOLT_KEYS = (
     "vacuum_potential_weight",
     "band_gap",
     "band_gap_weight",
+    "dos",
+    "dos_shape",
+    "dos_energy",
+    "dos_top",
+    "dos_weight",
     "fourier_density",
     "fourier_density_shape",
     "fourier_density_weight",
@@ -96,6 +101,11 @@ class ExtAtomicData(AtomicData):
     vacuum_potential_weight: torch.Tensor
     band_gap: torch.Tensor
     band_gap_weight: torch.Tensor
+    dos: torch.Tensor
+    dos_shape: torch.Tensor
+    dos_energy: torch.Tensor
+    dos_top: torch.Tensor
+    dos_weight: torch.Tensor
     fourier_density: torch.Tensor
     fourier_density_shape: torch.Tensor
     fourier_density_weight: torch.Tensor
@@ -338,6 +348,27 @@ class ExtAtomicData(AtomicData):
             value = torch.complex(value[0], value[1])
             return value.reshape(-1), torch.tensor(value.shape, dtype=torch.long)
 
+        def projected(name):
+            # [atoms, energies] density of states of every atom (states/eV) on the energies name_energy, measured
+            # from the Fermi level of DFT; stored flat with its shape, as the graphs of a batch differ in both.
+            value, energy = config.properties.get(name), config.properties.get(name + "_energy")
+            if value is None or energy is None:
+                return (torch.zeros((0,), dtype=torch.float32), torch.zeros((2,), dtype=torch.long),
+                        torch.zeros((0,), dtype=torch.float32), 0.0)
+            value = np.asarray(value, dtype=float).reshape(num_atoms, -1)
+            energy = np.asarray(energy, dtype=float).reshape(-1)
+            # Up to where the states are those of DFT. They can stop below the end of the energies for two reasons:
+            # at the top of the valence band of a gapped frame, whose gap label then says how far no state follows,
+            # or where the bands of the DFT run end, a little below which its bands are no longer all there.
+            top, filled = float(energy[-1]), np.nonzero(value.sum(0) > 0.0)[0]
+            if len(filled) and filled[-1] < len(energy) - 3:
+                last, gap = float(energy[filled[-1]]), config.properties.get("band_gap")
+                gapped = gap is not None and float(gap) > 0.0 and config.property_weights.get("band_gap", 0.0) > 0.0
+                top = min(top, last + float(gap)) if gapped and last <= 0.1 else last - 1.0
+            return (torch.as_tensor(value, dtype=torch.float32).reshape(-1), torch.tensor(value.shape, dtype=torch.long),
+                    torch.as_tensor(energy, dtype=torch.float32), top)
+
+        dos, dos_shape, dos_energy, dos_top = projected("dos")
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
         volt = dict(
@@ -346,6 +377,11 @@ class ExtAtomicData(AtomicData):
             vacuum_potential_weight=weight("vacuum_potential"),
             band_gap=label("band_gap", 0.0),
             band_gap_weight=weight("band_gap"),
+            dos=dos,
+            dos_shape=dos_shape,
+            dos_energy=dos_energy,
+            dos_top=torch.tensor(dos_top, dtype=torch.get_default_dtype()),
+            dos_weight=weight("dos"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,
             fourier_density_weight=weight("fourier_density"),

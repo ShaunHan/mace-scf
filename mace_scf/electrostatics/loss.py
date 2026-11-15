@@ -16,6 +16,7 @@ from .potential_response import (
     FourierPotentialError,
     replay_loss,
     weighted_huber_error_band_gap,
+    weighted_mean_squared_error_dos,
     weighted_mean_squared_error_vacuum_potential,
 )
 import logging
@@ -271,6 +272,7 @@ _LOSS_FUNCTIONS = {
     "field_features": weighted_mean_squared_error_field_feats,
     "vacuum_potential": weighted_mean_squared_error_vacuum_potential,
     "band_gap": weighted_huber_error_band_gap,
+    "dos": weighted_mean_squared_error_dos,
     "fourier_density": FourierDensityError,
     "fourier_potential": FourierPotentialError,
     "replay": replay_loss,
