@@ -29,6 +29,11 @@ ENERGY_RANGE = 10.
 # The band gap error (eV) up to which the band gap loss is the square of the error; beyond it the loss is linear.
 # It is the spacing of the energies of the density of states, the resolution of a band edge.
 BAND_GAP_DELTA = .25
+# The most electrons (e) that the states between a band edge and the Fermi level of a cell hold. A band edge is the
+# energy of one state of one k-point, and that state holds two electrons times the weight of its k-point. At a
+# fixed spacing of the k-points their number falls with the size of the cell, so the count grows with the atoms,
+# until one k-point is left: from there the edge is where one electron is counted, half the state, at its energy.
+BAND_EDGE_ELECTRONS = 1.
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -729,11 +734,12 @@ class PotentialResponse(ScaleShiftMACE):
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
         self.fixed_point = bool(fixed_point)
         # The holes and electrons per atom (e) that the ground-state states between each band edge and the Fermi
-        # level hold. Per atom, so that a supercell has the band edges of its cell. The states are smeared by the
-        # resolution, so the count sets how far in the tail of the first state its edge is read. 0.01 is about
-        # half a state of a cell of a hundred atoms, at its eigenvalue: where a band edge meets the Fermi level,
-        # as at a charged interface, the edges and the charges then agree. A small count reads the edge well
-        # inside the eigenvalue, and keeps the gap of a metal, twice the count over its density of states, at zero.
+        # level hold, up to BAND_EDGE_ELECTRONS per cell. Per atom, so that a supercell has the band edges of its
+        # cell. The states are smeared by the resolution, so the count sets how far in the tail of the first state
+        # its edge is read. 0.01 is about half a state of a cell of a hundred atoms, at its eigenvalue: where a band
+        # edge meets the Fermi level, as at a charged interface, the edges and the charges then agree. A small count
+        # reads the edge well inside the eigenvalue, and keeps the gap of a metal, twice the count over its density
+        # of states, at zero.
         self.band_edge_states = float(band_edge_states)
         layers = int(self.num_interactions)
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
@@ -958,14 +964,16 @@ class PotentialResponse(ScaleShiftMACE):
             # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
             # Hamiltonian: the states of the final minimum's response at its levels, the potential held fixed, hold
             # band_edge_states holes per atom between the valence band maximum and the Fermi level, and as many
-            # electrons between it and the conduction band minimum. A count per cell would put the edges of a
-            # supercell deeper in the tails of its bands than those of its cell. No charge is added to the cell, so
-            # no charging energy or screening of an added charge enters the edges, in a slab or in bulk. A band gap
-            # label trains the states alone, in both models: the levels at which they are counted are held, as the
-            # potential and the Fermi level that set them have labels of their own. Trained through the levels, a
-            # band gap label moves the potential of every frame whose atoms share the readouts of the labelled
-            # ones.
-            count = getattr(self, 'band_edge_states', 5.e-4)*space.present.sum(-1)
+            # electrons between it and the conduction band minimum, and no more than BAND_EDGE_ELECTRONS in the
+            # cell. Per atom, the edges of a supercell are those of its cell. Without the bound, a cell of several
+            # hundred atoms would count more than its first state holds and read its edges past that state: the band
+            # gap of bulk water (192 atoms) came out wider than that of the water slabs (72, 108 atoms) from the
+            # same states. No charge is added to the cell, so no charging energy or screening of an added charge
+            # enters the edges, in a slab or in bulk. A band gap label trains the states alone, in both models: the
+            # levels at which they are counted are held, as the potential and the Fermi level that set them have
+            # labels of their own. Trained through the levels, a band gap label moves the potential of every frame
+            # whose atoms share the readouts of the labelled ones.
+            count = (getattr(self, 'band_edge_states', 5.e-4)*space.present.sum(-1)).clamp_max(BAND_EDGE_ELECTRONS)
             below, above = self.response.band_edges(response[2], level.detach(), space.present, count)
             reference = mu+self.fermi_level_offset+space.vacuum_reference
             output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
