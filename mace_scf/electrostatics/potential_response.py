@@ -1308,8 +1308,8 @@ def dos_errors(ref, pred):
     holds at every energy more than in the ground state. The model gives the same from its own Fermi level. Both
     Fermi levels have the origin of the potential, so the two curves are compared at the same energies: in a gap
     both are flat, wherever in it each Fermi level lies, and in a metal a Fermi level off the one of DFT shows as
-    the electrons between the two. The label counts where DFT's bands are complete, from dos_bottom to dos_top, two
-    widths inside them.
+    the electrons between the two. The label holds the energies at which DFT has all its states, and counts from
+    two widths inside its ends, where the states beyond them no longer reach.
     """
     shifts, width, curves = pred['dos_shifts'], pred['dos_width'], pred['atomic_electrons']
     shapes, ptr = ref['dos_shape'].reshape(-1, 2).tolist(), ref.ptr
@@ -1323,7 +1323,7 @@ def dos_errors(ref, pred):
         start, first = start+atoms*bins, first+bins
         at = shifts+pred['fermi_level'][graph]-ref['fermi_level'][graph]
         kernel = (energy[1]-energy[0])*(gaussian_step((at[:, None]-energy)/width)-gaussian_step(-energy/width))
-        valid = (at > ref['dos_bottom'][graph]+2.*width) & (at < ref['dos_top'][graph]-2.*width)
+        valid = (at > energy[0]+2.*width) & (at < energy[-1]-2.*width)
         if not bool(valid.any()):
             errors.append(curves.new_tensor(float('nan')))
             continue

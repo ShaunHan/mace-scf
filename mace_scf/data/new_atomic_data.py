@@ -62,6 +62,9 @@ def applied_sawtooth(cell, pbc, external_field):
     return 0.5 * float(np.ravel(external_field) @ normal) * float(cell[axis] @ normal)
 
 
+# eV: the spacing of the energies of a density of states label, PDOS_STEP of scripts/collect_vasp_data.py.
+DOS_STEP = 0.05
+
 VOLT_KEYS = (
     "vacuum_potential",
     "vacuum_potential_weight",
@@ -70,8 +73,6 @@ VOLT_KEYS = (
     "dos",
     "dos_shape",
     "dos_energy",
-    "dos_top",
-    "dos_bottom",
     "dos_weight",
     "fourier_density",
     "fourier_density_shape",
@@ -105,8 +106,6 @@ class ExtAtomicData(AtomicData):
     dos: torch.Tensor
     dos_shape: torch.Tensor
     dos_energy: torch.Tensor
-    dos_top: torch.Tensor
-    dos_bottom: torch.Tensor
     dos_weight: torch.Tensor
     fourier_density: torch.Tensor
     fourier_density_shape: torch.Tensor
@@ -351,33 +350,21 @@ class ExtAtomicData(AtomicData):
             return value.reshape(-1), torch.tensor(value.shape, dtype=torch.long)
 
         def projected(name):
-            # [atoms, energies] density of states of every atom (states/eV) on the energies name_energy, measured
-            # from the Fermi level of DFT; stored flat with its shape, as the graphs of a batch differ in both.
-            value, energy = config.properties.get(name), config.properties.get(name + "_energy")
-            if value is None or energy is None:
+            # [atoms, energies] density of states of every atom (states/eV) at the energies DOS_STEP * j, j = -n..n,
+            # from the Fermi level of DFT, out to where DFT has all its states, as scripts/collect_vasp_data.py
+            # writes it. Stored flat with its shape, as the graphs of a batch differ in both.
+            value = config.properties.get(name)
+            if value is None:
                 return (torch.zeros((0,), dtype=torch.float32), torch.zeros((2,), dtype=torch.long),
-                        torch.zeros((0,), dtype=torch.float32), 0.0, 0.0)
+                        torch.zeros((0,), dtype=torch.float32))
             value = np.asarray(value, dtype=float).reshape(num_atoms, -1)
-            energy = np.asarray(energy, dtype=float).reshape(-1)
-            complete = config.properties.get(name + "_complete")
-            if complete is not None:
-                # The collector gives the energies between which every band of the DFT run is included.
-                bottom, top = (float(x) for x in np.asarray(complete, dtype=float).reshape(2))
-                return (torch.as_tensor(value, dtype=torch.float32).reshape(-1), torch.tensor(value.shape, dtype=torch.long),
-                        torch.as_tensor(energy, dtype=torch.float32), min(top, float(energy[-1])),
-                        max(bottom, float(energy[0])))
-            # Up to where the states are those of DFT. They can stop below the end of the energies for two reasons:
-            # at the top of the valence band of a gapped frame, whose gap label then says how far no state follows,
-            # or where the bands of the DFT run end, a little below which its bands are no longer all there.
-            top, filled = float(energy[-1]), np.nonzero(value.sum(0) > 0.0)[0]
-            if len(filled) and filled[-1] < len(energy) - 3:
-                last, gap = float(energy[filled[-1]]), config.properties.get("band_gap")
-                gapped = gap is not None and float(gap) > 0.0 and config.property_weights.get("band_gap", 0.0) > 0.0
-                top = min(top, last + float(gap)) if gapped and last <= 0.1 else last - 1.0
+            if value.shape[1] % 2 == 0 or value.shape[1] < 3:
+                raise ValueError(f"A {name} label needs an odd number of energies around the Fermi level, not {value.shape[1]}")
+            n = value.shape[1] // 2
             return (torch.as_tensor(value, dtype=torch.float32).reshape(-1), torch.tensor(value.shape, dtype=torch.long),
-                    torch.as_tensor(energy, dtype=torch.float32), top, float(energy[0]))
+                    torch.as_tensor(DOS_STEP * np.arange(-n, n + 1), dtype=torch.float32))
 
-        dos, dos_shape, dos_energy, dos_top, dos_bottom = projected("dos")
+        dos, dos_shape, dos_energy = projected("dos")
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
         volt = dict(
@@ -389,8 +376,6 @@ class ExtAtomicData(AtomicData):
             dos=dos,
             dos_shape=dos_shape,
             dos_energy=dos_energy,
-            dos_top=torch.tensor(dos_top, dtype=torch.get_default_dtype()),
-            dos_bottom=torch.tensor(dos_bottom, dtype=torch.get_default_dtype()),
             dos_weight=weight("dos"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,
