@@ -224,6 +224,7 @@ class ExtAtomicData(AtomicData):
             if config.properties.get("atomic_multipoles") is not None
             else torch.zeros((num_atoms, (atomic_multipoles_max_l + 1) ** 2))
         )
+        # A label that a frame does not have weighs nothing, in the loss and in the errors.
         density_coefficients_weight = (
             torch.tensor(
                 config.property_weights.get("atomic_multipoles"),
@@ -231,7 +232,7 @@ class ExtAtomicData(AtomicData):
             )
             if config.property_weights.get("atomic_multipoles") is not None
             else torch.tensor(1.0, dtype=torch.get_default_dtype())
-        )
+        ) * float(config.properties.get("atomic_multipoles") is not None)
         electrostatic_potentials = (
             torch.tensor(config.properties.get("electrostatic_potentials")).unsqueeze(
                 -1
@@ -246,7 +247,7 @@ class ExtAtomicData(AtomicData):
             )
             if config.property_weights.get("electrostatic_potentials") is not None
             else torch.tensor(1.0, dtype=torch.get_default_dtype())
-        )
+        ) * float(config.properties.get("electrostatic_potentials") is not None)
         volume = (
             torch.linalg.det(atomic_data.cell) if atomic_data.cell is not None else None
         )
@@ -291,7 +292,7 @@ class ExtAtomicData(AtomicData):
             )
             if config.property_weights.get("fermi_level") is not None
             else torch.tensor(1.0, dtype=torch.get_default_dtype())
-        )
+        ) * float(config.properties.get("fermi_level") is not None)
         """ polarizability = (
             voigt_to_matrix(
                 torch.tensor(config.properties.get("polarizability"), dtype=torch.get_default_dtype())
@@ -402,7 +403,7 @@ class ExtAtomicData(AtomicData):
             forces_weight=atomic_data.forces_weight,
             stress_weight=atomic_data.stress_weight,
             virials_weight=atomic_data.virials_weight,
-            dipole_weight=atomic_data.dipole_weight,
+            dipole_weight=atomic_data.dipole_weight * float(config.properties.get("dipole") is not None),
             charges_weight=atomic_data.charges_weight,
             forces=atomic_data.forces,
             energy=atomic_data.energy,

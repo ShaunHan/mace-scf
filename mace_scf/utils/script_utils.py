@@ -17,7 +17,7 @@ from mace.tools.tables_utils import custom_key  as mace_table_custom_key
 # update
 from mace import data
 from ..data import ExtAtomicData
-from .train import evaluate
+from .train import FULL_RMSE, evaluate, full_rmse
 from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS
 
 
@@ -37,8 +37,26 @@ NEW_TABLE_TYPES = [
     "DensityDipoleRMSE",
     "EnergyDensityDipoleRMSE",
     "EnergyDipolePotentialsRMSE",
-    "WorkFunctionRMSE",
+    "FullRMSE",
 ]
+
+# The columns of the FullRMSE table by target of FULL_RMSE, the Fourier fields after Q.
+FULL_RMSE_COLUMNS = {
+    "E": "RMSE E / meV / atom",
+    "F": "RMSE F / meV / A",
+    "stress": "RMSE stress / meV / A^3",
+    "virials": "RMSE virials / meV / atom",
+    "Mu": "RMSE dipole / me A / atom",
+    "polarizability": "RMSE polarizability / me A^2 / V / atom",
+    "DMA": "RMSE DMA / me A^l",
+    "Q": "RMSE Q / me",
+    "ESPs": "RMSE ESPs / mV",
+    "EF": "RMSE EF / meV",
+    "WF": "RMSE WF / meV",
+    "ESPvac": "RMSE ESPvac / mV",
+    "Eg": "RMSE Eg / meV",
+    "DOS": "RMSE DOS / me",
+}
 
 
 def create_error_table(
@@ -116,20 +134,17 @@ def create_error_table(
             "RMSE ESP / mV",
             "relative ESP RMSE %",
         ]
-    elif table_type == "WorkFunctionRMSE":
-        table.field_names = [
-            "config_type",
-            "RMSE E / meV / atom",
-            "RMSE F / meV / A",
-            "relative F RMSE %",
-            "RMSE dipole / me A / atom",
-            f"RMSE rho {'/'.join(f'{w:g}' for w in REPORTED_SMEARING_WIDTHS['fourier_density'])} A / me / A^3",
-            f"RMSE ESP {'/'.join(f'{w:g}' for w in REPORTED_SMEARING_WIDTHS['fourier_potential'])} A / mV",
-            "RMSE EF / meV",
-            "RMSE WF / meV",
-        ]
+    elif table_type == "FullRMSE":
+        # every target, nan where the data or the model have none
+        names = list(FULL_RMSE_COLUMNS)
+        table.field_names = (
+            ["config_type"] + [FULL_RMSE_COLUMNS[name] for name in names[:2]] + ["relative F RMSE %"]
+            + [FULL_RMSE_COLUMNS[name] for name in names[2:8]]
+            + [f"RMSE {'rho' if key == 'fourier_density' else 'ESP'} {'/'.join(f'{w:g}' for w in widths)} A / "
+               f"{'me / A^3' if key == 'fourier_density' else 'mV'}" for key, widths in REPORTED_SMEARING_WIDTHS.items()]
+            + [FULL_RMSE_COLUMNS[name] for name in names[8:]]
+        )
     # add new tables here...
-    vacuum_potentials, band_gaps = [], []
 
     for name in sorted(all_data_loaders, key=mace_table_custom_key):
         data_loader = all_data_loaders[name]
@@ -158,6 +173,7 @@ def create_error_table(
                 name + "_final_rel_rmse_f": metrics["rel_rmse_f"],
             }
             wandb.log(wandb_log_dict)
+        raw = dict(metrics)
 
         # catch missing metrics
         all_metric_name = [
@@ -259,26 +275,16 @@ def create_error_table(
                     metrics['rel_rmse_esp'],
                 ]
             )
-        elif table_type == "WorkFunctionRMSE":
+        elif table_type == "FullRMSE":
+            values = {target: f"{full_rmse(raw, key):.2f}" for target, (key, _) in FULL_RMSE.items()}
+            relative = raw.get("rel_rmse_f")
+            fields = ["/".join(f"{full_rmse(raw, f'rmse_{key}_{w:g}A'):.2f}" for w in widths)
+                      for key, widths in REPORTED_SMEARING_WIDTHS.items()]
+            names = list(FULL_RMSE_COLUMNS)
             table.add_row(
-                [
-                    name,
-                    metrics['rmse_e_per_atom'],
-                    metrics['rmse_f'],
-                    metrics['rel_rmse_f'],
-                    metrics['rmse_mu_per_atom'],
-                    "/".join(metrics[f"rmse_fourier_density_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_density"]),
-                    "/".join(metrics[f"rmse_fourier_potential_{w:g}A"] for w in REPORTED_SMEARING_WIDTHS["fourier_potential"]),
-                    metrics['rmse_fermi_level'],
-                    metrics['rmse_work_function'],
-                ]
+                [name] + [values[target] for target in names[:2]]
+                + [f"{relative:.2f}" if isinstance(relative, float) else "nan"]
+                + [values[target] for target in names[2:8]] + fields + [values[target] for target in names[8:]]
             )
-            vacuum_potentials.append(metrics.get('rmse_vacuum_potential'))
-            band_gaps.append(metrics.get('rmse_band_gap'))
         # add new tables here...
-
-    # the vacuum potential and the band gap only when the data have their labels
-    for title, values in (("RMSE ESPvac / mV", vacuum_potentials), ("RMSE Eg / meV", band_gaps)):
-        if any(value is not None for value in values):
-            table.add_column(title, ["not found" if value is None else f"{1000 * value:.2f}" for value in values])
     return table

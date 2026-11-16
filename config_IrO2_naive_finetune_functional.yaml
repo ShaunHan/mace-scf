@@ -52,7 +52,7 @@ restart_latest: false
 save_cpu: true
 keep_checkpoints: true
 save_all_checkpoints: false
-error_table: WorkFunctionRMSE
+error_table: FullRMSE
 valid_set_seed: 7777
 checkpoints_dir: checkpoints
 log_dir: logs

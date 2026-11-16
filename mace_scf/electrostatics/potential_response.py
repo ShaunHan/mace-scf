@@ -31,8 +31,6 @@ ENERGY_RANGE = 10.
 # and 90 meV, by 0.25 eV to 80 and 160 meV), but a model trained at 0.1 eV reads its edges from a few ten-thousandths
 # of an electron per atom, which its density of states label does not fix, and its silica gaps drifted by a volt.
 RESOLUTION = .25
-# The band gap error (eV) up to which the band gap loss is the square of the error; beyond it the loss is linear.
-BAND_GAP_DELTA = .25
 # The most electrons (e) that the states between a band edge and the Fermi level of a cell hold. A band edge is the
 # energy of one state, and a state holds two electrons in the cell, its k-points together. Where it does not
 # disperse, as in a molecular liquid or at a localized state, all of it lies at the edge: the edge is then where
@@ -316,10 +314,14 @@ class AtomicResponse(nn.Module):
         The states of the atoms at their levels (level, the bias and potential of each atom minus the Fermi
         level) are those of the ground state, its potential held fixed, as DFT band edges are eigenvalues of the
         ground-state Hamiltonian. An edge is where they hold count holes, below the Fermi level, or count
-        electrons, above it, in each cell. The count rises monotonically with the distance, by at least DOS_FLOOR
-        per atom and volt, so each distance is the root of a monotone function: Newton steps kept inside a
-        bracket find it, and one differentiable Newton step at the root gives its exact derivative in the
-        coefficients and in the levels; a level passed detached is held.
+        electrons, above it, in each cell, and lies within the energy range of the states: a cell whose states
+        hold less than count there has its edge read at that range. The count rises monotonically with the
+        distance, so each distance is the root of a monotone function, which Newton steps kept inside a bracket
+        find. One differentiable Newton step at the root gives the derivative in the coefficients and in the
+        levels; a level passed detached is held. The step divides by the states of the cell at the edge, taken
+        no smaller than count over the width of the states. An edge on the onset of a band holds at least that;
+        an edge in a sparse stretch between bands moves by volts as the states there change by little, and its
+        derivative is then that of an edge on an onset.
         """
         with torch.no_grad():
             fixed, start = coefficients.detach(), level.detach()
@@ -330,23 +332,19 @@ class AtomicResponse(nn.Module):
                 charges, states = self.charge(fixed, start+sign*distance[:, None])
                 return sign*((charges-ground)*mask).sum(-1)-count, (states*mask).sum(-1)
             with torch.no_grad():
-                low, high = torch.zeros_like(mask[:, 0]), torch.ones_like(mask[:, 0])
-                for _ in range(64):
-                    short = held(high)[0] < 0.
-                    if not bool(short.any()):
-                        break
-                    low, high = torch.where(short, high, low), torch.where(short, 2.*high, high)
-                distance = .5*(low+high)
+                low, high = torch.zeros_like(count), torch.full_like(count, float(self.dos_centers[-1]))
+                reached = held(high)[0] >= 0.
+                distance = torch.where(reached, .5*high, high)
                 for _ in range(200):
                     value, slope = held(distance)
                     low, high = torch.where(value < 0., distance, low), torch.where(value < 0., high, distance)
                     step = distance-value/slope
-                    step = torch.where((step > low) & (step < high), step, .5*(low+high))
+                    step = torch.where(reached, torch.where((step > low) & (step < high), step, .5*(low+high)), distance)
                     if float((step-distance).abs().max()) < tolerance:
                         distance = step
                         break
                     distance = step
-                slope = held(distance)[1]
+                slope = torch.maximum(held(distance)[1], count/self.dos_width)
             charges = self.charge(coefficients, level+sign*distance[:, None])[0]
             value = sign*((charges-self.charge(coefficients, level)[0])*mask).sum(-1)-count
             distances.append(distance-value/slope)
@@ -1004,14 +1002,19 @@ class PotentialResponse(ScaleShiftMACE):
                           band_gap=below+above)
         labelled = data.get('dos')
         if dos or (labelled is not None and labelled.numel() > 0):
-            # The density of states of every atom, as the electrons it takes up when the Fermi level moves at the
-            # potential of the ground state, over the energy range of its states. Like the band edges it is read at
-            # held levels, so that its label trains the states and leaves the potential to its own labels.
+            # The density of states of every atom, as the electrons it takes up when the Fermi level moves by the
+            # energies at the potential of the ground state, over the energy range of its states. Like the band
+            # edges it is read at held levels. The label is put on the same energies: the states of DFT, smoothed
+            # like the model's, counted from the Fermi level of DFT to the same absolute energies, so that in a gap
+            # both curves are flat wherever in it each Fermi level lies, and in a metal a Fermi level off the one of
+            # DFT shows as the electrons between the two.
             steps = int(round(float(self.response.dos_centers[-1])/self.response.dos_width))
+            energies = torch.arange(-steps, steps+1, device=level.device, dtype=level.dtype)*self.response.dos_width
             curves = self.response.electrons(response[2], level.detach(), steps)
-            shifts = torch.arange(-steps, steps+1, device=curves.device, dtype=curves.dtype)*self.response.dos_width
-            output.update(atomic_electrons=space.unpack(curves), dos_shifts=shifts,
-                          dos_width=curves.new_tensor(self.response.dos_width))
+            output.update(atomic_electrons=space.unpack(curves), dos_energies=energies)
+            if labelled is not None and labelled.numel() > 0:
+                shift = fermi_level-data['fermi_level'].reshape(-1).to(fermi_level)
+                output['atomic_electrons_dft'] = dos_label(data, energies, shift, self.response.dos_width)
         if training and getattr(self, 'replay', None) is not None:
             output['replay'] = self.replay.loss(self.replay_head)
         return output
@@ -1050,6 +1053,27 @@ class PotentialResponse(ScaleShiftMACE):
             'fourier_density': coarse/smooth[..., None]*space.ngrid,
             'fourier_potential': torch.view_as_real(potential)*space.ngrid,
         }
+
+
+def dos_label(data, energies, shift, width):
+    """The density of states label of every atom of the batch as electrons on the energies of the model: the states
+    of DFT, smoothed by the bump of width of the model's states, counted from the Fermi level of DFT to the energies
+    from the model's Fermi level, which lies shift (per graph) above it. nan where the smoothed states would reach
+    beyond the energies of the label, and in graphs without a label."""
+    labels, start, first = [], 0, 0
+    counts = (data['ptr'][1:]-data['ptr'][:-1]).tolist()
+    for graph, (count, (atoms, bins)) in enumerate(zip(counts, data['dos_shape'].reshape(-1, 2).tolist())):
+        if atoms == 0:
+            labels.append(energies.new_full((count, len(energies)), float('nan')))
+            continue
+        states = data['dos'][start:start+atoms*bins].reshape(atoms, bins).to(energies)
+        energy = data['dos_energy'][first:first+bins].to(energies)
+        start, first = start+atoms*bins, first+bins
+        at = energies+shift[graph]
+        kernel = (energy[1]-energy[0])*(gaussian_step((at[:, None]-energy)/width)-gaussian_step(-energy/width))
+        inside = (at > energy[0]+2.*width) & (at < energy[-1]-2.*width)
+        labels.append(torch.where(inside, states@kernel.T, float('nan')))
+    return torch.cat(labels)
 
 
 def collate_fft(values, shapes, grid):
@@ -1287,56 +1311,23 @@ def weighted_mean_squared_error_vacuum_potential(ref, pred):
     return torch.mean(configs_weight*torch.square(ref['vacuum_potential']-pred['vacuum_potential']))
 
 
-def weighted_huber_error_band_gap(ref, pred):
-    # band_gap: [n_graphs, ], predicted for batches with band gap labels only. The square of the error up to
-    # BAND_GAP_DELTA and linear beyond it, with the slope of the square there. Band gaps span electron volts: at the
-    # start of a training, and in the few cells whose gap a single state sets, the square of an error of electron
-    # volts outweighs every other term of the loss.
+def weighted_mean_squared_error_band_gap(ref, pred):
+    # band_gap: [n_graphs, ], predicted for batches with band gap labels only
     if pred.get('band_gap') is None:
         return ref.weight.new_zeros(())
     configs_weight = ref.weight*ref.band_gap_weight
-    error = 2.*F.huber_loss(pred['band_gap'], ref['band_gap'], reduction='none', delta=BAND_GAP_DELTA)
-    return torch.mean(configs_weight*error)
-
-
-def dos_errors(ref, pred):
-    """Per graph, the mean squared error (e^2) of the electrons its atoms take up as the Fermi level moves; nan
-    without a label.
-
-    The label is the projected density of states of every atom in DFT (states/eV on energies from its Fermi level).
-    Smeared like the states of the model and summed from the Fermi level of DFT, it gives the electrons the atom
-    holds at every energy more than in the ground state. The model gives the same from its own Fermi level. Both
-    Fermi levels have the origin of the potential, so the two curves are compared at the same energies: in a gap
-    both are flat, wherever in it each Fermi level lies, and in a metal a Fermi level off the one of DFT shows as
-    the electrons between the two. The label holds the energies at which DFT has all its states, and counts from
-    two widths inside its ends, where the states beyond them no longer reach.
-    """
-    shifts, width, curves = pred['dos_shifts'], pred['dos_width'], pred['atomic_electrons']
-    shapes, ptr = ref['dos_shape'].reshape(-1, 2).tolist(), ref.ptr
-    errors, start, first = [], 0, 0
-    for graph, (atoms, bins) in enumerate(shapes):
-        if atoms == 0:
-            errors.append(curves.new_tensor(float('nan')))
-            continue
-        states = ref['dos'][start:start+atoms*bins].reshape(atoms, bins).to(curves)
-        energy = ref['dos_energy'][first:first+bins].to(curves)
-        start, first = start+atoms*bins, first+bins
-        at = shifts+pred['fermi_level'][graph]-ref['fermi_level'][graph]
-        kernel = (energy[1]-energy[0])*(gaussian_step((at[:, None]-energy)/width)-gaussian_step(-energy/width))
-        valid = (at > energy[0]+2.*width) & (at < energy[-1]-2.*width)
-        if not bool(valid.any()):
-            errors.append(curves.new_tensor(float('nan')))
-            continue
-        difference = (curves[ptr[graph]:ptr[graph+1]]-states@kernel.T)[:, valid]
-        errors.append(difference.square().mean())
-    return torch.stack(errors)
+    return torch.mean(configs_weight*torch.square(ref['band_gap']-pred['band_gap']))
 
 
 def weighted_mean_squared_error_dos(ref, pred):
-    # atomic_electrons: [n_nodes, n_shifts], predicted for batches with density of states labels only
-    if pred.get('atomic_electrons') is None or ref['dos'].numel() == 0:
+    # atomic_electrons: [n_atoms, n_energies], and its label on the same energies (nan without one), predicted for
+    # batches with density of states labels only
+    if pred.get('atomic_electrons_dft') is None:
         return ref.weight.new_zeros(())
-    return torch.mean(ref.weight*ref.dos_weight*torch.nan_to_num(dos_errors(ref, pred)))
+    configs_weight = (ref.weight*ref.dos_weight)[ref.batch].unsqueeze(-1)
+    labelled = torch.isfinite(pred['atomic_electrons_dft'])
+    error = torch.where(labelled, pred['atomic_electrons']-pred['atomic_electrons_dft'], 0.)
+    return torch.mean(configs_weight*torch.square(error))
 
 
 def replay_loss(ref, pred):

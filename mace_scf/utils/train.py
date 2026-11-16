@@ -25,7 +25,7 @@ from mace.tools.utils import (
 )
 import os
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, dos_errors, spectral_errors
+from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, spectral_errors
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -470,6 +470,7 @@ def evaluate(
     dmas_computed = False
     delta_dmas_list = []
     dmas_list = []
+    esps_computed = False
     delta_esps_list = []
     esps_list = []
     polarizability_computed = False
@@ -568,9 +569,9 @@ def evaluate(
             observed = batch.band_gap_weight > 0.0
             delta_band_gap_list.append((batch.band_gap - output["band_gap"])[observed])
             band_gap_frames.append(batch.energy[observed])
-        if output.get("atomic_electrons") is not None and batch.dos.numel() > 0:
-            errors = dos_errors(batch, output)
-            dos_error_list.append(errors[torch.isfinite(errors) & (batch.dos_weight > 0.0)].detach())
+        if output.get("atomic_electrons_dft") is not None:
+            observed = torch.isfinite(output["atomic_electrons_dft"]) & (batch.dos_weight > 0.0)[batch.batch].unsqueeze(-1)
+            dos_error_list.append((output["atomic_electrons"] - output["atomic_electrons_dft"])[observed])
         for key, widths in REPORTED_SMEARING_WIDTHS.items():
             if output.get(key + "_dft") is not None:
                 observed = getattr(batch, key + "_weight") > 0.0
@@ -593,23 +594,26 @@ def evaluate(
             output.get("density_coefficients") is not None
             and batch.density_coefficients is not None
         ):
-            dmas_computed = True
-            delta_dmas_list.append(
-                batch.density_coefficients - output["density_coefficients"]
-            )
-            dmas_list.append(batch.density_coefficients)
+            # only the atoms of frames with multipole labels
+            observed = (batch.density_coefficients_weight > 0.0)[batch.batch]
+            if torch.any(observed):
+                dmas_computed = True
+                delta_dmas_list.append(
+                    (batch.density_coefficients - output["density_coefficients"])[observed]
+                )
+                dmas_list.append(batch.density_coefficients[observed])
 
         if (
             output.get("electrostatic_potentials") is not None
             and batch.electrostatic_potentials is not None
         ):
-            esps_computed = True
-            delta_esps_list.append(
-                batch.electrostatic_potentials - output["electrostatic_potentials"]
-            )
-            esps_list.append(batch.electrostatic_potentials)
-        else:
-            esps_computed= False
+            observed = (batch.electrostatic_potentials_weight > 0.0)[batch.batch]
+            if torch.any(observed):
+                esps_computed = True
+                delta_esps_list.append(
+                    (batch.electrostatic_potentials - output["electrostatic_potentials"])[observed]
+                )
+                esps_list.append(batch.electrostatic_potentials[observed])
         if output.get("polarizability") is not None and batch.polarizability is not None:
             polars_to_include = batch.polarizability_weight > 0.0
             if torch.any(polars_to_include):
@@ -726,8 +730,8 @@ def evaluate(
         aux["rmse_band_gap"] = compute_rmse(delta_band_gap)
         aux["largest_band_gap"] = largest_errors(delta_band_gap, band_gap_frames)
     if dos_error_list and sum(len(errors) for errors in dos_error_list):
-        # the root of the mean squared error per atom and energy, averaged over the frames
-        aux["rmse_dos"] = float(np.sqrt(to_numpy(torch.cat(dos_error_list)).mean()))
+        # over every atom and energy with a label
+        aux["rmse_dos"] = compute_rmse(to_numpy(torch.cat(dos_error_list)))
     for name, errors in fourier_errors.items():
         aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
@@ -744,6 +748,32 @@ def largest_errors(delta, energies, count=5):
     delta, energies = np.ravel(delta), to_numpy(torch.cat(energies))
     return ", ".join(f"{energies[i]:.4f}: {1e3 * delta[i]:+.0f} ({100 * delta[i]**2 / (delta**2).sum():.0f}%)"
                      for i in np.argsort(-np.abs(delta))[:count])
+
+
+# The targets of the FullRMSE epoch line and error table: their metric of evaluate, shown in thousandths of its unit,
+# and the digits shown; the Fourier fields follow REPORTED_SMEARING_WIDTHS.
+FULL_RMSE = {
+    "E": ("rmse_e_per_atom", 1),
+    "F": ("rmse_f", 1),
+    "stress": ("rmse_stress", 1),
+    "virials": ("rmse_virials_per_atom", 1),
+    "Mu": ("rmse_mu_per_atom", 2),
+    "polarizability": ("rmse_polarizability_per_atom", 2),
+    "DMA": ("rmse_dma", 2),
+    "Q": ("rmse_total_charge", 2),
+    "ESPs": ("rmse_esp", 1),
+    "EF": ("rmse_fermi_level", 1),
+    "WF": ("rmse_work_function", 1),
+    "ESPvac": ("rmse_vacuum_potential", 1),
+    "Eg": ("rmse_band_gap", 1),
+    "DOS": ("rmse_dos", 1),
+}
+
+
+def full_rmse(metrics, key):
+    """A metric of evaluate in thousandths of its unit, nan where the data or the model have none."""
+    value = metrics.get(key)
+    return float("nan") if value is None or isinstance(value, str) else 1e3 * float(value)
 
 
 def valid_err_log(
@@ -763,23 +793,21 @@ def valid_err_log(
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
         )
-    elif log_errors == "WorkFunctionRMSE":
-        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
-        error_f = eval_metrics["rmse_f"] * 1e3
-        error_ef = eval_metrics["rmse_fermi_level"] * 1e3
-        error_wf = eval_metrics["rmse_work_function"] * 1e3
+    elif log_errors == "FullRMSE":
+        # every target, nan where the data or the model have none
+        errors = {name: f"{full_rmse(eval_metrics, key):.{digits}f}" for name, (key, digits) in FULL_RMSE.items()}
+        errors.update({key: "/".join(f"{full_rmse(eval_metrics, f'rmse_{key}_{w:g}A'):.{2 if key == 'fourier_density' else 1}f}"
+                                     for w in widths) for key, widths in REPORTED_SMEARING_WIDTHS.items()})
         widths_rho, widths_esp = ("/".join(f"{w:g}" for w in REPORTED_SMEARING_WIDTHS[key]) for key in REPORTED_SMEARING_WIDTHS)
-        error_rho = "/".join(f"{eval_metrics.get(f'rmse_fourier_density_{w:g}A', float('nan')) * 1e3:.2f}"
-                             for w in REPORTED_SMEARING_WIDTHS["fourier_density"])
-        error_esp = "/".join(f"{eval_metrics.get(f'rmse_fourier_potential_{w:g}A', float('nan')) * 1e3:.1f}"
-                             for w in REPORTED_SMEARING_WIDTHS["fourier_potential"])
-        error_mu = eval_metrics.get("rmse_mu_per_atom", float("nan")) * 1e3
-        # the vacuum potential and the band gap only when the data have their labels
-        error_vac = f", RMSE_ESPvac={eval_metrics['rmse_vacuum_potential'] * 1e3:.1f} mV" if "rmse_vacuum_potential" in eval_metrics else ""
-        error_gap = f", RMSE_Eg={eval_metrics['rmse_band_gap'] * 1e3:.1f} meV" if "rmse_band_gap" in eval_metrics else ""
-        error_dos = f", RMSE_DOS={eval_metrics['rmse_dos'] * 1e3:.1f} me" if "rmse_dos" in eval_metrics else ""
         logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A, RMSE_Mu_per_atom={error_mu:.2f} meA, RMSE_rho({widths_rho} A)={error_rho} me / A^3, RMSE_ESP({widths_esp} A)={error_esp} mV, RMSE_EF={error_ef:.1f} meV, RMSE_WF={error_wf:.1f} meV{error_vac}{error_gap}{error_dos}"
+            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={errors['E']} meV, RMSE_F={errors['F']} meV / A, "
+            f"RMSE_stress={errors['stress']} meV / A^3, RMSE_virials_per_atom={errors['virials']} meV, "
+            f"RMSE_Mu_per_atom={errors['Mu']} meA, RMSE_polarizability_per_atom={errors['polarizability']} me A^2 / V, "
+            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, RMSE_ESPs={errors['ESPs']} mV, "
+            f"RMSE_rho({widths_rho} A)={errors['fourier_density']} me / A^3, "
+            f"RMSE_ESP({widths_esp} A)={errors['fourier_potential']} mV, RMSE_EF={errors['EF']} meV, "
+            f"RMSE_WF={errors['WF']} meV, RMSE_ESPvac={errors['ESPvac']} mV, RMSE_Eg={errors['Eg']} meV, "
+            f"RMSE_DOS={errors['DOS']} me"
         )
         # a few frames can hold most of a squared error: a label to check, or conditions the training frames lack
         largest = "; ".join(f"{name} {eval_metrics[key]}" for name, key in (("WF", "largest_work_function"), ("Eg", "largest_band_gap"))
