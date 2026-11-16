@@ -26,8 +26,12 @@ DOS_START = .1
 # The band edges of an insulator lie about half its gap from the levels of its atoms, and the levels move by
 # volts with the potential, so the range holds band gaps up to about 15 eV. Beyond it an atom has DOS_FLOOR alone.
 ENERGY_RANGE = 10.
+# The spacing of the energies of the density of states of an atom (eV), and the width of its states. Finer states
+# resolve band edges better in DFT's own states (smeared by 0.1 eV they read the band gaps of water and silica to 50
+# and 90 meV, by 0.25 eV to 80 and 160 meV), but a model trained at 0.1 eV reads its edges from a few ten-thousandths
+# of an electron per atom, which its density of states label does not fix, and its silica gaps drifted by a volt.
+RESOLUTION = .25
 # The band gap error (eV) up to which the band gap loss is the square of the error; beyond it the loss is linear.
-# It is the spacing of the energies of the density of states, the resolution of a band edge.
 BAND_GAP_DELTA = .25
 # The most electrons (e) that the states between a band edge and the Fermi level of a cell hold. A band edge is the
 # energy of one state, and a state holds two electrons in the cell, its k-points together. Where it does not
@@ -36,9 +40,6 @@ BAND_GAP_DELTA = .25
 BAND_EDGE_ELECTRONS = 1.
 # The band edge count per atom of a model whose training data have no density of states label to take it from.
 BAND_EDGE_STATES = 5.e-4
-# The density of states label reaches DOS_WINDOW (eV) to either side of the Fermi level: the electrons that every
-# atom takes up or gives off as the Fermi level moves that far are compared with those of its states in DFT.
-DOS_WINDOW = 5.
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -166,7 +167,7 @@ class AtomicResponse(nn.Module):
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
-                 fixed_point=False, energy_range=ENERGY_RANGE, resolution=.25, width=64, max_l=1,
+                 fixed_point=False, energy_range=ENERGY_RANGE, resolution=RESOLUTION, width=64, max_l=1,
                  completion_max_l=1, dos_start=DOS_START):
         super().__init__()
         # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
@@ -296,14 +297,17 @@ class AtomicResponse(nn.Module):
 
         At fixed potential the level of an atom falls by as much as the Fermi level rises, and the charge it loses is
         the states it passes. Shifts on the spacing of the energies meet the same states for every pair of energy and
-        shift with the same sum, so one evaluation per sum serves them all. Returns (..., atoms, 2 steps + 1).
+        shift with the same sum, so one evaluation per sum serves them all, and the sum over the energies is one
+        correlation per atom. Returns (..., atoms, 2 steps + 1).
         """
         w, centers = self.dos_width, self.dos_centers
         half, shifts = (len(centers)-1)//2, 2*steps+1
         sums = torch.arange(shifts+len(centers)-1, device=level.device, dtype=level.dtype)
-        passed = gaussian_step(level[..., None]/w+steps+half-sums).unfold(-1, len(centers), 1)
+        passed = gaussian_step(level[..., None]/w+steps+half-sums)
+        held = F.conv1d(passed.reshape(1, -1, passed.shape[-1]), coefficients.reshape(-1, 1, len(centers)),
+                        groups=passed[..., 0].numel()).reshape(*passed.shape[:-1], shifts)
         offset = torch.arange(-steps, steps+1, device=level.device, dtype=level.dtype)*w
-        charges = torch.einsum('...j,...kj->...k', coefficients, passed)*w-DOS_FLOOR*offset
+        charges = held*w-DOS_FLOOR*offset
         return charges[..., steps:steps+1]-charges
 
     def band_edges(self, coefficients, level, mask, count, tolerance=1.e-10):
@@ -726,7 +730,7 @@ class PotentialResponse(ScaleShiftMACE):
     newton_steps, newton_tolerance = 60, 1.e-6
 
     def __init__(self, density_width=1.5, field_widths=(1.5, 3.), kspace_cutoff_factor=1., fermi_level_offset=0.,
-                 fixed_point=False, short_range_potential=True, energy_range=ENERGY_RANGE, resolution=.25,
+                 fixed_point=False, short_range_potential=True, energy_range=ENERGY_RANGE, resolution=RESOLUTION,
                  band_edge_states=None, dos_start=DOS_START, max_l=1, completion_max_l=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
@@ -756,10 +760,7 @@ class PotentialResponse(ScaleShiftMACE):
         # The holes and electrons per atom (e) that the ground-state states between each band edge and the Fermi
         # level hold, up to BAND_EDGE_ELECTRONS per cell. Per atom, so that a supercell has the band edges of its
         # cell. The states are smeared by the resolution, so the count sets how far in the tail of the first state
-        # its edge is read. 0.01 is about half a state of a cell of a hundred atoms, at its eigenvalue: where a band
-        # edge meets the Fermi level, as at a charged interface, the edges and the charges then agree. A small count
-        # reads the edge well inside the eigenvalue, and keeps the gap of a metal, twice the count over its density
-        # of states, at zero.
+        # its edge is read; a metal reads a gap of twice the count over its density of states.
         # Left unset, it is taken from the density of states labels of the training data (band_edge_counts): the
         # count at which the states of DFT, smeared like those of the model, return the band gaps of DFT.
         self.band_edge_states = None if band_edge_states is None else float(band_edge_states)
@@ -1004,9 +1005,9 @@ class PotentialResponse(ScaleShiftMACE):
         labelled = data.get('dos')
         if dos or (labelled is not None and labelled.numel() > 0):
             # The density of states of every atom, as the electrons it takes up when the Fermi level moves at the
-            # potential of the ground state. Like the band edges it is read at held levels, so that its label
-            # trains the states and leaves the potential to its own labels.
-            steps = int(round(DOS_WINDOW/self.response.dos_width))
+            # potential of the ground state, over the energy range of its states. Like the band edges it is read at
+            # held levels, so that its label trains the states and leaves the potential to its own labels.
+            steps = int(round(float(self.response.dos_centers[-1])/self.response.dos_width))
             curves = self.response.electrons(response[2], level.detach(), steps)
             shifts = torch.arange(-steps, steps+1, device=curves.device, dtype=curves.dtype)*self.response.dos_width
             output.update(atomic_electrons=space.unpack(curves), dos_shifts=shifts,
@@ -1307,7 +1308,8 @@ def dos_errors(ref, pred):
     holds at every energy more than in the ground state. The model gives the same from its own Fermi level. Both
     Fermi levels have the origin of the potential, so the two curves are compared at the same energies: in a gap
     both are flat, wherever in it each Fermi level lies, and in a metal a Fermi level off the one of DFT shows as
-    the electrons between the two.
+    the electrons between the two. The label counts where DFT's bands are complete, from dos_bottom to dos_top, two
+    widths inside them.
     """
     shifts, width, curves = pred['dos_shifts'], pred['dos_width'], pred['atomic_electrons']
     shapes, ptr = ref['dos_shape'].reshape(-1, 2).tolist(), ref.ptr
@@ -1321,8 +1323,7 @@ def dos_errors(ref, pred):
         start, first = start+atoms*bins, first+bins
         at = shifts+pred['fermi_level'][graph]-ref['fermi_level'][graph]
         kernel = (energy[1]-energy[0])*(gaussian_step((at[:, None]-energy)/width)-gaussian_step(-energy/width))
-        # Within the energies of the label, two widths from their ends, where the states beyond them still count.
-        valid = (at > energy[0]+2.*width) & (at < ref['dos_top'][graph]-2.*width)
+        valid = (at > ref['dos_bottom'][graph]+2.*width) & (at < ref['dos_top'][graph]-2.*width)
         if not bool(valid.any()):
             errors.append(curves.new_tensor(float('nan')))
             continue

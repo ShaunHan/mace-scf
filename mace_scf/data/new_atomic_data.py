@@ -71,6 +71,7 @@ VOLT_KEYS = (
     "dos_shape",
     "dos_energy",
     "dos_top",
+    "dos_bottom",
     "dos_weight",
     "fourier_density",
     "fourier_density_shape",
@@ -105,6 +106,7 @@ class ExtAtomicData(AtomicData):
     dos_shape: torch.Tensor
     dos_energy: torch.Tensor
     dos_top: torch.Tensor
+    dos_bottom: torch.Tensor
     dos_weight: torch.Tensor
     fourier_density: torch.Tensor
     fourier_density_shape: torch.Tensor
@@ -354,9 +356,16 @@ class ExtAtomicData(AtomicData):
             value, energy = config.properties.get(name), config.properties.get(name + "_energy")
             if value is None or energy is None:
                 return (torch.zeros((0,), dtype=torch.float32), torch.zeros((2,), dtype=torch.long),
-                        torch.zeros((0,), dtype=torch.float32), 0.0)
+                        torch.zeros((0,), dtype=torch.float32), 0.0, 0.0)
             value = np.asarray(value, dtype=float).reshape(num_atoms, -1)
             energy = np.asarray(energy, dtype=float).reshape(-1)
+            complete = config.properties.get(name + "_complete")
+            if complete is not None:
+                # The collector gives the energies between which every band of the DFT run is included.
+                bottom, top = (float(x) for x in np.asarray(complete, dtype=float).reshape(2))
+                return (torch.as_tensor(value, dtype=torch.float32).reshape(-1), torch.tensor(value.shape, dtype=torch.long),
+                        torch.as_tensor(energy, dtype=torch.float32), min(top, float(energy[-1])),
+                        max(bottom, float(energy[0])))
             # Up to where the states are those of DFT. They can stop below the end of the energies for two reasons:
             # at the top of the valence band of a gapped frame, whose gap label then says how far no state follows,
             # or where the bands of the DFT run end, a little below which its bands are no longer all there.
@@ -366,9 +375,9 @@ class ExtAtomicData(AtomicData):
                 gapped = gap is not None and float(gap) > 0.0 and config.property_weights.get("band_gap", 0.0) > 0.0
                 top = min(top, last + float(gap)) if gapped and last <= 0.1 else last - 1.0
             return (torch.as_tensor(value, dtype=torch.float32).reshape(-1), torch.tensor(value.shape, dtype=torch.long),
-                    torch.as_tensor(energy, dtype=torch.float32), top)
+                    torch.as_tensor(energy, dtype=torch.float32), top, float(energy[0]))
 
-        dos, dos_shape, dos_energy, dos_top = projected("dos")
+        dos, dos_shape, dos_energy, dos_top, dos_bottom = projected("dos")
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
         volt = dict(
@@ -381,6 +390,7 @@ class ExtAtomicData(AtomicData):
             dos_shape=dos_shape,
             dos_energy=dos_energy,
             dos_top=torch.tensor(dos_top, dtype=torch.get_default_dtype()),
+            dos_bottom=torch.tensor(dos_bottom, dtype=torch.get_default_dtype()),
             dos_weight=weight("dos"),
             fourier_density=fourier_density,
             fourier_density_shape=fourier_density_shape,

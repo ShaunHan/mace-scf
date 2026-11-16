@@ -29,8 +29,11 @@ VACPOTFLAT = 0.1  # eV/A: largest planar field of a vacuum plane, applied field 
 VACUUM_FLATNESS = 0.2  # V: a vacuum potential that varies more than this is not a converged density.
 SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
 DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
-PDOS_RANGE = 5.0  # eV: each atom's projected DOS is kept within EF +- PDOS_RANGE.
+# eV: each atom's projected DOS is kept within EF +- PDOS_RANGE, the energy range of the model's states. It holds
+# the conduction band of wide-gap insulators, whose Fermi level VASP leaves just above the valence band.
+PDOS_RANGE = 10.0
 PDOS_STEP = 0.05  # eV: DOS histogram bins, centered on EF + j * PDOS_STEP.
+PDOS_DECIMALS = 3  # states/eV in the xyz files: a band edge is read where a cell holds 1e-4 to 1e-3 e per atom.
 BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap too.
 OCCUPATION_TOL = 0.01  # A state filled by more than this and less than 1 - this is in a band at the Fermi level.
 FERMI_LEVEL_TOL = 0.1  # eV: largest difference of VASP's Fermi level of a gapped cell from its intrinsic level.
@@ -87,12 +90,14 @@ def truncate_fft(coefficients, shape):
 def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
     """Small band arrays plus each atom's projected DOS around EF.
 
-    Returns the DOS energies relative to EF and the per-atom DOS in states/eV, or None
-    without projections in vaspout.h5.
+    Returns the DOS energies relative to EF, the per-atom DOS in states/eV and the energies (relative to EF)
+    between which every band of the run is included at every k-point, or None without projections in
+    vaspout.h5. Above the lowest highest band of the k-points, NBANDS leaves states out; the label stops there.
     """
     if not kpoints:
         return None
     states = handle.create_group("states")
+    states.attrs.update(pdos_range=PDOS_RANGE, pdos_step=PDOS_STEP)
     spinor = parameters.get("lnoncollinear", False) or parameters.get("lsorbit", False)
     occupations = [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints]
     energies = [np.asarray(k.eps_n) - atoms.info["vasp_efermi"] for k in kpoints]
@@ -131,7 +136,9 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
             if len(bands):
                 site = projected[k.s, :, :, k.k - 1, bands].sum(axis=1)
                 pdos += k.weight * capacity / PDOS_STEP * site @ (bins[bands, None] == offsets)
-    states.attrs.update(projections_available=True,
+    fermi = atoms.info["vasp_efermi"]
+    complete = (max(float(np.min(k.eps_n)) for k in kpoints) - fermi, min(float(np.max(k.eps_n)) for k in kpoints) - fermi)
+    states.attrs.update(projections_available=True, pdos_complete=complete,
                         projection_units="PAW projected states per eV; not atomic charges")
     states.create_dataset("pdos_energy_minus_fermi", data=offsets * PDOS_STEP)
     states.create_dataset("pdos", data=pdos.astype(np.float32))
@@ -139,7 +146,7 @@ def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
     for name, values in {"atomic_numbers": atoms.numbers, "positions": atoms.positions,
                          "cell": atoms.cell.array}.items():
         states.create_dataset(name, data=values)
-    return states["pdos_energy_minus_fermi"][...], states["pdos"][...]
+    return states["pdos_energy_minus_fermi"][...], states["pdos"][...], complete
 
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
@@ -160,11 +167,22 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
             data = {name: handle[name][...] for name in names}
             states = handle.get("states")
-            if states is not None and states.attrs.get("projections_available", False):
+            current = (states is not None and states.attrs.get("pdos_range") == PDOS_RANGE
+                       and states.attrs.get("pdos_step") == PDOS_STEP)
+            if current and states.attrs.get("projections_available", False):
                 if "pdos" not in states:
                     raise ValueError(f"No projected DOS in {path}; set REUSE_HDF=False")
-                data["pdos"] = states["pdos_energy_minus_fermi"][...], states["pdos"][...]
-            return data
+                data["pdos"] = (states["pdos_energy_minus_fermi"][...], states["pdos"][...],
+                                tuple(states.attrs["pdos_complete"]))
+        if not current:
+            # A projected DOS cached with other settings is recomputed from vaspout.h5; the grids are kept.
+            with h5py.File(path, "r+") as handle:
+                if "states" in handle:
+                    del handle["states"]
+                pdos = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
+            if pdos is not None:
+                data["pdos"] = pdos
+        return data
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     data = {}
@@ -451,11 +469,13 @@ def collect_job(outdir):
         atoms.info["config_virials_weight"] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
     if "pdos" in data:
-        # One row per atom, in states/eV rounded to 0.01. As a JSON array in the header this
-        # takes about 6 characters per number; per-atom columns would take 17.
-        energy, pdos = data["pdos"]
+        # One row per atom, in states/eV rounded to PDOS_DECIMALS. As a JSON array in the header this
+        # takes a few characters per number; per-atom columns would take 17. With it, the energies
+        # (relative to EF) between which all bands of the run are included.
+        energy, pdos, complete = data["pdos"]
         atoms.info["vasp_pdos_energy_minus_fermi"] = np.round(energy, 3)
-        atoms.info["vasp_pdos"] = np.round(np.asarray(pdos, dtype=float), 2)
+        atoms.info["vasp_pdos"] = np.round(np.asarray(pdos, dtype=float), PDOS_DECIMALS)
+        atoms.info["vasp_pdos_complete"] = np.round(np.asarray(complete, dtype=float), 3)
     if plugin:
         planar = data["planar_electron_density"]
         length = float(atoms.cell[axis] @ normal)

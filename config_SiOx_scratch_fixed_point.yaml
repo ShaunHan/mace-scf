@@ -9,6 +9,7 @@ heads:
       band_gap: vasp_band_gap
       dos: vasp_pdos
       dos_energy: vasp_pdos_energy_minus_fermi
+      dos_complete: vasp_pdos_complete
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
