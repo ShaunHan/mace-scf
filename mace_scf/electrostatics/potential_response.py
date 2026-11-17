@@ -17,10 +17,10 @@ from torch.nn import functional as F
 RESPONSE_SCALE = .02
 # A background density of states (e/V per atom) at all energies, so that every charge has one finite level.
 DOS_FLOOR = 1.e-5
-# The density of states of every atom of a functional at the start (e/V), the same at every energy, unless dos_start
-# is given. It is of the order of 1/U, U = 5.4 V/e the Coulomb energy of a charge of the density width 1.5 A, where
-# the states and the Coulomb energy resist a charge alike: far fewer states at the level make an insulator, far
-# more a metal.
+# The density of states of every atom at the start (e/V), the same at every energy, unless dos_start is given. It is
+# of the order of 1/U, U = 5.4 V/e the Coulomb energy of a charge of the density width 1.5 A, where the states and the
+# Coulomb energy resist a charge alike: far fewer states at the level make an insulator, far more a metal. It is also
+# about the mean of DFT's projected states over the energy range (H 0.02, Si 0.13, O 0.2, Ir 0.74 e/V).
 DOS_START = .1
 # The energies of the density of states of an atom reach ENERGY_RANGE (eV) to either side of its neutral level.
 # The band edges of an insulator lie about half its gap from the levels of its atoms, and the levels move by
@@ -151,17 +151,19 @@ class AtomicResponse(nn.Module):
     neighbours' from zero; at zero levels and field that read is the response of the geometry, and it changes
     the amplitudes by the change of the readouts.
 
-    The start of the density of states. An atom exchanges charge only through the states at its level. The
-    labels can take them away, with a band gap or with a field the atom does not screen, but they do not give
-    them back: a metal that lost them still fits its training frames, with moments read from the geometry frame
-    by frame in place of the equilibrium with the Fermi level, and fails on new frames. The states of a
-    functional follow from the geometry alone, so it starts with dos_start at every energy, no gap and no band
-    edge built in. By default that is DOS_START, from where the labels reach a metal and an insulator alike.
-    Where every frame carries a band gap label, the zero of a metal included, the labels also give states back,
-    and a start of 0.01 e/V spares ionic insulators a detour: from DOS_START they first build the charges of
-    their ions from the states at the level, which their band gap labels then have to take out again. A fixed
-    point reads its levels, which brings its atoms into that equilibrium without states at the level, and
-    starts with a gap of 2 eV at the level, 0.0025 e/V, between bands of 1 e/V.
+    The start of the density of states. An atom exchanges charge only through the states at its level. Both
+    models start with dos_start at every energy, no gap and no band edge built in, by default DOS_START, from
+    where the labels reach a metal and an insulator alike: a density of states label takes the states out of
+    the gap of an insulator and gives a metal its states at the level, and the band gap labels place the edges.
+    Without a density of states label, the labels can take states away, with a band gap or with a field the atom
+    does not screen, but they do not give them back: a metal that lost them still fits its training frames, with
+    moments read from the geometry frame by frame in place of the equilibrium with the Fermi level, and fails on
+    new frames. Where every frame carries a band gap label, the zero of a metal included, the labels also give
+    states back, and a start of 0.01 e/V spares ionic insulators a detour: from DOS_START they first build the
+    charges of their ions from the states at the level, which their band gap labels then have to take out
+    again. A fixed point used to start with a gap of 2 eV at the level, 0.0025 e/V, between bands of 1 e/V: five
+    to sixty times the states of DFT on O, Si and H atoms (0.2, 0.13 and 0.02 e/V on average over the energy
+    range), and no states at the level of a metal, which it then read as a gap of 0.7 eV.
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, num_receivers,
@@ -184,11 +186,7 @@ class AtomicResponse(nn.Module):
         centers = torch.linspace(-energy_range, energy_range, int(round(2*energy_range/resolution))+1)
         self.dos_width = float(centers[1]-centers[0])
         self.register_buffer('dos_centers', centers)
-        if fixed_point:
-            offsets = torch.where(centers.abs() < 1.-1.e-9, math.log(math.expm1(.0025)), math.log(math.expm1(1.)))
-        else:
-            offsets = torch.full_like(centers, math.log(math.expm1(dos_start)))
-        self.register_buffer('dos_offsets', offsets)
+        self.register_buffer('dos_offsets', torch.full_like(centers, math.log(math.expm1(dos_start))))
         self.dos_readout = nn.Linear(width, len(centers))
         self.species_bias = nn.Parameter(torch.zeros(num_elements))
         self.species_source = nn.Parameter(torch.zeros(num_elements, num_sources))
