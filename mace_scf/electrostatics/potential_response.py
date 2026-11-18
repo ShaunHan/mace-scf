@@ -987,6 +987,25 @@ class PotentialResponse(ScaleShiftMACE):
                 output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], space.shape).to(positions)
                 output[key+'_dft_mask'] = (space.modes[None].abs() <= torch.div(
                     data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
+        # The band edges and the density of states are read at the levels of the atoms, bias + potential - mu, with
+        # the potential and the Fermi level held: they have labels of their own, and trained through them a band
+        # label moves the charges of every frame. In the functional the bias is not held. The bias of an atom is
+        # the energy of its states against the potential, its band alignment, and where there is a gap the band
+        # labels are all that tells it: an atom without states at the Fermi level keeps its charge wherever in
+        # its gap the level lies, so no electrostatic label holds its bias, while the energy moves it, as the
+        # energy of the response holds -bias x charge of every atom. With the bias held in this read too, the
+        # energy and force terms shifted the levels of the atoms of an insulator freely, most as their weights
+        # rise in the later stages, and a band label could answer only by taking states away or adding them. The
+        # states between the neutral level of an atom and a band edge are its charge (a quarter of an electron
+        # for an edge moved by 0.25 eV through 1 e/V), so that worked against the density, the potential and the
+        # dipole: a functional trained from scratch read the gaps of water slabs 0.5 eV too narrow, and the
+        # density of states error of its water frames rose threefold. A fixed point reads its response at the
+        # levels it finds, so its states already follow them, and its levels are held whole: with its bias free
+        # as well, it moved the levels of the atoms apart in place of removing their states, and opened the gap
+        # of water later (1.1 against 0.5 eV off after 600 steps on a frozen backbone).
+        aligned = level.detach()
+        if not self.fixed_point:
+            aligned = aligned+response[0]-response[0].detach()
         labelled = data.get('band_gap_weight')
         if band_edges or (labelled is not None and bool((labelled > 0).any())):
             # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
@@ -998,27 +1017,23 @@ class PotentialResponse(ScaleShiftMACE):
             # and read its edges past that state: the band gap of bulk water (192 atoms) came out wider than that of
             # the water slabs (72, 108 atoms) from the same states. No charge is added to the cell, so no charging
             # energy or screening of an added charge enters the edges, in a slab or in bulk. The Fermi level is
-            # -dE/dQ in every cell, metal or not, and the edges lie below and above it. A band gap label trains the
-            # states alone, in both models: the levels at which they are counted are held, as the potential and the
-            # Fermi level that set them have labels of their own. Trained through the levels, a band gap label
-            # moves the potential of every frame whose atoms share the readouts of the labelled ones.
+            # -dE/dQ in every cell, metal or not, and the edges lie below and above it.
             count = ((getattr(self, 'band_edge_states', None) or BAND_EDGE_STATES)*space.present.sum(-1)
                      ).clamp_max(BAND_EDGE_ELECTRONS)
-            below, above = self.response.band_edges(response[2], level.detach(), space.present, count)
-            reference = mu+self.fermi_level_offset+space.vacuum_reference
-            output.update(valence_band_maximum=reference-below, conduction_band_minimum=reference+above,
+            below, above = self.response.band_edges(response[2], aligned, space.present, count)
+            output.update(valence_band_maximum=fermi_level-below, conduction_band_minimum=fermi_level+above,
                           band_gap=below+above, band_edge_distances=torch.stack((below, above), -1))
         labelled = data.get('dos')
         if dos or (labelled is not None and labelled.numel() > 0):
             # The density of states of every atom, as the electrons it takes up when the Fermi level moves by the
             # energies at the potential of the ground state, over the energy range of its states. Like the band
-            # edges it is read at held levels. The label is put on the same energies: the states of DFT, smoothed
-            # like the model's, counted from the Fermi level of DFT to the same absolute energies, so that in a gap
-            # both curves are flat wherever in it each Fermi level lies, and in a metal a Fermi level off the one of
-            # DFT shows as the electrons between the two.
+            # edges it is read at the aligned levels. The label is put on the same energies: the states of DFT,
+            # smoothed like the model's, counted from the Fermi level of DFT to the same absolute energies, so that
+            # in a gap both curves are flat wherever in it each Fermi level lies, and in a metal a Fermi level off
+            # the one of DFT shows as the electrons between the two.
             steps = int(round(float(self.response.dos_centers[-1])/self.response.dos_width))
             energies = torch.arange(-steps, steps+1, device=level.device, dtype=level.dtype)*self.response.dos_width
-            curves = self.response.electrons(response[2], level.detach(), steps)
+            curves = self.response.electrons(response[2], aligned, steps)
             output.update(atomic_electrons=space.unpack(curves), dos_energies=energies)
             if labelled is not None and labelled.numel() > 0:
                 shift = fermi_level-data['fermi_level'].reshape(-1).to(fermi_level)
@@ -1326,15 +1341,24 @@ def weighted_mean_squared_error_vacuum_potential(ref, pred):
 
 
 def weighted_mean_squared_error_band_gap(ref, pred):
-    # band_gap: [n_graphs, ], predicted for batches with band gap labels only. The Fermi level of a cell with a gap
-    # is the middle of its gap (zero smearing), so each band edge lies half the gap from it: the loss is the square
-    # of the error of the gap, the sum of the distances of the edges from -dE/dQ, plus that of their difference. In
-    # a metal both distances vanish. Like the gap, the difference trains the states alone.
+    # band_gap: [n_graphs, ], predicted for batches with band gap labels only. The Fermi level label of a cell with
+    # a gap is the middle of its gap (zero smearing), so the labels place both band edges: half the band gap label
+    # below and above the Fermi level label. The loss is the squared error of the gap plus that of the two edges
+    # together, twice the error of their middle; summed, twice the squared errors of the two edges. The edges of
+    # the model lie at the distances below and above its Fermi level, which is held in this term: where in a gap
+    # the Fermi level of the model lies is set by the few states left there, and the Fermi level label trains it,
+    # while this term places the bands, through the states and the bias of the atoms. With the middle measured
+    # from the Fermi level of the model instead, the bands of an insulator followed that level about, and the
+    # density of states with them. In a metal the edges are at the Fermi level itself, which its own label
+    # trains, and both distances vanish. A frame with a gap and no Fermi level label has the middle of its edges
+    # at the Fermi level of the model.
     if pred.get('band_gap') is None:
         return ref.weight.new_zeros(())
     below, above = pred['band_edge_distances'].unbind(-1)
     configs_weight = ref.weight*ref.band_gap_weight
-    return torch.mean(configs_weight*(torch.square(ref['band_gap']-below-above)+torch.square(above-below)))
+    placed = (ref['band_gap'] > 0) & (ref.fermi_level_weight > 0)
+    middle = above-below+2.*torch.where(placed, pred['fermi_level'].detach()-ref['fermi_level'], 0.)
+    return torch.mean(configs_weight*(torch.square(ref['band_gap']-below-above)+torch.square(middle)))
 
 
 def weighted_mean_squared_error_dos(ref, pred):
