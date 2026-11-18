@@ -21,7 +21,7 @@ DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 10.0  # eV/A: largest atomic force of a kept frame.
 PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a uniform net force.
-VALID_FRACTION = 0.2
+TRAIN_VALID_RATIO = 4.0  # Training frames per validation frame; the split is the last step, after every check.
 SPLIT_SEED = 7777
 SKIP_IDS = [1, 7, 10, 46, 66, 97, 101, 115, 194, 218, 228, 266, 288, 296, 308, 318, 342, 353, 375, 391, 420, 439, 506, 555, 566, 755]  # Original VASP IDs: batch start + output index.
 VACUUM_MARGIN = 3.0  # A: vacuum planes start this far above the outermost atom.
@@ -562,25 +562,60 @@ def drop_repeats(records):
 
 
 def split_configs(records):
-    """Keep each VASP batch in one split, without storing group metadata in XYZ."""
-    groups = {}
+    """Training and validation frames in the ratio TRAIN_VALID_RATIO, each VASP batch whole in one of them, without
+    storing group metadata in XYZ.
+
+    It is the last step, on the frames that passed every check, so the files as written hold the ratio. The batches
+    of each stratum (the config types of a batch) are shuffled and the first 1 / (1 + ratio) of them drawn for
+    validation. Batches differ in size, so the frames then miss the ratio by a few: whole batches change sides, in
+    one shuffled order of all batches, each one that fits the frames still missing, until the validation set holds
+    round(frames / (1 + ratio)) frames; a last frame or two is settled by exchanging two batches of one stratum.
+    Every stratum of two batches or more keeps one on each side.
+    """
+    sizes, types = {}, {}
     for atoms, group in records:
-        groups.setdefault(group, set()).add(atoms.info["config_type"])
+        sizes[group] = sizes.get(group, 0) + 1
+        types.setdefault(group, set()).add(atoms.info["config_type"])
     strata = {}
-    for group, types in groups.items():
-        strata.setdefault(tuple(sorted(types)), []).append(group)
+    for group, kinds in types.items():
+        strata.setdefault(tuple(sorted(kinds)), []).append(group)
+    fraction = 1.0 / (1.0 + TRAIN_VALID_RATIO)
     rng = np.random.default_rng(SPLIT_SEED)
-    valid_groups = set()
-    for groups in strata.values():
+    valid_groups, stratum = set(), {}
+    for key, groups in strata.items():
         groups = np.asarray(sorted(groups), dtype=object)
         rng.shuffle(groups)
+        stratum.update((group, key) for group in groups)
         if len(groups) > 1:
-            count = min(max(round(VALID_FRACTION * len(groups)), 1), len(groups) - 1)
+            count = min(max(round(fraction * len(groups)), 1), len(groups) - 1)
             valid_groups.update(groups[:count])
+    inside = {key: sum(group in valid_groups for group in groups) for key, groups in strata.items()}
+    missing = round(fraction * len(records)) - sum(sizes[group] for group in valid_groups)
+    order = np.asarray(sorted(sizes), dtype=object)
+    rng.shuffle(order)
+    for group in order:
+        key = stratum[group]
+        if missing > 0 and group not in valid_groups and sizes[group] <= missing \
+                and len(strata[key]) - inside[key] > 1:
+            valid_groups.add(group)
+            inside[key] += 1
+            missing -= sizes[group]
+        elif missing < 0 and group in valid_groups and sizes[group] <= -missing and inside[key] > 1:
+            valid_groups.discard(group)
+            inside[key] -= 1
+            missing += sizes[group]
+    if missing:
+        pair = next(((a, b) for a in order if a not in valid_groups for b in order
+                     if b in valid_groups and stratum[a] == stratum[b] and sizes[a] - sizes[b] == missing), None)
+        if pair is not None:
+            valid_groups.add(pair[0])
+            valid_groups.discard(pair[1])
     train = [atoms for atoms, group in records if group not in valid_groups]
     valid = [atoms for atoms, group in records if group in valid_groups]
     if not train or not valid:
         raise ValueError("A group-disjoint split needs at least two VASP batches per stratum")
+    print(f"Split: {len(train)} training and {len(valid)} validation frames, ratio {len(train) / len(valid):.4f} "
+          f"(TRAIN_VALID_RATIO {TRAIN_VALID_RATIO})")
     return train, valid
 
 
