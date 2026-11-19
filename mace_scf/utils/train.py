@@ -761,7 +761,6 @@ FULL_RMSE = {
     "polarizability": ("rmse_polarizability_per_atom", 2),
     "DMA": ("rmse_dma", 2),
     "Q": ("rmse_total_charge", 2),
-    "ESPs": ("rmse_esp", 1),
     "EF": ("rmse_fermi_level", 1),
     "WF": ("rmse_work_function", 1),
     "ESPvac": ("rmse_vacuum_potential", 1),
@@ -803,7 +802,7 @@ def valid_err_log(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={errors['E']} meV, RMSE_F={errors['F']} meV / A, "
             f"RMSE_stress={errors['stress']} meV / A^3, RMSE_virials_per_atom={errors['virials']} meV, "
             f"RMSE_Mu_per_atom={errors['Mu']} meA, RMSE_polarizability_per_atom={errors['polarizability']} me A^2 / V, "
-            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, RMSE_ESPs={errors['ESPs']} mV, "
+            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, "
             f"RMSE_rho({widths_rho} A)={errors['fourier_density']} me / A^3, "
             f"RMSE_ESP({widths_esp} A)={errors['fourier_potential']} mV, RMSE_EF={errors['EF']} meV, "
             f"RMSE_WF={errors['WF']} meV, RMSE_ESPvac={errors['ESPvac']} mV, RMSE_Eg={errors['Eg']} meV, "

@@ -50,7 +50,6 @@ FULL_RMSE_COLUMNS = {
     "polarizability": "RMSE polarizability / me A^2 / V / atom",
     "DMA": "RMSE DMA / me A^l",
     "Q": "RMSE Q / me",
-    "ESPs": "RMSE ESPs / mV",
     "EF": "RMSE EF / meV",
     "WF": "RMSE WF / meV",
     "ESPvac": "RMSE ESPvac / mV",
