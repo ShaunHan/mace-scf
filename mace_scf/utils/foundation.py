@@ -50,6 +50,8 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
     if foundation is not None:
         adopt_foundation(model, foundation)
     initialize_potential_response(model, args, train_loader, args.device)
+    if foundation is not None:
+        start_energy_readouts(model, train_loader, args)
     condition_energy(model, train_loader, args.device)
     if args.enable_cueq:
         accelerate_backbone(model, args.device)
@@ -78,29 +80,74 @@ def adopt_foundation(model, foundation):
     logging.info(f'Foundation backbone and energy readouts adopted, {len(source)} elements')
 
 
-@torch.no_grad()
-def condition_energy(model, loader, device):
-    """Starting energy zeros by element: the least squares fit of the energies per atom of 64 evenly spaced
-    training frames, with the weights of the energy loss. The model trains them further.
-    """
-    fractions, residuals, weights = [], [], []
+def starting_errors(model, loader, device, forces=False):
+    """The model on 64 evenly spaced training frames: the least squares fit of energy zeros by element to its
+    energy errors per atom, with the weights of the energy loss, those errors (eV) before and after the fit, and
+    with forces the squared force errors of all atoms (eV/A)."""
+    fractions, residuals, weights, squares = [], [], [], []
     dataset = loader.dataset
     panel = torch.linspace(0, len(dataset)-1, min(len(dataset), 64)).round().long().unique().tolist()
     for batch in torch_geometric.dataloader.DataLoader([dataset[i] for i in panel], batch_size=loader.batch_size,
                                                        shuffle=False):
         batch = batch.to(device)
-        output = model(batch.to_dict(), compute_force=False)
+        with torch.set_grad_enabled(forces):
+            output = model(batch.to_dict(), compute_force=forces)
         counts = scatter_sum(batch.node_attrs, batch.batch, dim=0)
         size = counts.sum(-1)
         fractions.append(counts/size[:, None])
         residuals.append((batch.energy-output['energy'].detach())/size)
         weights.append(batch.weight*batch.energy_weight)
+        if forces:
+            squares.append((batch.forces-output['forces'].detach()).square().reshape(-1).cpu())
     a, b, w = torch.cat(fractions).cpu(), torch.cat(residuals).cpu(), torch.cat(weights).cpu()
     a, b, w = a[w > 0], b[w > 0], w[w > 0].sqrt()
     delta = torch.linalg.lstsq(a*w[:, None], (b*w)[:, None], driver='gelsd').solution[:, 0]
+    return delta, b, b-a@delta, torch.cat(squares) if forces else None
+
+
+def start_energy_readouts(model, loader, args):
+    """Whether a finetune starts from the energy readouts of its foundation or from none.
+
+    The readouts of a foundation belong to its own electrostatics and reference calculations. Where they describe
+    the data they are a head start. Where they do not (a foundation of molecules on dense crystals), the energies
+    start tens of eV per atom off, and training repairs that only where its frames are. Both starts are measured
+    on the frames of starting_errors, the energy zeros fitted for each: the energy per atom and force terms of the
+    first training stage, with the readouts as adopted and with the last layer of each at zero, which leaves the
+    energy zeros and the electrostatics. The start with the smaller loss is kept.
+    """
+    terms = args.train_schedule[0]['loss']
+    energy_weight, forces_weight = (float(terms.get(key, {'weight': 0.})['weight'])
+                                    for key in ('energy_per_atom', 'forces'))
+    last = [parameter for readout in model.readouts
+            for parameter in [child for child in readout.children() if list(child.parameters())][-1].parameters()]
+    adopted = [parameter.detach().clone() for parameter in last]
+    starts = []
+    for zero in (False, True):
+        if zero:
+            for parameter in last:
+                parameter.data.zero_()
+        _, _, energies, squares = starting_errors(model, loader, args.device, forces=True)
+        energy, force = float(energies.square().mean()), float(squares.mean())
+        starts.append((energy_weight*energy+forces_weight*force, energy**.5*1e3, force**.5*1e3, len(energies)))
+    keep = starts[0][0] <= starts[1][0]
+    if keep:
+        for parameter, value in zip(last, adopted):
+            parameter.data.copy_(value)
+    logging.info(f'Energy readouts of the foundation on {starts[0][3]} training frames, energy zeros fitted: '
+                 f'energy per atom {starts[0][1]:.1f} meV and forces {starts[0][2]:.1f} meV / A with them, '
+                 f'{starts[1][1]:.1f} meV and {starts[1][2]:.1f} meV / A with their last layers at zero; '
+                 + ('they are kept' if keep else 'the training starts with their last layers at zero'))
+
+
+@torch.no_grad()
+def condition_energy(model, loader, device):
+    """Starting energy zeros by element: the least squares fit of the energies per atom of 64 evenly spaced
+    training frames, with the weights of the energy loss. The model trains them further.
+    """
+    delta, before, after, _ = starting_errors(model, loader, device)
     model.atomic_energies_fn.atomic_energies.add_(delta.to(device).reshape_as(model.atomic_energies_fn.atomic_energies))
-    logging.info(f'Energy zeros shifted by {delta.tolist()} eV, from {len(b)} training frames: energy per atom '
-                 f'{float(b.square().mean().sqrt())*1e3:.1f} -> {float((b-a@delta).square().mean().sqrt())*1e3:.1f} meV')
+    logging.info(f'Energy zeros shifted by {delta.tolist()} eV, from {len(before)} training frames: energy per atom '
+                 f'{float(before.square().mean().sqrt())*1e3:.1f} -> {float(after.square().mean().sqrt())*1e3:.1f} meV')
 
 
 class FusedConvolution(torch.nn.Module):

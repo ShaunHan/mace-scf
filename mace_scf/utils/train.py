@@ -26,7 +26,7 @@ from mace.tools.utils import (
 import os
 from ase.data import chemical_symbols
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, spectral_errors
+from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, density_of_states, spectral_errors
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -488,7 +488,7 @@ def evaluate(
     # For the debug log: the frames behind every error, the band gap labels, and the states inside the gaps.
     numbers = getattr(model, "atomic_numbers", None)
     frames = {"E": [], "EF": [], "WF": [], "Eg": [], "states": []}
-    band_gap_labels, gap_states = [], []
+    band_gap_labels, gap_states, level_states = [], [], []
     fourier_errors = {}
     batch = None  # for pylint
 
@@ -580,6 +580,14 @@ def evaluate(
         if output.get("atomic_electrons_dft") is not None:
             observed = torch.isfinite(output["atomic_electrons_dft"]) & (batch.dos_weight > 0.0)[batch.batch].unsqueeze(-1)
             dos_error_list.append((output["atomic_electrons"] - output["atomic_electrons_dft"])[observed])
+            # the density of states of every atom at the Fermi level of the model, and DFT's at the same energy
+            density, density_dft = (density_of_states(output[key], output["dos_energies"])
+                                    for key in ("atomic_electrons", "atomic_electrons_dft"))
+            middle = density.shape[-1] // 2
+            known = torch.isfinite(density_dft[:, middle]) & (batch.dos_weight > 0.0)[batch.batch]
+            gapped = ((batch.band_gap_weight > 0.0) & (batch.band_gap > 0.1))[batch.batch]
+            level_states.append((batch.node_attrs.argmax(-1)[known], gapped[known], density[known, middle],
+                                 density_dft[known, middle]))
             chosen, held, held_dft = states_in_gaps(batch, output)
             if bool(chosen.any()):
                 gap_states.append((batch.node_attrs.argmax(-1)[chosen], held[chosen], held_dft[chosen]))
@@ -748,6 +756,17 @@ def evaluate(
         aux["rmse_band_gap"] = compute_rmse(delta_band_gap)
         aux["largest_band_gap"] = largest_errors(delta_band_gap, frames["Eg"])
         aux["band_gap_reading"] = band_gap_reading(delta_band_gap, to_numpy(torch.cat(band_gap_labels, dim=0)))
+    if level_states and sum(len(parts[0]) for parts in level_states):
+        elements, gapped, states, states_dft = (to_numpy(torch.cat(parts)) for parts in zip(*level_states))
+        gapped, parts = gapped.astype(bool), []
+        for name, chosen in (("frames without a band gap", ~gapped), ("frames with one", gapped)):
+            if chosen.any():
+                parts.append(name + ": " + ", ".join(
+                    f"{chemical_symbols[int(numbers[index])] if numbers is not None else index} "
+                    f"{states[chosen & (elements == index)].mean():.3f} "
+                    f"(DFT {states_dft[chosen & (elements == index)].mean():.3f})"
+                    for index in np.unique(elements[chosen])))
+        aux["states_at_level"] = "; ".join(parts)
     if gap_states:
         elements, held, held_dft = (to_numpy(torch.cat(parts)) for parts in zip(*gap_states))
         by_element = ", ".join(
@@ -896,6 +915,9 @@ def valid_err_log(
                               f"error: {eval_metrics[key]}")
         if eval_metrics.get("band_gap_reading"):
             logging.debug(f"Band gaps of the validation frames: {eval_metrics['band_gap_reading']}")
+        if eval_metrics.get("states_at_level"):
+            logging.debug("Density of states at the Fermi level of the validation frames (e/V per atom, the mean by "
+                          f"element): {eval_metrics['states_at_level']}")
         if eval_metrics.get("states_in_gaps"):
             logging.debug("Electrons per atom that the states of the model hold inside the band gaps of the labels (one "
                           f"state width in from either edge), by element: {eval_metrics['states_in_gaps']}")
