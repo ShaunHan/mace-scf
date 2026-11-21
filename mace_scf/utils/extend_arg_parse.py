@@ -130,6 +130,12 @@ def extended_arg_parser() -> argparse.ArgumentParser:
         "--potential_response_config", type=str, default=None,
     )
     parser.add_argument(
+        "--electronic_smearing_width", type=float, default=0.25,
+        help="PotentialResponse: the width (eV) of the Gaussian with which the states are smeared. It stands for the "
+             "smearing of the DFT of the training data: SIGMA for Gaussian or Methfessel-Paxton smearing, 2.5 SIGMA "
+             "for Fermi smearing",
+    )
+    parser.add_argument(
         "--field_block_weight_decay", type=float, default=5e-7
     )
     parser.add_argument(

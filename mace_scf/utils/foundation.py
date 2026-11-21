@@ -45,6 +45,7 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
         field_widths=ast.literal_eval(args.field_feature_widths),
         kspace_cutoff_factor=args.kspace_cutoff_factor,
         fermi_level_offset=args.fermi_level_offset,
+        smearing_width=args.electronic_smearing_width,
         **args.potential_response_config,
     ).to(args.device)
     if foundation is not None:
