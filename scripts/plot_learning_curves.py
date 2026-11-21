@@ -4,15 +4,19 @@
 Edit RUNS, then run this script. Requires numpy and matplotlib.
 Values are converted from base units to milli-units. Density and potential
 already use real-space Parseval normalization for the retained Fourier modes.
+Their panels show one curve at each smearing width of their losses, the widths
+in the results files: the largest in the color of its split, smaller ones lighter.
 """
 
 import json
+import re
 import warnings
 from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgb
 from matplotlib.lines import Line2D
 from matplotlib.ticker import AutoMinorLocator, FuncFormatter, LogLocator, MaxNLocator, NullFormatter
 import numpy as np
@@ -29,8 +33,9 @@ PANELS = [
     ("Energy", "meV/atom", ("rmse_e_per_atom",)),
     ("Forces", "meV/Å", ("rmse_f",)),
     ("Dipole", "me Å/atom", ("rmse_mu_per_atom",)),
-    ("Deformation charge density", "me/Å³", ("rmse_fourier_density_3A", "rmse_fourier_density", "rmse_rho")),
-    ("Deformation electrostatic potential", "mV", ("rmse_fourier_potential_1.5A", "rmse_fourier_potential", "rmse_esp")),
+    # one curve at each smearing width of the loss (see series)
+    ("Deformation charge density", "me/Å³", ("rmse_fourier_density", "rmse_rho")),
+    ("Deformation electrostatic potential", "mV", ("rmse_fourier_potential", "rmse_esp")),
     ("Work function", "meV", ("rmse_work_function", "rmse_wf_abs")),
 ]
 
@@ -63,6 +68,24 @@ def curve(records, keys):
                            np.nan) for e in epochs], dtype=float) * 1000
     errors[~np.isfinite(errors) | (errors < 0)] = np.nan
     return epochs, errors
+
+
+def series(runs_data, keys):
+    """The curves of a panel as (smearing width, keys), the largest width first.
+
+    One curve for each width at which the results files hold the first key, such as
+    rmse_fourier_density_3A: the smearing widths of the loss. One curve of keys otherwise.
+    """
+    pattern = re.compile(re.escape(keys[0]) + r"_([0-9.eE+-]+)A$")
+    widths = {float(found.group(1)) for data in runs_data for records in data.values()
+              for row in records.values() for found in map(pattern.match, row) if found}
+    return [(f"{w:g} Å", (f"{keys[0]}_{w:g}A",)) for w in sorted(widths, reverse=True)] or [("", keys)]
+
+
+def lighter(color, fraction):
+    """The color mixed with white by fraction."""
+    rgb = np.array(to_rgb(color))
+    return tuple(rgb + (1.0 - rgb) * fraction)
 
 
 def format_ticks(ax):
@@ -99,25 +122,28 @@ def plot_learning_curves(runs=RUNS, output=OUTPUT):
                              gridspec_kw={"wspace": 0, "hspace": 0})
     handles, summaries, epoch_limits = [], [[] for _ in PANELS], []
     has_training = False
-    for label, style, path in runs:
-        data = read_metrics(path)
+    runs_data = [read_metrics(path) for _, _, path in runs]
+    panels = [series(runs_data, keys) for _, _, keys in PANELS]
+    for (label, style, _), data in zip(runs, runs_data):
         run_plotted = False
         for split, color in COLORS.items():
-            for ax, (_, _, keys), summary in zip(axes.flat, PANELS, summaries):
-                epochs, errors = curve(data[split], keys)
-                finite = np.flatnonzero(np.isfinite(errors))
-                if len(finite) < 2:
-                    continue
-                last = finite[-1]
-                if split == "Validation":
-                    summary.append(Line2D([], [], color=color, linestyle=style, linewidth=1.7,
-                        label=f"{label}: {errors[last]:.4g} ({epochs[last]:g})"))
-                if Y_SCALE == "log":
-                    errors[errors == 0] = np.nan
-                ax.plot(epochs, errors, color=color, linestyle=style, linewidth=1.7)
-                epoch_limits.extend((epochs[finite[0]], epochs[last]))
-                run_plotted = True
-                has_training |= split == "Training"
+            for ax, panel, summary in zip(axes.flat, panels, summaries):
+                for index, (width, keys) in enumerate(panel):
+                    epochs, errors = curve(data[split], keys)
+                    finite = np.flatnonzero(np.isfinite(errors))
+                    if len(finite) < 2:
+                        continue
+                    last = finite[-1]
+                    shade = lighter(color, 0.55 * index / max(len(panel) - 1, 1))
+                    if split == "Validation":
+                        summary.append(Line2D([], [], color=shade, linestyle=style, linewidth=1.7,
+                            label=f"{label}{', ' + width if width else ''}: {errors[last]:.4g} ({epochs[last]:g})"))
+                    if Y_SCALE == "log":
+                        errors[errors == 0] = np.nan
+                    ax.plot(epochs, errors, color=shade, linestyle=style, linewidth=1.7)
+                    epoch_limits.extend((epochs[finite[0]], epochs[last]))
+                    run_plotted = True
+                    has_training |= split == "Training"
         if run_plotted:
             handles.append(Line2D([], [], color="0.15", linestyle=style, linewidth=1.8, label=label))
     if not handles:

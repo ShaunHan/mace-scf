@@ -1350,10 +1350,6 @@ def initialize_potential_response(model, args, train_loader, device):
     model.response.vector_unit.copy_((1.+vector/count).sqrt())
 
 
-# The smearing widths (A) at which validation reports the Fourier errors: raw, the density width and the far field.
-REPORTED_SMEARING_WIDTHS = {'fourier_density': (0., 1.5, 3.), 'fourier_potential': (0., 1.5)}
-
-
 def spectral_errors(ref, pred, key, width=0.):
     """Parseval mean square of a Fourier prediction minus its label, both smeared by a Gaussian of width (A).
 
@@ -1398,6 +1394,16 @@ class FourierPotentialError(FourierError):
 
     def __init__(self, smearing_widths=(0., 1.5)):
         super().__init__(smearing_widths)
+
+
+def fourier_smearing_widths(loss_fn):
+    """The smearing widths (A) of the Fourier losses of loss_fn by field, as the config sets them.
+
+    Validation reports the error of each field at these widths. A field without a loss is not reported.
+    """
+    losses = getattr(loss_fn, 'loss_fns', {})
+    return {key: list(losses[key].smearing_widths) for key in ('fourier_density', 'fourier_potential')
+            if isinstance(losses.get(key), FourierError)}
 
 
 def weighted_mean_squared_error_vacuum_potential(ref, pred):

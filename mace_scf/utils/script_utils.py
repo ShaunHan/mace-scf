@@ -17,8 +17,8 @@ from mace.tools.tables_utils import custom_key  as mace_table_custom_key
 # update
 from mace import data
 from ..data import ExtAtomicData
-from .train import FULL_RMSE, evaluate, full_rmse
-from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS
+from .train import FOURIER_RMSE, FULL_RMSE, evaluate, fourier_rmse, full_rmse
+from mace_scf.electrostatics.potential_response import fourier_smearing_widths
 
 
 
@@ -40,7 +40,8 @@ NEW_TABLE_TYPES = [
     "FullRMSE",
 ]
 
-# The columns of the FullRMSE table by target of FULL_RMSE, the Fourier fields after Q.
+# The columns of the FullRMSE table by target of FULL_RMSE, the Fourier fields after Q at the smearing widths of their
+# losses.
 FULL_RMSE_COLUMNS = {
     "E": "RMSE E / meV / atom",
     "F": "RMSE F / meV / A",
@@ -73,6 +74,7 @@ def create_error_table(
     if log_wandb:
         import wandb
     table = PrettyTable()
+    smearing_widths = fourier_smearing_widths(loss_fn)
 
     if table_type == "DensityCoefficientsRMSE":
         table.field_names = [
@@ -139,8 +141,8 @@ def create_error_table(
         table.field_names = (
             ["config_type"] + [FULL_RMSE_COLUMNS[name] for name in names[:2]] + ["relative F RMSE %"]
             + [FULL_RMSE_COLUMNS[name] for name in names[2:8]]
-            + [f"RMSE {'rho' if key == 'fourier_density' else 'ESP'} {'/'.join(f'{w:g}' for w in widths)} A / "
-               f"{'me / A^3' if key == 'fourier_density' else 'mV'}" for key, widths in REPORTED_SMEARING_WIDTHS.items()]
+            + [f"RMSE {FOURIER_RMSE[key][0]} {'/'.join(f'{w:g}' for w in widths)} A / {FOURIER_RMSE[key][1]}"
+               for key, widths in smearing_widths.items()]
             + [FULL_RMSE_COLUMNS[name] for name in names[8:]]
         )
     # add new tables here...
@@ -190,7 +192,7 @@ def create_error_table(
             "rmse_polarizability_per_atom",
             "rmse_fermi_level",
             "rmse_work_function",
-        ] + [f"rmse_{key}_{w:g}A" for key, widths in REPORTED_SMEARING_WIDTHS.items() for w in widths]
+        ] + [f"rmse_{key}_{w:g}A" for key, widths in smearing_widths.items() for w in widths]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
                 metrics[metric_name] = "not found"
@@ -277,8 +279,7 @@ def create_error_table(
         elif table_type == "FullRMSE":
             values = {target: f"{full_rmse(raw, key):.2f}" for target, (key, _) in FULL_RMSE.items()}
             relative = raw.get("rel_rmse_f")
-            fields = ["/".join(f"{full_rmse(raw, f'rmse_{key}_{w:g}A'):.2f}" for w in widths)
-                      for key, widths in REPORTED_SMEARING_WIDTHS.items()]
+            fields = [fourier_rmse(raw, key, widths, 2) for key, widths in smearing_widths.items()]
             names = list(FULL_RMSE_COLUMNS)
             table.add_row(
                 [name] + [values[target] for target in names[:2]]

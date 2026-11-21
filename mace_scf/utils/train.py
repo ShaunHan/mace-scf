@@ -26,7 +26,7 @@ from mace.tools.utils import (
 import os
 from ase.data import chemical_symbols
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import REPORTED_SMEARING_WIDTHS, density_of_states, spectral_errors
+from mace_scf.electrostatics.potential_response import density_of_states, fourier_smearing_widths, spectral_errors
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -216,6 +216,7 @@ def train(
                     logger,
                     log_errors,
                     epoch,
+                    loss_fn,
                 )
 
                 if log_wandb:
@@ -489,7 +490,8 @@ def evaluate(
     numbers = getattr(model, "atomic_numbers", None)
     frames = {"E": [], "EF": [], "WF": [], "Eg": [], "states": []}
     band_gap_labels, gap_states, level_states = [], [], []
-    fourier_errors = {}
+    # the Fourier errors at the smearing widths of the losses
+    fourier_errors, smearing_widths = {}, fourier_smearing_widths(loss_fn)
     batch = None  # for pylint
 
     for name, param in model.named_parameters():
@@ -595,7 +597,7 @@ def evaluate(
                 listed = scatter_sum(chosen.to(held), batch.batch, dim=0, dim_size=batch.num_graphs) > 0
                 frames["states"] += [(float(value), name) for name, value, keep
                                      in zip(names, in_cell.tolist(), listed.tolist()) if keep]
-        for key, widths in REPORTED_SMEARING_WIDTHS.items():
+        for key, widths in smearing_widths.items():
             if output.get(key + "_dft") is not None:
                 observed = getattr(batch, key + "_weight") > 0.0
                 for width in widths:
@@ -850,7 +852,7 @@ def states_in_gaps(batch, output):
 
 
 # The targets of the FullRMSE epoch line and error table: their metric of evaluate, shown in thousandths of its unit,
-# and the digits shown; the Fourier fields follow REPORTED_SMEARING_WIDTHS.
+# and the digits shown; the Fourier fields are in FOURIER_RMSE.
 FULL_RMSE = {
     "E": ("rmse_e_per_atom", 1),
     "F": ("rmse_f", 1),
@@ -867,11 +869,23 @@ FULL_RMSE = {
     "DOS": ("rmse_dos", 1),
 }
 
+# The Fourier fields of the FullRMSE epoch line and error table, each at the smearing widths of its loss: the name and
+# unit shown, and the digits of the epoch line.
+FOURIER_RMSE = {
+    "fourier_density": ("rho", "me / A^3", 2),
+    "fourier_potential": ("ESP", "mV", 1),
+}
+
 
 def full_rmse(metrics, key):
     """A metric of evaluate in thousandths of its unit, nan where the data or the model have none."""
     value = metrics.get(key)
     return float("nan") if value is None or isinstance(value, str) else 1e3 * float(value)
+
+
+def fourier_rmse(metrics, key, widths, digits):
+    """The errors of a Fourier field at its smearing widths in thousandths of its unit, such as '347.5/262.6'."""
+    return "/".join(f"{full_rmse(metrics, f'rmse_{key}_{w:g}A'):.{digits}f}" for w in widths)
 
 
 def valid_err_log(
@@ -880,6 +894,7 @@ def valid_err_log(
     logger,
     log_errors,
     epoch,
+    loss_fn=None,
 ):
     eval_metrics["mode"] = "eval"
     eval_metrics["epoch"] = epoch
@@ -892,18 +907,17 @@ def valid_err_log(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
         )
     elif log_errors == "FullRMSE":
-        # every target, nan where the data or the model have none
+        # every target, nan where the data or the model have none; the Fourier fields at the smearing widths of their
+        # losses, such as RMSE_ESP(0/1.5 A) for smearing_widths: [0.0, 1.5]
         errors = {name: f"{full_rmse(eval_metrics, key):.{digits}f}" for name, (key, digits) in FULL_RMSE.items()}
-        errors.update({key: "/".join(f"{full_rmse(eval_metrics, f'rmse_{key}_{w:g}A'):.{2 if key == 'fourier_density' else 1}f}"
-                                     for w in widths) for key, widths in REPORTED_SMEARING_WIDTHS.items()})
-        widths_rho, widths_esp = ("/".join(f"{w:g}" for w in REPORTED_SMEARING_WIDTHS[key]) for key in REPORTED_SMEARING_WIDTHS)
+        fourier = "".join(
+            f"RMSE_{name}({'/'.join(f'{w:g}' for w in widths)} A)={fourier_rmse(eval_metrics, key, widths, digits)} {unit}, "
+            for key, widths in fourier_smearing_widths(loss_fn).items() for name, unit, digits in [FOURIER_RMSE[key]])
         logging.info(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={errors['E']} meV, RMSE_F={errors['F']} meV / A, "
             f"RMSE_stress={errors['stress']} meV / A^3, RMSE_virials_per_atom={errors['virials']} meV, "
             f"RMSE_Mu_per_atom={errors['Mu']} meA, RMSE_polarizability_per_atom={errors['polarizability']} me A^2 / V, "
-            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, "
-            f"RMSE_rho({widths_rho} A)={errors['fourier_density']} me / A^3, "
-            f"RMSE_ESP({widths_esp} A)={errors['fourier_potential']} mV, RMSE_EF={errors['EF']} meV, "
+            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, {fourier}RMSE_EF={errors['EF']} meV, "
             f"RMSE_WF={errors['WF']} meV, RMSE_ESPvac={errors['ESPvac']} mV, RMSE_Eg={errors['Eg']} meV, "
             f"RMSE_DOS={errors['DOS']} me"
         )
