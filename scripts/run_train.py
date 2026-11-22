@@ -206,20 +206,22 @@ def main() -> None:
         device,
     )
     logging.info(f"using Fermi level offset {args.fermi_level_offset}")
-    args.field_feature_norms = mace_scf.utils.run_train_utils.get_field_feature_norms(
-        train_loader,
-        args,
-        device,
-        fermi_level_offset=args.fermi_level_offset,
-    )
-    logging.info(f"using normalization for field features {args.field_feature_norms}")
-    args.atom_density_scaling = mace_scf.utils.run_train_utils.get_atom_density_scaling(
-        train_loader,
-        args,
-        device,
-        z_table=z_table,
-    )
-    logging.info(f"using atom density scaling factors {args.atom_density_scaling}")
+    # The field features and atom densities of the fixed point models; PotentialResponse reads neither.
+    if args.model != "PotentialResponse":
+        args.field_feature_norms = mace_scf.utils.run_train_utils.get_field_feature_norms(
+            train_loader,
+            args,
+            device,
+            fermi_level_offset=args.fermi_level_offset,
+        )
+        logging.info(f"using normalization for field features {args.field_feature_norms}")
+        args.atom_density_scaling = mace_scf.utils.run_train_utils.get_atom_density_scaling(
+            train_loader,
+            args,
+            device,
+            z_table=z_table,
+        )
+        logging.info(f"using atom density scaling factors {args.atom_density_scaling}")
 
     # Build model
     logging.info("Building model")

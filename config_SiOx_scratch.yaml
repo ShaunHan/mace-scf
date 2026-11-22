@@ -26,10 +26,6 @@ compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
 kspace_cutoff_factor: 1.0
-# The smearing of the DFT as the width of a Gaussian (eV): SIGMA for Gaussian smearing, 2.5 SIGMA for Fermi
-# smearing. This set: Gaussian, SIGMA = 0.1, but the narrow band gaps of silicon opened less at 0.1 and 0.15 in
-# tests (RESOLUTION in potential_response.py), so 0.25, the finest width known to open them.
-electronic_smearing_width: 0.25
 E0s: average
 batch_size: 16
 valid_batch_size: 16

@@ -32,9 +32,6 @@ compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
 kspace_cutoff_factor: 1.0
-# The smearing of the DFT as the width of a Gaussian (eV): SIGMA for Gaussian smearing, 2.5 SIGMA for Fermi
-# smearing. This set: Fermi, SIGMA = 0.1.
-electronic_smearing_width: 0.25
 batch_size: 8
 valid_batch_size: 8
 lr: 0.001
