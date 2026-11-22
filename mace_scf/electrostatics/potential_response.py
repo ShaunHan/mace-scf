@@ -678,7 +678,10 @@ def reserve_solvers(device):
 class PotentialResponse(ScaleShiftMACE):
     """A MACE whose atoms carry the response of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 
-    newton_steps, newton_tolerance = 60, 1.e-6
+    # The solve stops once it has converged; the most steps matter only for the hardest batches. Sharper packets of
+    # states need more: on IrO2-water frames up to 44 steps with packets a hundred times narrower than trained, and in
+    # an IrO2-water training a few batches per epoch stopped at 60 in the later epochs.
+    newton_steps, newton_tolerance = 200, 1.e-6
 
     def __init__(self, density_width=1.5, kspace_cutoff_factor=1., fermi_level_offset=0.,
                  short_range_potential=True, energy_range=ENERGY_RANGE, packets=PACKETS, max_l=1,
@@ -820,7 +823,12 @@ class PotentialResponse(ScaleShiftMACE):
             logging.warning(f'Newton solve of the levels stopped after {steps} steps with a level change of '
                             f'{change:.2e} V')
         delta = (base-kp-mu[:, None])*mask
-        charges, mu = linearized(delta.detach())
+        # The values are those of the solve and the derivatives those of the responses linearized at its levels.
+        # Converged, the two agree to the tolerance. Unconverged, the linearized responses are one more full Newton
+        # step from where the line search stopped, which put the Fermi level of single batches of an IrO2-water
+        # training volts off.
+        linear, linear_mu = linearized(delta.detach())
+        charges, mu = p+(linear-linear.detach()), mu+(linear_mu-linear_mu.detach())
         level = (bias+drive_q-(effective@charges[..., None]).squeeze(-1)-mu[:, None])*mask
         moments = charges if screening is None else torch.cat((charges, screened_moments(charges, d0, screening)), -1)
         field = applied+drive-(kernel@moments[..., None]).squeeze(-1)
