@@ -30,10 +30,11 @@ DOS_START = .1
 # its gap from the levels of its atoms, and the levels move by volts with the potential, so the range holds band
 # gaps up to about 15 eV at the start; the packets then go where the labels put them.
 ENERGY_RANGE = 10.
-# The states of an atom are PACKETS packets, each with the same share of its states. The network places every
-# packet and gives it its width, so the states have no resolution of their own: they are as sharp or as broad as
-# the data make them, a gap is empty, and a band edge is the edge of a packet. The occupation is that of zero
-# temperature: a state below the Fermi level is filled, one above it empty. No smearing width enters anywhere.
+# The states of an atom are PACKETS packets. The network places every packet and gives it its width and its share
+# of the states, so the states take the shape the data give them: a band with a sharp or a gradual onset, a few
+# states in a gap, or none, which packets of equal shares cannot draw (each holds a thirty-second of the states of
+# its atom wherever it lies). The occupation is that of zero temperature: a state below the Fermi level is filled,
+# one above it empty. No smearing width enters anywhere.
 PACKETS = 32
 # The softness of the charge of an atom (e/V) between its states, at the start: the charge an atom gives or takes
 # per volt of its level beyond what its states hold. Electrons in an insulator move between atoms without a state at
@@ -43,9 +44,21 @@ PACKETS = 32
 # without the states of DFT at the start. With it and that start they kept them, or lost them for a few hundred
 # steps and took them back, at each of three seeds.
 SOFTNESS_START = 1.e-3
-# The energies (eV) at which the curves of the states are compared with their labels and reported: the points of
-# the comparison, not a resolution of the states, which are exact at every energy.
+# The energies (eV) at which the curves of the states are compared with their labels and reported, and the smallest
+# half width of a packet. Narrower packets would draw structure that no label resolves, and the charge of their atom
+# would jump almost like a step when its level moves: in an IrO2-water training with packets of any width the Newton
+# solve of the levels needed more steps as they sharpened, 200 and more in single batches.
 DOS_SAMPLING = .1
+# A band edge is where the states of a cell, counted from its Fermi level, reach the band edge count. The count per
+# atom is measured on the labels of the training data that have both states and band gaps
+# (initialize_potential_response), and is this many electrons without them. On the states of DFT itself a count of
+# 1e-4 to 3e-4 per atom returns the band gaps of DFT to 33 to 53 meV RMSE in IrO2-water and 46 to 111 meV in SiOx.
+# A metal reads zero to within the count over its states at the Fermi level, and a few thousandths of an electron
+# left in a gap or at its edge move an edge little.
+BAND_EDGE_STATES = 1.5e-4
+# The most electrons the states between a band edge and the Fermi level of a cell hold: a band edge is the energy of
+# one state, and in a large cell the count per atom would read the edge past its first states.
+BAND_EDGE_ELECTRONS = 1.
 # Gaussian tails below exp(-TAIL) are dropped from the exact sums of the counter charge.
 TAIL = 36.
 # Form factors of the neutral atoms, P_Z(k)/K on a uniform grid in k (1/A).
@@ -154,21 +167,21 @@ class AtomicResponse(nn.Module):
     density width: for l = 1 dd_dE times the density width squared is the dipole per field. d0 and the amplitudes of
     order l >= 1 are gated sums of the order l solid harmonics of the vector channels.
 
-    The states. The states of an atom are packets packets with the same share each of its states, each placed and
-    given a width by the network: the density of states is their sum, with nothing between packets and nothing
-    beyond them. They lie on the axis of the electrostatic potential at the atom: a state is at the Fermi level
-    when the potential minus the Fermi level, the level of the atom, is at its energy. The bias of the atom is where
-    on the axis it is neutral, at -bias, and its charge is the number of its states between there and its level,
-    filled below the Fermi level and empty above it, plus its softness times that distance. The states and the
-    potential place the bands, and the labels of the bands, the band gap and the density of states, train the
-    states. The bias and the softness set the charge, and the Fermi level and the electrostatic labels train them.
-    In a cell without states at the Fermi level the softness carries the charges: its mean of the neutral levels
-    is the Fermi level.
+    The states. The states of an atom are packets packets, each placed, given a width of at least DOS_SAMPLING and
+    given its share of the states by the network: the density of states is their sum, with nothing between packets
+    and nothing beyond them. They lie on the axis of the electrostatic potential at the atom: a state is at the
+    Fermi level when the potential minus the Fermi level, the level of the atom, is at its energy. The bias of the
+    atom is where on the axis it is neutral, at -bias, and its charge is the number of its states between there and
+    its level, filled below the Fermi level and empty above it, plus its softness times that distance. The states
+    and the potential place the bands, and the labels of the bands, the band gap and the density of states, train
+    the states. The bias and the softness set the charge, and the Fermi level and the electrostatic labels train
+    them. In a cell without states at the Fermi level the softness carries the charges: its mean of the neutral
+    levels is the Fermi level.
 
-    The start: the packets lie evenly on [-energy_range, energy_range] eV, together DOS_START at every energy, no
-    gap and no band edge built in, from where the labels reach a metal and an insulator alike. A label moves the
-    packets: a packet that a label of the states sends elsewhere keeps its states and follows the label back, and a
-    gap opens where all of them have left.
+    The start: the packets of an element lie where the states of DFT are, at the quantiles of their mean in the
+    labels, with equal shares (start_packets), and evenly on [-energy_range, energy_range] eV, together DOS_START at
+    every energy, without labels. A label moves the packets and their shares, and a gap opens where the states
+    have left.
     """
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, energy_range=ENERGY_RANGE,
@@ -196,9 +209,9 @@ class AtomicResponse(nn.Module):
         self.register_buffer('packet_starts', starts.repeat(num_elements, 1))
         self.register_buffer('packet_start_widths', torch.full((num_elements, packets), spacing))
         self.register_buffer('packet_start_states', torch.full((num_elements,), DOS_START*2*energy_range))
-        # The centers, half widths and states of the packets: shifts of the centers, and the half widths and the
-        # states of the atom as multiples of their starts.
-        self.dos_readout = nn.Linear(width, 2*packets+1)
+        # The centers, half widths and shares of the packets: shifts of the centers, and the half widths and the shares
+        # as multiples of their starts.
+        self.dos_readout = nn.Linear(width, 3*packets)
         self.softness_readout = nn.Linear(width, 1)
         self.species_bias = nn.Parameter(torch.zeros(num_elements))
         self.species_source = nn.Parameter(torch.zeros(num_elements, num_sources))
@@ -233,10 +246,9 @@ class AtomicResponse(nn.Module):
         read = self.dos_readout(hidden)
         centers = attrs@self.packet_starts+read[..., :count]
         # The atoms padding a graph have no element and no states; their packets keep a width.
-        widths = torch.where(mask[..., None] > 0, attrs@self.packet_start_widths, 1.)*F.softplus(
-            read[..., count:2*count]+one)
-        shares = ((attrs@self.packet_start_states)[..., None]/count*F.softplus(read[..., 2*count:]+one)
-                  * mask[..., None]).expand_as(centers)
+        widths = torch.hypot(torch.where(mask[..., None] > 0, attrs@self.packet_start_widths, 1.)*F.softplus(
+            read[..., count:2*count]+one), read.new_tensor(DOS_SAMPLING))
+        shares = (attrs@self.packet_start_states)[..., None]/count*F.softplus(read[..., 2*count:]+one)*mask[..., None]
         packets = torch.stack((centers, widths, shares), -1)
         softness = SOFTNESS_START*F.softplus(self.softness_readout(hidden)[..., 0]+one)*mask
         harmonics = vector_harmonics(vector, max(self.max_l, self.completion_max_l))
@@ -284,29 +296,50 @@ class AtomicResponse(nn.Module):
             return (shares*packet_share((energies[..., None]-centers)/widths)).sum(-1)
         return below(level[..., None])-below(level[..., None]-shifts)
 
-    def band_edges(self, packets, level, mask, signed=False):
+    def band_edges(self, packets, level, mask, count, tolerance=1.e-9):
         """How far the valence band maximum lies below the Fermi level and the conduction band minimum above it.
 
         The states of the atoms at their levels (level, the potential of each atom minus the Fermi level) are those
         of the ground state, its potential held fixed, as DFT band edges are eigenvalues of the ground-state
-        Hamiltonian. A packet whose center lies on the valence side of the level of its atom belongs to the valence
-        band, the others to the conduction band, and each edge is the nearest edge of the packets of its band in
-        the cell. Both are at the Fermi level when a packet holds it. signed keeps how far a packet reaches past
-        the level instead, as a negative distance, so that a cell whose gap is closed still shows which packets
-        close it. Without a packet on a side the edge is read twice the energy range away. The derivatives reach
-        the packets that make the edges; a level passed detached is held.
+        Hamiltonian. An edge is where the states of the cell between it and the Fermi level hold count electrons
+        (one per graph): holes below the Fermi level, electrons above it. The count rises with the distance, so each
+        edge is the root of a monotone function, found by Newton steps kept inside a bracket. Every state near an
+        edge moves it in proportion to what it holds there, so no single packet decides a band gap, and a metal
+        reads zero to within the count over its states at the Fermi level. A cell whose states hold less than the
+        count within twice the energy range has that edge read there. One differentiable Newton step at the root
+        gives the derivatives in the packets and in the levels; a level passed detached is held. The step divides by
+        the states of the cell at the edge, taken no smaller than the count over DOS_SAMPLING, so that an edge in a
+        sparse stretch between bands moves no faster than one on the onset of a band.
         """
         centers, widths, shares = packets.unbind(-1)
-        lower, upper = centers-widths-level[..., None], level[..., None]-centers-widths
-        present = (mask[..., None] > 0) & (shares > 0)
-        valence = centers >= level[..., None]
-        far = torch.full_like(lower, 2*ENERGY_RANGE)
-        below = torch.where(present & valence, lower, far).flatten(1).amin(-1)
-        above = torch.where(present & ~valence, upper, far).flatten(1).amin(-1)
-        if signed:
-            return below, above
-        holds = (below < 0.) | (above < 0.)
-        return torch.where(holds, 0., below), torch.where(holds, 0., above)
+        present = (mask[..., None] > 0).to(shares)
+        fixed = [part.detach() for part in (centers, widths, shares)]
+        start, far = level.detach(), 2*ENERGY_RANGE
+        distances = []
+        # The valence band lies above the level on the axis of the potential, the conduction band below it.
+        for sign in (1., -1.):
+            def held(distance, centers, widths, shares, level):
+                x0 = (level[..., None]-centers)/widths
+                x = x0+sign*distance[:, None, None]/widths
+                states = sign*(shares*(packet_share(x)-packet_share(x0))*present).sum((-1, -2))
+                return states-count, (shares*packet_density(x)/widths*present).sum((-1, -2))
+            with torch.no_grad():
+                low, high = torch.zeros_like(count), torch.full_like(count, far)
+                reached = held(high, *fixed, start)[0] >= 0.
+                distance = torch.where(reached, .5*high, high)
+                for _ in range(100):
+                    value, slope = held(distance, *fixed, start)
+                    low, high = torch.where(value < 0., distance, low), torch.where(value < 0., high, distance)
+                    step = distance-value/slope.clamp_min(1.e-300)
+                    step = torch.where(reached, torch.where((step > low) & (step < high), step, .5*(low+high)), distance)
+                    done = float((step-distance).abs().max()) < tolerance
+                    distance = step
+                    if done:
+                        break
+                slope = torch.maximum(held(distance, *fixed, start)[1], count/DOS_SAMPLING)
+            value = held(distance, centers, widths, shares, level)[0]
+            distances.append(torch.where(reached, distance-value/slope, distance))
+        return distances
 
 
 def reciprocal_grid(cell, cutoff):
@@ -678,9 +711,9 @@ def reserve_solvers(device):
 class PotentialResponse(ScaleShiftMACE):
     """A MACE whose atoms carry the response of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 
-    # The solve stops once it has converged; the most steps matter only for the hardest batches. Sharper packets of
-    # states need more: on IrO2-water frames up to 44 steps with packets a hundred times narrower than trained, and in
-    # an IrO2-water training a few batches per epoch stopped at 60 in the later epochs.
+    # The solve stops once it has converged; the most steps matter only for the hardest batches. With packets no
+    # narrower than DOS_SAMPLING it took at most 16 steps on IrO2-water frames, also with a hundred times less
+    # softness than at the start.
     newton_steps, newton_tolerance = 200, 1.e-6
 
     def __init__(self, density_width=1.5, kspace_cutoff_factor=1., fermi_level_offset=0.,
@@ -711,6 +744,9 @@ class PotentialResponse(ScaleShiftMACE):
         # (initialize_potential_response).
         self.register_buffer('vacuum_reference_integrals', torch.zeros(num_elements))
         self.register_buffer('neutral_atom_form_factors', torch.zeros(num_elements, len(FORM_FACTOR_GRID)))
+        # The band edge count, electrons per atom (BAND_EDGE_STATES), measured on the labels of the training data
+        # (initialize_potential_response).
+        self.register_buffer('band_edge_count', torch.tensor(BAND_EDGE_STATES))
         # A counter charge overlaps the neutral atoms; in constant potential MD it stands for ions and does not.
         self.counter_charge_overlap = True
         layers = int(self.num_interactions)
@@ -893,12 +929,13 @@ class PotentialResponse(ScaleShiftMACE):
         labelled = labelled is not None and bool((labelled > 0).any())
         if band_edges or labelled:
             # The band edges are those of the ground state, as DFT band edges are eigenvalues of the ground-state
-            # Hamiltonian: the nearest edges of the packets of the final minimum's response to the levels, the
-            # potential held fixed. No charge is added to the cell, so no charging energy or screening of an added
-            # charge enters the edges, in a slab or in bulk. The Fermi level is -dE/dQ in every cell, metal or not,
-            # and the edges lie below and above it.
+            # Hamiltonian: where the states of the final minimum's response, the potential held fixed, reach the
+            # band edge count from the levels. No charge is added to the cell, so no charging energy or screening
+            # of an added charge enters the edges, in a slab or in bulk. The Fermi level is -dE/dQ in every cell,
+            # metal or not, and the edges lie below and above it.
+            count = torch.clamp(self.band_edge_count*space.present.sum(-1), max=BAND_EDGE_ELECTRONS)
             if band_edges or not training:
-                below, above = self.response.band_edges(response[2], aligned, space.present)
+                below, above = self.response.band_edges(response[2], aligned, space.present, count)
                 output.update(valence_band_maximum=fermi_level-below, conduction_band_minimum=fermi_level+above,
                               band_gap=below+above, band_edge_distances=torch.stack((below, above), -1))
             if labelled:
@@ -915,7 +952,7 @@ class PotentialResponse(ScaleShiftMACE):
                     apart = torch.where(data['fermi_level_weight'].reshape(-1) > 0.,
                                         (fermi_level-data['fermi_level'].reshape(-1).to(fermi_level)).detach(), apart)
                 placed = self.response.band_edges(response[2], aligned+apart[:, None]*space.present, space.present,
-                                                  signed=True)
+                                                  count)
                 output['band_edge_distances_at_label'] = torch.stack(placed, -1)
         labelled = data.get('dos')
         if dos or (labelled is not None and labelled.numel() > 0):
@@ -1139,9 +1176,59 @@ def start_packets(response, dataset, numbers):
                  f'Fermi level of DFT')
 
 
+def label_edges(data, counts):
+    """The band edges that the states of a density of states label reach at counts (electrons per cell): the distances
+    from the Fermi level label at which the states of the cell below it hold that many holes and those above it
+    that many electrons, each bin holding its states evenly over its width. Returns (below, above), nan where a side
+    holds fewer states."""
+    atoms, bins = (int(n) for n in data.dos_shape)
+    energy = data.dos_energy.double().numpy()
+    step = energy[1]-energy[0]
+    held = data.dos.reshape(atoms, bins).double().numpy().sum(0)*step
+    lower, upper = energy-.5*step, energy+.5*step
+    sides = []
+    for side in (-1., 1.):
+        # the bins as distances from the Fermi level on this side, and the states between it and their far ends
+        near, end = (lower, upper) if side > 0 else (-upper, -lower)
+        order = np.argsort(near)
+        near, end, states = near[order], end[order], held[order]
+        keep = end > 0.
+        part = states[keep]*np.clip((end[keep]-np.maximum(near[keep], 0.))/step, 0., 1.)
+        reach, states = np.concatenate(([0.], end[keep])), np.concatenate(([0.], np.cumsum(part)))
+        distance = np.interp(counts, states+1.e-12*np.arange(len(states)), reach)
+        sides.append(np.where(counts <= states[-1], distance, np.nan))
+    return sides
+
+
+def measure_band_edge_count(model, dataset):
+    """The band edge count of the model: the count per atom at which the states of DFT return its band gaps most
+    closely, over the training frames with a density of states label and a band gap label above zero. A model whose
+    states are those of DFT then reads the band gaps of DFT."""
+    counts, frames = np.exp(np.linspace(np.log(1.e-6), np.log(1.e-2), 161)), []
+    for data in dataset:
+        shape = getattr(data, 'dos_shape', None)
+        if (shape is None or int(shape[0]) == 0 or float(data.dos_weight) <= 0. or float(data.band_gap_weight) <= 0.
+                or float(data.band_gap) <= 0.):
+            continue
+        below, above = label_edges(data, np.minimum(counts*int(shape[0]), BAND_EDGE_ELECTRONS))
+        # edges past the label read at twice the energy range, as in the model
+        frames.append(np.where(np.isfinite(below+above), below+above, 4*ENERGY_RANGE)-float(data.band_gap))
+    if not frames:
+        logging.info(f'Band edge count {float(model.band_edge_count):.2e} electrons per atom: the training data have no '
+                     'frame with a band gap and a density of states label to measure it from')
+        return
+    errors = np.stack(frames)
+    best = int(np.argmin(np.square(errors).mean(0)))
+    count, errors = float(counts[best]), errors[:, best]
+    model.band_edge_count.fill_(count)
+    logging.info(f'Band edge count {count:.2e} electrons per atom: the count at which the states of DFT return its band '
+                 f'gaps most closely in {len(frames)} gapped training frames, to {1e3*np.sqrt(np.mean(errors**2)):.0f} '
+                 f'meV RMSE (mean {1e3*errors.mean():+.0f} meV, largest {1e3*np.abs(errors).max():.0f} meV)')
+
+
 def initialize_potential_response(model, args, train_loader, device):
-    """The neutral atoms of the reference calculations, the start of the packets of states and the feature units of
-    the response, from training data.
+    """The neutral atoms of the reference calculations, the start of the packets of states, the band edge count and
+    the feature units of the response, from training data.
 
     Periodic DFT measures its potentials and Fermi levels from the mean potential of the cell, which lies below the
     vacuum by the potential integrals of its neutral atoms per volume (FourierSpace.vacuum_reference), 6 to 21 V in
@@ -1203,6 +1290,7 @@ def initialize_potential_response(model, args, train_loader, device):
                          f'potential labels, {[round(float(x), 2) for x in solution[1:]]} V A^3, Fermi level offset '
                          f'{float(model.fermi_level_offset):.4f} V; they train with the model')
     start_packets(model.response, dataset, model.atomic_numbers.tolist())
+    measure_band_edge_count(model, dataset)
     scalar, vector, count = (torch.zeros_like(model.response.scalar_unit),
                              torch.zeros_like(model.response.vector_unit), 0.)
     for i, batch in enumerate(train_loader):
@@ -1288,14 +1376,12 @@ def weighted_mean_squared_error_band_gap(ref, pred):
     # label below and above the Fermi level label, and at it in a metal. The loss is the squared error of the gap
     # plus that of the difference of the two edge distances, twice the squared errors of the two edges, with the
     # distances counted from the Fermi level of the label in the states of the model (forward); a frame without a
-    # Fermi level label has them counted from the Fermi level of the model. The distances are signed (band_edges):
-    # where packets reach past the level of a label with a gap, they are pushed out of it. The label of a metal
-    # says only that states reach its Fermi level, so there a packet past it reads zero, however far it reaches.
+    # Fermi level label has them counted from the Fermi level of the model. The distances are where the states reach
+    # the band edge count (band_edges), so every state near an edge takes its part of the error: states left in the
+    # gap of an insulator are pushed out of it together, and a metal is asked for states at its Fermi level.
     if pred.get('band_edge_distances_at_label') is None:
         return ref.weight.new_zeros(())
     below, above = pred['band_edge_distances_at_label'].unbind(-1)
-    metal = (ref['band_gap'] <= 0.) & ((below < 0.) | (above < 0.))
-    below, above = torch.where(metal, 0., below), torch.where(metal, 0., above)
     configs_weight = ref.weight*ref.band_gap_weight
     return torch.mean(configs_weight*(torch.square(ref['band_gap']-below-above)+torch.square(above-below)))
 
