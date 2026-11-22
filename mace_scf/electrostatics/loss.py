@@ -278,6 +278,7 @@ _LOSS_FUNCTIONS = {
     "replay": replay_loss,
 }
 
+
 class WeightedLoss(torch.nn.Module):
     def __init__(
         self,
@@ -291,6 +292,7 @@ class WeightedLoss(torch.nn.Module):
             if not name in _LOSS_FUNCTIONS:
                 raise ValueError(f"requested `{name}` in loss, which is not recognised")
             self.loss_weights[name] = options["weight"]
+            options.pop("lr", None)  # the rate of the target's readout, which the stage sets (READOUT_TARGETS)
             if len(options) > 1 or isinstance(_LOSS_FUNCTIONS[name], type):
                 options.pop("weight")
                 self.loss_fns[name] = _LOSS_FUNCTIONS[name](**options)
@@ -307,7 +309,7 @@ class WeightedLoss(torch.nn.Module):
         for name, func in self.loss_fns.items():
             loss_component = self.loss_weights[name] * func(ref, pred)
             loss += loss_component
-            logstring += f'{name}: {loss_component}, '
+            logstring += f'{name}: {loss_component}, ' 
         logging.debug(logstring)
         if "loss_weight_modifier" in pred:
             ref.weight = data_weight

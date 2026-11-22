@@ -15,4 +15,3 @@ from .fixed_point_state import (
 )
 from .fixed_point_runner import FixedPointSCFRunner
 from .qeq import MACEQEq
-from .potential_response import PotentialResponse

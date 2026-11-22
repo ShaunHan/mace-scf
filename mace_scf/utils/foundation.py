@@ -1,4 +1,3 @@
-import ast
 import inspect
 import logging
 from copy import deepcopy
@@ -42,11 +41,9 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
         atomic_inter_shift=mean,
         density_width=args.atomic_multipoles_smearing_width,
         max_l=args.atomic_multipoles_max_l,
-        field_widths=ast.literal_eval(args.field_feature_widths),
         kspace_cutoff_factor=args.kspace_cutoff_factor,
         fermi_level_offset=args.fermi_level_offset,
         smearing_width=args.electronic_smearing_width,
-        **args.potential_response_config,
     ).to(args.device)
     if foundation is not None:
         adopt_foundation(model, foundation)

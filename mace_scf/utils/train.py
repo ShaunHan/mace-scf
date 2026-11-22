@@ -24,9 +24,8 @@ from mace.tools.utils import (
     compute_rmse,
 )
 import os
-from ase.data import chemical_symbols
 from mace.tools.scatter import scatter_sum
-from mace_scf.electrostatics.potential_response import density_of_states, fourier_smearing_widths, spectral_errors
+from mace_scf.electrostatics.potential_response import ResponseErrors, full_rmse_lines
 
 
 def _should_log_grad_summary(opt_step: int, frequency: Optional[int]) -> bool:
@@ -472,7 +471,6 @@ def evaluate(
     dmas_computed = False
     delta_dmas_list = []
     dmas_list = []
-    esps_computed = False
     delta_esps_list = []
     esps_list = []
     polarizability_computed = False
@@ -482,16 +480,7 @@ def evaluate(
     delta_total_charge_list = []
     fermi_level_computed = False
     delta_fermi_level_list = []
-    delta_work_function_list = []
-    delta_vacuum_potential_list = []
-    delta_band_gap_list = []
-    dos_error_list = []
-    # For the debug log: the frames behind every error, the band gap labels, and the states inside the gaps.
-    numbers = getattr(model, "atomic_numbers", None)
-    frames = {"E": [], "EF": [], "WF": [], "Eg": [], "states": []}
-    band_gap_labels, gap_states, level_states = [], [], []
-    # the Fourier errors at the smearing widths of the losses
-    fourier_errors, smearing_widths = {}, fourier_smearing_widths(loss_fn)
+    response_errors = ResponseErrors(model, loss_fn)
     batch = None  # for pylint
 
     for name, param in model.named_parameters():
@@ -528,7 +517,7 @@ def evaluate(
         loss = loss_fn(pred=output, ref=batch)
         total_loss += to_numpy(loss).item()
         num_configs += batch.num_graphs
-        names = frame_names(batch, numbers)
+        response_errors.add(batch, output)
 
         if output.get("energy") is not None and batch.energy is not None:
             E_computed = True
@@ -536,7 +525,6 @@ def evaluate(
             delta_es_per_atom_list.append(
                 (batch.energy - output["energy"]) / (batch.ptr[1:] - batch.ptr[:-1])
             )
-            frames["E"] += names
         if output.get("forces") is not None and batch.forces is not None:
             Fs_computed = True
             delta_fs_list.append(batch.forces - output["forces"])
@@ -563,46 +551,7 @@ def evaluate(
             delta_total_charge_list.append(batch.total_charge - total_charge)
         if output.get("fermi_level") is not None and batch.fermi_level is not None:
             fermi_level_computed = True
-            observed = batch.fermi_level_weight > 0.0
-            delta_fermi_level_list.append((batch.fermi_level - output["fermi_level"])[observed])
-            frames["EF"] += [name for name, keep in zip(names, observed.tolist()) if keep]
-        if output.get("vacuum_potential") is not None:
-            observed = batch.vacuum_potential_weight > 0.0
-            delta_vacuum_potential_list.append((batch.vacuum_potential - output["vacuum_potential"])[observed])
-            # the work function is the vacuum potential minus the Fermi level
-            observed = observed & (batch.fermi_level_weight > 0.0)
-            delta_work_function_list.append((batch.vacuum_potential - batch.fermi_level
-                                             - output["vacuum_potential"] + output["fermi_level"])[observed])
-            frames["WF"] += [name for name, keep in zip(names, observed.tolist()) if keep]
-        if output.get("band_gap") is not None:
-            observed = batch.band_gap_weight > 0.0
-            delta_band_gap_list.append((batch.band_gap - output["band_gap"])[observed])
-            frames["Eg"] += [name for name, keep in zip(names, observed.tolist()) if keep]
-            band_gap_labels.append(batch.band_gap[observed])
-        if output.get("atomic_electrons_dft") is not None:
-            observed = torch.isfinite(output["atomic_electrons_dft"]) & (batch.dos_weight > 0.0)[batch.batch].unsqueeze(-1)
-            dos_error_list.append((output["atomic_electrons"] - output["atomic_electrons_dft"])[observed])
-            # the density of states of every atom at the Fermi level of the model, and DFT's at the same energy
-            density, density_dft = (density_of_states(output[key], output["dos_energies"])
-                                    for key in ("atomic_electrons", "atomic_electrons_dft"))
-            middle = density.shape[-1] // 2
-            known = torch.isfinite(density_dft[:, middle]) & (batch.dos_weight > 0.0)[batch.batch]
-            gapped = ((batch.band_gap_weight > 0.0) & (batch.band_gap > 0.1))[batch.batch]
-            level_states.append((batch.node_attrs.argmax(-1)[known], gapped[known], density[known, middle],
-                                 density_dft[known, middle]))
-            chosen, held, held_dft = states_in_gaps(batch, output)
-            if bool(chosen.any()):
-                gap_states.append((batch.node_attrs.argmax(-1)[chosen], held[chosen], held_dft[chosen]))
-                in_cell = scatter_sum(torch.where(chosen, held, 0.0), batch.batch, dim=0, dim_size=batch.num_graphs)
-                listed = scatter_sum(chosen.to(held), batch.batch, dim=0, dim_size=batch.num_graphs) > 0
-                frames["states"] += [(float(value), name) for name, value, keep
-                                     in zip(names, in_cell.tolist(), listed.tolist()) if keep]
-        for key, widths in smearing_widths.items():
-            if output.get(key + "_dft") is not None:
-                observed = getattr(batch, key + "_weight") > 0.0
-                for width in widths:
-                    fourier_errors.setdefault(f"rmse_{key}_{width:g}A", []).append(
-                        spectral_errors(batch, output, key, width)[observed])
+            delta_fermi_level_list.append(batch.fermi_level - output["fermi_level"])
         if output.get("dipole") is not None and batch.dipole is not None:
             dipole_components_to_include = batch.dipole_weight.view(-1, 3) > 0.0
             if torch.any(dipole_components_to_include):
@@ -619,26 +568,23 @@ def evaluate(
             output.get("density_coefficients") is not None
             and batch.density_coefficients is not None
         ):
-            # only the atoms of frames with multipole labels
-            observed = (batch.density_coefficients_weight > 0.0)[batch.batch]
-            if torch.any(observed):
-                dmas_computed = True
-                delta_dmas_list.append(
-                    (batch.density_coefficients - output["density_coefficients"])[observed]
-                )
-                dmas_list.append(batch.density_coefficients[observed])
+            dmas_computed = True
+            delta_dmas_list.append(
+                batch.density_coefficients - output["density_coefficients"]
+            )
+            dmas_list.append(batch.density_coefficients)
 
         if (
             output.get("electrostatic_potentials") is not None
             and batch.electrostatic_potentials is not None
         ):
-            observed = (batch.electrostatic_potentials_weight > 0.0)[batch.batch]
-            if torch.any(observed):
-                esps_computed = True
-                delta_esps_list.append(
-                    (batch.electrostatic_potentials - output["electrostatic_potentials"])[observed]
-                )
-                esps_list.append(batch.electrostatic_potentials[observed])
+            esps_computed = True
+            delta_esps_list.append(
+                batch.electrostatic_potentials - output["electrostatic_potentials"]
+            )
+            esps_list.append(batch.electrostatic_potentials)
+        else:
+            esps_computed= False
         if output.get("polarizability") is not None and batch.polarizability is not None:
             polars_to_include = batch.polarizability_weight > 0.0
             if torch.any(polars_to_include):
@@ -736,53 +682,13 @@ def evaluate(
         aux["mae_total_charge"] = compute_mae(delta_total_charge)
         aux["rmse_total_charge"] = compute_rmse(delta_total_charge)
         aux["q95_total_charge"] = compute_q95(delta_total_charge)
-    if E_computed:
-        aux["largest_energy"] = largest_errors(delta_es_per_atom, frames["E"])
     if fermi_level_computed:
         delta_fermi_level = to_numpy(torch.cat(delta_fermi_level_list, dim=0))
-        aux["largest_fermi_level"] = largest_errors(delta_fermi_level, frames["EF"])
         aux["mae_fermi_level"] = compute_mae(delta_fermi_level)
         aux["rmse_fermi_level"] = compute_rmse(delta_fermi_level)
         aux["q95_fermi_level"] = compute_q95(delta_fermi_level)
-    if delta_work_function_list:
-        delta_work_function = to_numpy(torch.cat(delta_work_function_list, dim=0))
-        aux["mae_work_function"] = compute_mae(delta_work_function)
-        aux["rmse_work_function"] = compute_rmse(delta_work_function)
-        aux["largest_work_function"] = largest_errors(delta_work_function, frames["WF"])
-    delta_vacuum_potential = to_numpy(torch.cat(delta_vacuum_potential_list)) if delta_vacuum_potential_list else []
-    if len(delta_vacuum_potential):
-        aux["rmse_vacuum_potential"] = compute_rmse(delta_vacuum_potential)
-    if delta_band_gap_list:
-        delta_band_gap = to_numpy(torch.cat(delta_band_gap_list, dim=0))
-        aux["mae_band_gap"] = compute_mae(delta_band_gap)
-        aux["rmse_band_gap"] = compute_rmse(delta_band_gap)
-        aux["largest_band_gap"] = largest_errors(delta_band_gap, frames["Eg"])
-        aux["band_gap_reading"] = band_gap_reading(delta_band_gap, to_numpy(torch.cat(band_gap_labels, dim=0)))
-    if level_states and sum(len(parts[0]) for parts in level_states):
-        elements, gapped, states, states_dft = (to_numpy(torch.cat(parts)) for parts in zip(*level_states))
-        gapped, parts = gapped.astype(bool), []
-        for name, chosen in (("frames without a band gap", ~gapped), ("frames with one", gapped)):
-            if chosen.any():
-                parts.append(name + ": " + ", ".join(
-                    f"{chemical_symbols[int(numbers[index])] if numbers is not None else index} "
-                    f"{states[chosen & (elements == index)].mean():.3f} "
-                    f"(DFT {states_dft[chosen & (elements == index)].mean():.3f})"
-                    for index in np.unique(elements[chosen])))
-        aux["states_at_level"] = "; ".join(parts)
-    if gap_states:
-        elements, held, held_dft = (to_numpy(torch.cat(parts)) for parts in zip(*gap_states))
-        by_element = ", ".join(
-            f"{chemical_symbols[int(numbers[index])] if numbers is not None else index} "
-            f"{held[elements == index].mean():.4f} (DFT {held_dft[elements == index].mean():.4f})"
-            for index in np.unique(elements))
-        most = ", ".join(f"{name}: {value:.3f}" for value, name in sorted(frames["states"], reverse=True)[:5])
-        aux["states_in_gaps"] = f"{by_element}; the most in a cell (electrons): {most}"
-    if dos_error_list and sum(len(errors) for errors in dos_error_list):
-        # over every atom and energy with a label
-        aux["rmse_dos"] = compute_rmse(to_numpy(torch.cat(dos_error_list)))
-    for name, errors in fourier_errors.items():
-        aux[name] = float(np.sqrt(to_numpy(torch.cat(errors)).mean()))
 
+    aux.update(response_errors.results())
     aux["time"] = time.time() - start_time
 
     for name, param in model.named_parameters():
@@ -790,102 +696,6 @@ def evaluate(
 
     return avg_loss, aux
 
-
-def frame_names(batch, numbers):
-    """Every frame of a batch by its energy label and composition, such as '-134.5194 O10Si4'."""
-    energies = to_numpy(batch.energy) if batch.energy is not None else np.full(batch.num_graphs, np.nan)
-    if numbers is None:
-        return [f"{energy:.4f}" for energy in energies]
-    counts = to_numpy(scatter_sum(batch.node_attrs, batch.batch, dim=0, dim_size=batch.num_graphs)).round().astype(int)
-    return [f"{energy:.4f} " + "".join(f"{chemical_symbols[int(z)]}{n}" for z, n in zip(numbers, row) if n)
-            for energy, row in zip(energies, counts)]
-
-
-def largest_errors(delta, names, count=5):
-    """The frames with the largest errors, by energy label and composition: label - model in thousandths of the unit
-    and the share of the squared error; then the RMSE of all the other frames."""
-    delta = np.ravel(delta)
-    worst = np.argsort(-np.abs(delta))[:count]
-    rest = np.delete(delta, worst)
-    text = ", ".join(f"{names[i]}: {1e3 * delta[i]:+.0f} ({100 * delta[i]**2 / max((delta**2).sum(), 1e-300):.0f}%)"
-                     for i in worst)
-    if len(rest):
-        text += f"; RMSE of the other {len(rest)} frames {1e3 * np.sqrt(np.mean(rest**2)):.1f}"
-    return text
-
-
-def band_gap_reading(delta, labels, gapped=0.5, closed=0.1):
-    """How many band gaps the model reads closed or opened (delta = label - model, eV), and its mean error on the
-    frames with a gap."""
-    delta, labels = np.ravel(delta), np.ravel(labels)
-    model, wide, narrow = labels - delta, labels > gapped, labels < closed
-    text = (f"{int((wide & (model < closed)).sum())} of {int(wide.sum())} frames with a gap above {gapped} eV are read "
-            f"below {closed} eV, {int((narrow & (model > gapped)).sum())} of {int(narrow.sum())} frames with a gap below "
-            f"{closed} eV are read above {gapped} eV")
-    if wide.any():
-        text += f"; mean label - model of the first {1e3 * delta[wide].mean():+.0f} meV"
-    return text
-
-
-def states_in_gaps(batch, output):
-    """Per atom of the frames with a band gap, a Fermi level and a density of states label: the electrons that the
-    states of the model and of DFT hold inside the band gap of the label, one width of the states in from either
-    edge. The Fermi level label of such a frame is the middle of its gap. Returns the atoms it holds for, and the
-    two numbers of electrons."""
-    energies = output["dos_energies"]
-    width = energies[1] - energies[0]
-    gap = batch.band_gap[batch.batch]
-    middle = (batch.fermi_level - output["fermi_level"])[batch.batch]
-    chosen = ((batch.band_gap_weight > 0.0) & (batch.fermi_level_weight > 0.0) & (batch.band_gap > 4.0 * width))[batch.batch]
-
-    def at(curves, energy):
-        position = ((energy - energies[0]) / width).clamp(0.0, len(energies) - 1.000001)
-        index = position.floor().long()
-        weight = position - index
-        return (curves.gather(1, index[:, None])[:, 0] * (1.0 - weight)
-                + curves.gather(1, index[:, None] + 1)[:, 0] * weight)
-
-    lower, upper = middle - 0.5 * gap + width, middle + 0.5 * gap - width
-    held = at(output["atomic_electrons"], upper) - at(output["atomic_electrons"], lower)
-    held_dft = at(output["atomic_electrons_dft"], upper) - at(output["atomic_electrons_dft"], lower)
-    return chosen & torch.isfinite(held_dft), held, held_dft
-
-
-# The targets of the FullRMSE epoch line and error table: their metric of evaluate, shown in thousandths of its unit,
-# and the digits shown; the Fourier fields are in FOURIER_RMSE.
-FULL_RMSE = {
-    "E": ("rmse_e_per_atom", 1),
-    "F": ("rmse_f", 1),
-    "stress": ("rmse_stress", 1),
-    "virials": ("rmse_virials_per_atom", 1),
-    "Mu": ("rmse_mu_per_atom", 2),
-    "polarizability": ("rmse_polarizability_per_atom", 2),
-    "DMA": ("rmse_dma", 2),
-    "Q": ("rmse_total_charge", 2),
-    "EF": ("rmse_fermi_level", 1),
-    "WF": ("rmse_work_function", 1),
-    "ESPvac": ("rmse_vacuum_potential", 1),
-    "Eg": ("rmse_band_gap", 1),
-    "DOS": ("rmse_dos", 1),
-}
-
-# The Fourier fields of the FullRMSE epoch line and error table, each at the smearing widths of its loss: the name and
-# unit shown, and the digits of the epoch line.
-FOURIER_RMSE = {
-    "fourier_density": ("rho", "me / A^3", 2),
-    "fourier_potential": ("ESP", "mV", 1),
-}
-
-
-def full_rmse(metrics, key):
-    """A metric of evaluate in thousandths of its unit, nan where the data or the model have none."""
-    value = metrics.get(key)
-    return float("nan") if value is None or isinstance(value, str) else 1e3 * float(value)
-
-
-def fourier_rmse(metrics, key, widths, digits):
-    """The errors of a Fourier field at its smearing widths in thousandths of its unit, such as '347.5/262.6'."""
-    return "/".join(f"{full_rmse(metrics, f'rmse_{key}_{w:g}A'):.{digits}f}" for w in widths)
 
 
 def valid_err_log(
@@ -907,34 +717,8 @@ def valid_err_log(
             f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={error_e:.1f} meV, RMSE_F={error_f:.1f} meV / A"
         )
     elif log_errors == "FullRMSE":
-        # every target, nan where the data or the model have none; the Fourier fields at the smearing widths of their
-        # losses, such as RMSE_ESP(0/1.5 A) for smearing_widths: [0.0, 1.5]
-        errors = {name: f"{full_rmse(eval_metrics, key):.{digits}f}" for name, (key, digits) in FULL_RMSE.items()}
-        fourier = "".join(
-            f"RMSE_{name}({'/'.join(f'{w:g}' for w in widths)} A)={fourier_rmse(eval_metrics, key, widths, digits)} {unit}, "
-            for key, widths in fourier_smearing_widths(loss_fn).items() for name, unit, digits in [FOURIER_RMSE[key]])
-        logging.info(
-            f"Epoch {epoch}: loss={valid_loss:.4f}, RMSE_E_per_atom={errors['E']} meV, RMSE_F={errors['F']} meV / A, "
-            f"RMSE_stress={errors['stress']} meV / A^3, RMSE_virials_per_atom={errors['virials']} meV, "
-            f"RMSE_Mu_per_atom={errors['Mu']} meA, RMSE_polarizability_per_atom={errors['polarizability']} me A^2 / V, "
-            f"RMSE_DMA={errors['DMA']} me A^l, RMSE_Q={errors['Q']} me, {fourier}RMSE_EF={errors['EF']} meV, "
-            f"RMSE_WF={errors['WF']} meV, RMSE_ESPvac={errors['ESPvac']} mV, RMSE_Eg={errors['Eg']} meV, "
-            f"RMSE_DOS={errors['DOS']} me"
-        )
-        # A few frames can hold most of a squared error. Each is named by its energy label and composition.
-        for name, key in (("the energy per atom", "largest_energy"), ("the Fermi level", "largest_fermi_level"),
-                          ("the work function", "largest_work_function"), ("the band gap", "largest_band_gap")):
-            if eval_metrics.get(key):
-                logging.debug(f"Largest validation errors of {name}, label - model (meV) and share of the squared "
-                              f"error: {eval_metrics[key]}")
-        if eval_metrics.get("band_gap_reading"):
-            logging.debug(f"Band gaps of the validation frames: {eval_metrics['band_gap_reading']}")
-        if eval_metrics.get("states_at_level"):
-            logging.debug("Density of states at the Fermi level of the validation frames (e/V per atom, the mean by "
-                          f"element): {eval_metrics['states_at_level']}")
-        if eval_metrics.get("states_in_gaps"):
-            logging.debug("Electrons per atom that the states of the model hold inside the band gaps of the labels (one "
-                          f"state width in from either edge), by element: {eval_metrics['states_in_gaps']}")
+        for level, line in full_rmse_lines(valid_loss, eval_metrics, epoch, loss_fn):
+            logging.log(level, line)
     elif (
         log_errors == "PerAtomRMSEstressvirials"
         and eval_metrics["rmse_stress_per_atom"] is not None

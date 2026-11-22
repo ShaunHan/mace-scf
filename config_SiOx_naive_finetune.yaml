@@ -4,20 +4,14 @@ heads:
       forces: vasp_forces
     info_keys:
       energy: vasp_free_energy
-      dipole: vasp_dipole
       external_field: external_field
       fermi_level: vasp_efermi
-      vacuum_potential: vasp_vacuum_potential
       band_gap: vasp_band_gap
       dos: vasp_pdos
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
       total_charge: total_charge
-      counter_charge: counter_charge
-      counter_charge_width: counter_charge_width
-      counter_charge_fraction: counter_charge_zfrac
-      dipole_correction_fraction: dipole_correction_zfrac
 seed: 7777
 device: cuda
 enable_cueq: true
@@ -31,11 +25,12 @@ r_max: 6.0
 compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
-field_feature_widths: '[1.5, 3.0]'
 kspace_cutoff_factor: 1.0
 # The smearing of the DFT as the width of a Gaussian (eV): SIGMA for Gaussian smearing, 2.5 SIGMA for Fermi
-# smearing. This set: Fermi, SIGMA = 0.1.
+# smearing. This set: Gaussian, SIGMA = 0.1, but the narrow band gaps of silicon opened less at 0.1 and 0.15 in
+# tests (RESOLUTION in potential_response.py), so 0.25, the finest width known to open them.
 electronic_smearing_width: 0.25
+E0s: average
 batch_size: 8
 valid_batch_size: 8
 lr: 0.001
@@ -63,6 +58,9 @@ results_dir: results
 model_dir: models
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 multiheads_finetuning: false
+# A loss term's lr is the learning rate of its target's readout; the stage's lr is the rate of everything else.
+# The density of states learns at a quarter of the stage's rate, so that its gaps open no faster than the
+# potentials settle.
 train_schedule:
   0:
     name: heads
@@ -76,17 +74,17 @@ train_schedule:
     loss:
       energy_per_atom: 100.0
       forces: 500.0
-      dipole: 10.0
       fourier_density:
         weight: 10.0
         smearing_widths: [3.0]
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
-      dos: 100.0
+      band_gap: 25.0
+      dos:
+        weight: 100.0
+        lr: 0.00025
   1:
     name: stage1
     start: 10
@@ -95,17 +93,17 @@ train_schedule:
     loss:
       energy_per_atom: 100.0
       forces: 500.0
-      dipole: 10.0
       fourier_density:
         weight: 10.0
         smearing_widths: [3.0]
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
-      dos: 100.0
+      band_gap: 25.0
+      dos:
+        weight: 100.0
+        lr: 0.00025
   2:
     name: stage2
     start: 50
@@ -114,17 +112,17 @@ train_schedule:
     loss:
       energy_per_atom: 100.0
       forces: 500.0
-      dipole: 100.0
       fourier_density:
         weight: 100.0
         smearing_widths: [3.0]
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
-      dos: 100.0
+      band_gap: 25.0
+      dos:
+        weight: 100.0
+        lr: 0.00025
   3:
     name: stage3
     start: 150
@@ -133,17 +131,17 @@ train_schedule:
     loss:
       energy_per_atom: 500.0
       forces: 500.0
-      dipole: 500.0
       fourier_density:
         weight: 100.0
         smearing_widths: [3.0]
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
-      dos: 100.0
+      band_gap: 25.0
+      dos:
+        weight: 100.0
+        lr: 0.00025
   4:
     name: stage4
     start: 250
@@ -152,16 +150,14 @@ train_schedule:
     loss:
       energy_per_atom: 1000.0
       forces: 500.0
-      dipole: 500.0
       fourier_density:
         weight: 100.0
         smearing_widths: [3.0]
       fourier_potential:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
-      vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 10.0
-      dos: 100.0
-potential_response_config:
-  fixed_point: true
+      band_gap: 25.0
+      dos:
+        weight: 100.0
+        lr: 0.000125

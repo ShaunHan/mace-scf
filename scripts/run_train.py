@@ -28,6 +28,7 @@ import mace_scf.utils
 from mace_scf import electrostatics
 from mace_scf.utils.check_args import check_config_conflicts
 import mace_scf.utils.run_train_utils
+from mace_scf.electrostatics.potential_response import check_learning_rates, readout_learning_rate
 from mace.tools.slurm_distributed import DistributedEnvironment
 
 
@@ -233,6 +234,7 @@ def main() -> None:
 
     # Optimizer
     param_options = mace_scf.utils.run_train_utils.get_param_options(model, args)
+    check_learning_rates(args.train_schedule, [group["name"] for group in param_options["params"]])
     optimizer: torch.optim.Optimizer
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(**param_options)
@@ -367,7 +369,9 @@ def main() -> None:
         )
         logging.info(f"Setting global learning rate to {train_stage['lr']}")
         for param_group in optimizer.param_groups:
-            param_group["lr"] = train_stage["lr"]
+            param_group["lr"] = readout_learning_rate(train_stage, param_group["name"])
+            if param_group["lr"] != train_stage["lr"]:
+                logging.info(f"Setting learning rate to {param_group['lr']} for {param_group['name']}")
             if param_group["name"]+"_lr" in train_stage:
                 new_lr = train_stage[param_group["name"]+"_lr"]
                 logging.info(f"Setting learning rate to {new_lr} for {param_group['name']}")

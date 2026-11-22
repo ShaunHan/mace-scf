@@ -23,7 +23,6 @@ def check_config_conflicts(args: argparse.Namespace):
     check_unsupported_training_options(args)
     fill_fixedpoint_update_config(args)
     fill_field_readout_config(args)
-    args.potential_response_config = ast.literal_eval(args.potential_response_config or "{}")
 
     if args.model == "FixedPoint":
         for train_stage in args.train_schedule:
@@ -43,11 +42,7 @@ def check_config_conflicts(args: argparse.Namespace):
         args.valid_set_seed = args.seed
     if args.wandb_watch_log_freq is not None and args.wandb_watch_log_freq < 1:
         raise ValueError("wandb_watch_log_freq must be a positive integer")
-    # the epoch lines and the final table need a table type they know; FullRMSE shows every target
-    from .script_utils import NEW_TABLE_TYPES
-    if args.error_table not in NEW_TABLE_TYPES:
-        raise ValueError(f"error_table {args.error_table!r} is not one of {NEW_TABLE_TYPES}; FullRMSE shows every target")
-
+    
     args.config_type_weights = set_configfigtype_weights(args.config_type_weights)
 
 

@@ -327,23 +327,19 @@ def get_param_options(model, args):
         # Decay the maps of the response, not its references or its mixture of the layers: the species biases and
         # sources and the biases of its layers are physical levels and offsets, and pulling them to zero is a prior
         # on the gauge, not smoothness; the mixture sets the scale of the features the response is normalized to.
-        maps = [p for name, p in model.response.named_parameters() if name.endswith("weight") and p.ndim >= 2]
-        references = [p for name, p in model.response.named_parameters()
-                      if not (name.endswith("weight") and p.ndim >= 2)]
-        param_options["params"].append(
-            {
-                "name": "response",
-                "params": maps,
-                "weight_decay": args.field_block_weight_decay,
-            }
-        )
-        param_options["params"].append(
-            {
-                "name": "response_references",
-                "params": references,
-                "weight_decay": 0.0,
-            }
-        )
+        # The readout of the density of states has groups of its own, for the lr of its loss terms (READOUT_TARGETS).
+        groups = {"response": [], "response_references": [], "dos": [], "dos_references": []}
+        for name, p in model.response.named_parameters():
+            group = "dos" if name.startswith("dos_readout.") else "response"
+            groups[group if name.endswith("weight") and p.ndim >= 2 else group+"_references"].append(p)
+        for group, params in groups.items():
+            param_options["params"].append(
+                {
+                    "name": group,
+                    "params": params,
+                    "weight_decay": 0.0 if group.endswith("_references") else args.field_block_weight_decay,
+                }
+            )
         param_options["params"].append(
             {
                 "name": "energy_zeros",
@@ -351,6 +347,15 @@ def get_param_options(model, args):
                 "weight_decay": 0.0,
             }
         )
+        if isinstance(model.vacuum_reference_integrals, torch.nn.Parameter):
+            # fitted to the labels where no proto potentials give them, and trained
+            param_options["params"].append(
+                {
+                    "name": "neutral_atoms",
+                    "params": [model.vacuum_reference_integrals],
+                    "weight_decay": 0.0,
+                }
+            )
         if hasattr(model, "replay_head"):
             # its backbone is the model's own
             param_options["params"].append(

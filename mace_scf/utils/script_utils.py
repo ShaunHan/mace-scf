@@ -17,8 +17,8 @@ from mace.tools.tables_utils import custom_key  as mace_table_custom_key
 # update
 from mace import data
 from ..data import ExtAtomicData
-from .train import FOURIER_RMSE, FULL_RMSE, evaluate, fourier_rmse, full_rmse
-from mace_scf.electrostatics.potential_response import fourier_smearing_widths
+from .train import evaluate
+from mace_scf.electrostatics.potential_response import full_rmse_columns, full_rmse_row
 
 
 
@@ -40,24 +40,6 @@ NEW_TABLE_TYPES = [
     "FullRMSE",
 ]
 
-# The columns of the FullRMSE table by target of FULL_RMSE, the Fourier fields after Q at the smearing widths of their
-# losses.
-FULL_RMSE_COLUMNS = {
-    "E": "RMSE E / meV / atom",
-    "F": "RMSE F / meV / A",
-    "stress": "RMSE stress / meV / A^3",
-    "virials": "RMSE virials / meV / atom",
-    "Mu": "RMSE dipole / me A / atom",
-    "polarizability": "RMSE polarizability / me A^2 / V / atom",
-    "DMA": "RMSE DMA / me A^l",
-    "Q": "RMSE Q / me",
-    "EF": "RMSE EF / meV",
-    "WF": "RMSE WF / meV",
-    "ESPvac": "RMSE ESPvac / mV",
-    "Eg": "RMSE Eg / meV",
-    "DOS": "RMSE DOS / me",
-}
-
 
 def create_error_table(
     table_type: str,
@@ -74,7 +56,6 @@ def create_error_table(
     if log_wandb:
         import wandb
     table = PrettyTable()
-    smearing_widths = fourier_smearing_widths(loss_fn)
 
     if table_type == "DensityCoefficientsRMSE":
         table.field_names = [
@@ -136,15 +117,7 @@ def create_error_table(
             "relative ESP RMSE %",
         ]
     elif table_type == "FullRMSE":
-        # every target, nan where the data or the model have none
-        names = list(FULL_RMSE_COLUMNS)
-        table.field_names = (
-            ["config_type"] + [FULL_RMSE_COLUMNS[name] for name in names[:2]] + ["relative F RMSE %"]
-            + [FULL_RMSE_COLUMNS[name] for name in names[2:8]]
-            + [f"RMSE {FOURIER_RMSE[key][0]} {'/'.join(f'{w:g}' for w in widths)} A / {FOURIER_RMSE[key][1]}"
-               for key, widths in smearing_widths.items()]
-            + [FULL_RMSE_COLUMNS[name] for name in names[8:]]
-        )
+        table.field_names = full_rmse_columns(loss_fn)
     # add new tables here...
 
     for name in sorted(all_data_loaders, key=mace_table_custom_key):
@@ -174,8 +147,8 @@ def create_error_table(
                 name + "_final_rel_rmse_f": metrics["rel_rmse_f"],
             }
             wandb.log(wandb_log_dict)
-        raw = dict(metrics)
 
+        raw = dict(metrics)
         # catch missing metrics
         all_metric_name = [
             "rmse_e_per_atom",
@@ -190,9 +163,7 @@ def create_error_table(
             "rmse_esp",
             "rel_rmse_esp",
             "rmse_polarizability_per_atom",
-            "rmse_fermi_level",
-            "rmse_work_function",
-        ] + [f"rmse_{key}_{w:g}A" for key, widths in smearing_widths.items() for w in widths]
+        ]
         for metric_name in all_metric_name:
             if metric_name not in metrics:
                 metrics[metric_name] = "not found"
@@ -277,14 +248,7 @@ def create_error_table(
                 ]
             )
         elif table_type == "FullRMSE":
-            values = {target: f"{full_rmse(raw, key):.2f}" for target, (key, _) in FULL_RMSE.items()}
-            relative = raw.get("rel_rmse_f")
-            fields = [fourier_rmse(raw, key, widths, 2) for key, widths in smearing_widths.items()]
-            names = list(FULL_RMSE_COLUMNS)
-            table.add_row(
-                [name] + [values[target] for target in names[:2]]
-                + [f"{relative:.2f}" if isinstance(relative, float) else "nan"]
-                + [values[target] for target in names[2:8]] + fields + [values[target] for target in names[8:]]
-            )
+            table.add_row(full_rmse_row(name, raw, loss_fn))
         # add new tables here...
+
     return table
