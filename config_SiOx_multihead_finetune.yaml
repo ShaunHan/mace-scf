@@ -85,7 +85,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
       replay: 1.0
   1:
     name: stage1
@@ -105,7 +105,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
       replay: 1.0
   2:
     name: stage2
@@ -125,7 +125,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
       replay: 1.0
   3:
     name: stage3
@@ -145,7 +145,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
       replay: 1.0
   4:
     name: stage4
@@ -165,5 +165,5 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.000125
+        lr: 0.0005
       replay: 1.0

@@ -84,7 +84,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
   1:
     name: stage1
     start: 10
@@ -103,7 +103,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
   2:
     name: stage2
     start: 50
@@ -122,7 +122,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
   3:
     name: stage3
     start: 150
@@ -141,7 +141,7 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.00025
+        lr: 0.0005
   4:
     name: stage4
     start: 250
@@ -160,4 +160,4 @@ train_schedule:
       band_gap: 25.0
       dos:
         weight: 100.0
-        lr: 0.000125
+        lr: 0.0005
