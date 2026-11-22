@@ -58,9 +58,8 @@ results_dir: results
 model_dir: models
 foundation_model: /fs/cephfs/data/qm_inorganics/mace_models/MACE-POLAR-1-M.model
 multiheads_finetuning: false
-# A loss term's lr is the learning rate of its target's readout; the stage's lr is the rate of everything else.
-# The density of states learns at a quarter of the stage's rate, so that its gaps open no faster than the
-# potentials settle.
+# A loss term may give its own lr, the learning rate of its target's readout (dos: {weight: 100.0, lr: 0.001});
+# the stage's lr is the rate of everything else. Here every readout learns at the stage's rate.
 train_schedule:
   0:
     name: heads
@@ -82,9 +81,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
       band_gap: 25.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   1:
     name: stage1
     start: 10
@@ -101,9 +98,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
       band_gap: 25.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   2:
     name: stage2
     start: 50
@@ -120,9 +115,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
       band_gap: 25.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   3:
     name: stage3
     start: 150
@@ -139,9 +132,7 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
       band_gap: 25.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   4:
     name: stage4
     start: 250
@@ -158,6 +149,4 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
       band_gap: 25.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0

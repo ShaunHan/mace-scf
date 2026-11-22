@@ -60,9 +60,8 @@ checkpoints_dir: checkpoints
 log_dir: logs
 results_dir: results
 model_dir: models
-# A loss term's lr is the learning rate of its target's readout; the stage's lr is the rate of everything else.
-# The density of states learns at a quarter of the stage's rate, so that its gaps open no faster than the
-# potentials settle.
+# A loss term may give its own lr, the learning rate of its target's readout (dos: {weight: 100.0, lr: 0.001});
+# the stage's lr is the rate of everything else. Here every readout learns at the stage's rate.
 train_schedule:
   0:
     name: stage1
@@ -82,9 +81,7 @@ train_schedule:
       vacuum_potential: 100.0
       fermi_level: 100.0
       band_gap: 10.0
-      dos:
-        weight: 100.0
-        lr: 0.001
+      dos: 100.0
   1:
     name: stage2
     start: 50
@@ -103,9 +100,7 @@ train_schedule:
       vacuum_potential: 100.0
       fermi_level: 100.0
       band_gap: 10.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   2:
     name: stage3
     start: 150
@@ -124,9 +119,7 @@ train_schedule:
       vacuum_potential: 100.0
       fermi_level: 100.0
       band_gap: 10.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0
   3:
     name: stage4
     start: 250
@@ -145,6 +138,4 @@ train_schedule:
       vacuum_potential: 100.0
       fermi_level: 100.0
       band_gap: 10.0
-      dos:
-        weight: 100.0
-        lr: 0.0005
+      dos: 100.0

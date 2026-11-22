@@ -677,6 +677,21 @@ def solve_charges(effective, drive, fixed, slope, bias, target, mask):
     return (solved[..., 0]-mu[:, None]*solved[..., 1])*mask, mu
 
 
+def reserve_solvers(device):
+    """The cuSOLVER and cuBLAS handles of this thread and of the autograd thread of a GPU, made while it is empty.
+
+    A thread makes its handles at its first solve and product, outside the caching allocator of torch, which may by
+    then hold the whole GPU. In a finetune the first solve of screen_moments came with the foundation backbone and
+    its forces in memory, and cusolverDnCreate failed (CUSOLVER_STATUS_INTERNAL_ERROR). A product and a solve of one
+    512 x 512 matrix, with their derivatives, take the looped cuSOLVER routines of the solves of slabs in both threads.
+    """
+    if torch.device(device).type != 'cuda':
+        return
+    torch.backends.cuda.preferred_linalg_library('cusolver')
+    matrix = torch.eye(512, dtype=torch.float64, device=device, requires_grad=True)
+    torch.linalg.solve(matrix@matrix, torch.ones(512, 1, dtype=torch.float64, device=device)).sum().backward()
+
+
 class PotentialResponse(ScaleShiftMACE):
     """A MACE whose atoms carry the response of MACE-VOLT, minimized at fixed Q, counter charge and field."""
 

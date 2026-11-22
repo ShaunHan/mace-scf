@@ -13,11 +13,13 @@ from mace import data
 from mace.tools import AtomicNumberTable, torch_geometric
 from mace.tools.scatter import scatter_sum
 
-from mace_scf.electrostatics.potential_response import PotentialResponse, initialize_potential_response
+from mace_scf.electrostatics.potential_response import (PotentialResponse, initialize_potential_response,
+                                                         reserve_solvers)
 from mace_scf.electrostatics.loss import WeightedLoss
 
 
 def build_potential_response(args, model_config, train_loader, atomic_energies):
+    reserve_solvers(args.device)
     foundation = None
     if args.foundation_model:
         foundation = torch.load(args.foundation_model, map_location='cpu', weights_only=False)
@@ -47,12 +49,14 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
     ).to(args.device)
     if foundation is not None:
         adopt_foundation(model, foundation)
+    if args.enable_cueq:
+        # Before the passes over training frames below: their forces would hold the tensor products of e3nn on every
+        # edge, far more memory than the fused convolution with which the model trains.
+        accelerate_backbone(model, args.device)
     initialize_potential_response(model, args, train_loader, args.device)
     if foundation is not None:
         start_energy_readouts(model, train_loader, args)
     condition_energy(model, train_loader, args.device)
-    if args.enable_cueq:
-        accelerate_backbone(model, args.device)
     if args.foundation_model and args.multiheads_finetuning:
         install_replay_head(model, foundation, args)
     return model
