@@ -16,7 +16,9 @@ from torch import nn
 from torch.nn import functional as F
 
 RESPONSE_SCALE = .02
-# A background density of states (e/V per atom) at all energies, so that every charge has one finite level.
+# The smallest softness (e/V per atom) of an atom at every level, so that every charge has one finite level however
+# small the learned softness of the atoms of a cell with a gap becomes. It is no state: the density of states and the
+# band edges do not see it.
 DOS_FLOOR = 1.e-5
 # The density of states of every atom at the start (e/V) of an element without density of states labels, the same at
 # every energy. It is of the order of 1/U, U = 5.4 V/e the Coulomb energy of a charge of the density width 1.5 A,
@@ -251,14 +253,14 @@ class AtomicResponse(nn.Module):
         """Where every atom is neutral: its neutral level, -bias on the axis of the potential."""
         return -bias
 
-    def charge(self, law, level, origin=None, floor=DOS_FLOOR):
+    def charge(self, law, level, origin=None):
         """The charge of the atoms, their states from origin (zero if not given) to level and their softness, and
         the density of states and softness at level. law = (packets, softness)."""
         packets, softness = law
         centers, widths, shares = packets.unbind(-1)
         origin = torch.zeros_like(level) if origin is None else origin
         x, x0 = (level[..., None]-centers)/widths, (origin[..., None]-centers)/widths
-        soft = softness+floor
+        soft = softness+DOS_FLOOR
         dq = (shares*(packet_share(x)-packet_share(x0))).sum(-1)+soft*(level-origin)
         return dq, (shares*packet_density(x)/widths).sum(-1)+soft
 
