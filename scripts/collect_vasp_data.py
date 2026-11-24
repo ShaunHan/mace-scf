@@ -29,13 +29,15 @@ VACPOTFLAT = 0.1  # eV/A: largest planar field of a vacuum plane, applied field 
 VACUUM_FLATNESS = 0.2  # V: a vacuum potential that varies more than this is not a converged density.
 SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
 DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
-# vasp_pdos, each atom's projected DOS in states/eV, is kept at EF + j * PDOS_STEP for j = -n..n, EF = vasp_efermi:
-# out to where VASP has all the states of every k-point, and at most PDOS_RANGE (eV), the energy range of the
-# model's states, which is counted from its own Fermi level. The training code reads the energies from this rule,
-# so PDOS_STEP is DOS_STEP of mace_scf/data/new_atomic_data.py.
-PDOS_RANGE = 10.0
-PDOS_STEP = 0.05  # eV
-PDOS_DECIMALS = 3  # states/eV in the xyz files: a band edge is read where a cell holds 1e-4 to 1e-3 e per atom.
+# vasp_dos, the total density of states of the cell in states/eV, is the k-weighted histogram of the Kohn-Sham
+# eigenvalues of vasprun.xml, spin degeneracy included and nothing projected, so that it depends on no partition of
+# space. It is kept at EF + j * DOS_STEP for j = -n..n, EF = vasp_efermi: out to where VASP has all the states of
+# every k-point, the lowest of their highest bands (NBANDS sets how far above EF that is), and at most DOS_RANGE (eV),
+# the energy range of the model's states, which is counted from its own Fermi level. The training code reads the
+# energies from this rule, so DOS_STEP is DOS_STEP of mace_scf/data/new_atomic_data.py.
+DOS_RANGE = 10.0
+DOS_STEP = 0.05  # eV
+DOS_DECIMALS = 3  # states/eV in the xyz files.
 BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap, its Fermi level in the middle.
 OCCUPATION_TOL = 0.01  # Bands per k point: a spin channel whose electrons fill a whole number of bands to this.
 REPEAT_LABEL_TOL = 1e-4  # eV or V: a repeated job has the energy, Fermi level and vacuum level of the first to this.
@@ -88,82 +90,51 @@ def truncate_fft(coefficients, shape):
     return hermitian(coefficients[indices] * np.prod(shape) / coefficients.size)
 
 
-def add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints):
-    """Small band arrays plus each atom's projected DOS around EF.
-
-    Returns stored_pdos(states), or None without projections in vaspout.h5.
-    """
+def add_electronic_diagnostics(handle, atoms, parameters, kpoints):
+    """Small band arrays of the run, for diagnostics: the eigenvalues counted from vasp_efermi, the occupations, and
+    the weight, spin channel and index of every k-point. Nothing is projected."""
     if not kpoints:
-        return None
+        return
     states = handle.create_group("states")
-    # fermi_energy: the origin of energy_minus_fermi and of the binned pdos, vasp_efermi
-    states.attrs.update(pdos_range=PDOS_RANGE, pdos_step=PDOS_STEP, fermi_energy=atoms.info["vasp_efermi"])
+    # fermi_energy: the origin of energy_minus_fermi, vasp_efermi
+    states.attrs["fermi_energy"] = atoms.info["vasp_efermi"]
     spinor = parameters.get("lnoncollinear", False) or parameters.get("lsorbit", False)
-    occupations = [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints]
-    energies = [np.asarray(k.eps_n) - atoms.info["vasp_efermi"] for k in kpoints]
     for name, values in {
-        "energy_minus_fermi": energies, "occupation": occupations,
+        "energy_minus_fermi": [np.asarray(k.eps_n) - atoms.info["vasp_efermi"] for k in kpoints],
+        "occupation": [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints],
         "kpoint_weight": [k.weight for k in kpoints],
         "spin": [k.s for k in kpoints], "kpoint": [k.k for k in kpoints],
     }.items():
         states.create_dataset(name, data=values)
-    states.attrs["projections_available"] = False
-    path = outdir / "vaspout.h5"
-    if not path.is_file():
-        return None  # Do not rescan large PROCAR/XML files for optional projections.
-    with h5py.File(path, "r") as source:
-        if "results/projectors/par" not in source:
-            return None
-        projected = source["results/projectors/par"]
-        if projected.shape[1] != len(atoms):
-            raise ValueError(f"Projection atom count mismatch: {path}")
-        half = round(PDOS_RANGE / PDOS_STEP)
-        offsets = np.arange(-half, half + 1)
-        pdos = np.zeros((len(atoms), len(offsets)))
-        capacity = 1.0 if spinor or parameters.get("ispin", 1) == 2 else 2.0
-        for row, k in enumerate(kpoints):
-            # ASE numbers k-points from 1 and reads the XML table rounded to four decimal places.
-            saved = source["results/electron_eigenvalues/eigenvalues"][k.s, k.k - 1]
-            if not np.allclose(saved, k.eps_n, rtol=0, atol=5.1e-5):
-                raise ValueError(f"Projection eigenvalues do not match this VASP run: {path}")
-            energy = saved - atoms.info["vasp_efermi"]
-            occupation = capacity * source["results/electron_eigenvalues/fermiweights"][k.s, k.k - 1]
-            states["energy_minus_fermi"][row] = energy
-            states["occupation"][row] = occupation
-            # Histogram: each band adds its orbital-summed projections to the bin of its eigenvalue.
-            bins = np.rint(energy / PDOS_STEP).astype(int)
-            bands = np.flatnonzero(abs(bins) <= half)
-            if len(bands):
-                site = projected[k.s, :, :, k.k - 1, bands].sum(axis=1)
-                pdos += k.weight * capacity / PDOS_STEP * site @ (bins[bands, None] == offsets)
-    states.attrs.update(projections_available=True,
-                        projection_units="PAW projected states per eV; not atomic charges")
-    states.create_dataset("pdos_energy_minus_fermi", data=offsets * PDOS_STEP)
-    states.create_dataset("pdos", data=pdos.astype(np.float32))
-    # Geometry identifies electrode/solvent atoms without hard-coded species rules.
-    for name, values in {"atomic_numbers": atoms.numbers, "positions": atoms.positions,
-                         "cell": atoms.cell.array}.items():
-        states.create_dataset(name, data=values)
-    return stored_pdos(states)
 
 
-def stored_pdos(states):
-    """The DOS energies relative to EF, the per-atom DOS in states/eV, and the energy relative to EF up to which every
-    k-point has all its states. VASP finds the NBANDS lowest states of each k-point, so that energy is the lowest of
-    their highest bands."""
-    return (states["pdos_energy_minus_fermi"][...], states["pdos"][...],
-            float(states["energy_minus_fermi"][...].max(axis=1).min()))
+def dos_label(kpoints, parameters, fermi):
+    """The total density of states of the cell in states/eV at fermi + j * DOS_STEP for j = -n..n, or None.
 
-
-def pdos_label(energy, pdos, top):
-    """The DOS bins at EF + j * PDOS_STEP for j = -n..n, with the largest n whose bins all lie below top, or None.
-
-    Below top every k-point has all its states, and below its lowest band none are missing. The bins reach as far
-    below EF as above it, so that their energies follow from their number.
+    Every eigenvalue adds the weight of its k-point, normalized in its spin channel, times the electrons its state
+    holds (2 without spin polarization, 1 per channel with it or with spinors), divided by DOS_STEP, to the bin it
+    falls in, so that the label integrates to the electrons of the bands it covers. VASP finds the NBANDS lowest states
+    of each k-point, so the label reaches up to the lowest of their highest bands, n the largest with every bin below
+    it, and at most DOS_RANGE; below the lowest band no state is missing. The bins reach as far below the Fermi level
+    as above it, so that their energies follow from their number.
     """
-    offsets = np.rint(np.asarray(energy) / PDOS_STEP).astype(int)
-    n = min(int(offsets.max()), int(np.floor(top / PDOS_STEP - 0.5)))
-    return np.asarray(pdos, dtype=float)[:, np.abs(offsets) <= n] if n > 0 else None
+    if not kpoints:
+        return None
+    spinor = parameters.get("lnoncollinear", False) or parameters.get("lsorbit", False)
+    capacity = 1.0 if spinor or parameters.get("ispin", 1) == 2 else 2.0
+    top = min(float(np.max(k.eps_n)) for k in kpoints) - fermi
+    n = min(round(DOS_RANGE / DOS_STEP), int(np.floor(top / DOS_STEP - 0.5)))
+    if n <= 0:
+        return None
+    channel = {}
+    for k in kpoints:
+        channel[k.s] = channel.get(k.s, 0.0) + k.weight
+    dos = np.zeros(2 * n + 1)
+    for k in kpoints:
+        bins = np.rint((np.asarray(k.eps_n) - fermi) / DOS_STEP).astype(int)
+        inside = np.abs(bins) <= n
+        np.add.at(dos, bins[inside] + n, k.weight / channel[k.s] * capacity / DOS_STEP)
+    return dos
 
 
 def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
@@ -179,30 +150,12 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         return {}
     path = outdir / HDF_NAME
     if REUSE_HDF and path.is_file():
+        # Only the grids are reused. The DOS label comes from the eigenvalues of vasprun.xml, so caches of earlier
+        # collections serve unchanged and are only read.
         with h5py.File(path, "r") as handle:
             if handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
-            data = {name: handle[name][...] for name in names}
-            states = handle.get("states")
-            # States cached before they kept their origin were counted from the run's Fermi level, fermi_energy of
-            # the file. Those of a cell with a gap are counted again from the middle of the gap.
-            origin = None if states is None else states.attrs.get("fermi_energy", handle.attrs.get("fermi_energy"))
-            current = (states is not None and states.attrs.get("pdos_range") == PDOS_RANGE
-                       and states.attrs.get("pdos_step") == PDOS_STEP and origin is not None
-                       and abs(float(origin) - atoms.info["vasp_efermi"]) < 1e-9)
-            if current and states.attrs.get("projections_available", False):
-                if "pdos" not in states:
-                    raise ValueError(f"No projected DOS in {path}; set REUSE_HDF=False")
-                data["pdos"] = stored_pdos(states)
-        if not current:
-            # A projected DOS cached with other settings is recomputed from vaspout.h5; the grids are kept.
-            with h5py.File(path, "r+") as handle:
-                if "states" in handle:
-                    del handle["states"]
-                pdos = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
-            if pdos is not None:
-                data["pdos"] = pdos
-        return data
+            return {name: handle[name][...] for name in names}
 
     shape = 2 * np.ceil(K_CUTOFF * atoms.cell.lengths() / (2 * np.pi)).astype(int) + 1
     data = {}
@@ -253,12 +206,10 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         handle.attrs["potential_reference"] = "LOCPOT minus proto LOCPOT"
         if axis is not None:
             handle.attrs["profile_axis"] = axis
-        pdos = add_electronic_diagnostics(handle, outdir, atoms, parameters, kpoints)
+        add_electronic_diagnostics(handle, atoms, parameters, kpoints)
         for name, values in data.items():
             handle.create_dataset(name, data=values)
     temporary.replace(path)
-    if pdos is not None:
-        data["pdos"] = pdos
     return data
 
 
@@ -462,7 +413,7 @@ def collect_job(outdir):
     # band of silica with Gaussian smearing, 0.1 eV above the middle of water's gap with Fermi-Dirac. The middle is
     # taken here from the band edges, the same for runs made either way. A neutral metal is labelled by VASP's Fermi
     # level and a zero gap, so that metals and gapped cells are told apart. A charged cell has no gap label: its Fermi
-    # level lies in the band that holds the charge. The band edges are the Fermi level -+ half the gap. vasp_pdos is
+    # level lies in the band that holds the charge. The band edges are the Fermi level -+ half the gap. vasp_dos is
     # counted from this Fermi level.
     edges = band_edges(kpoints)
     gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN
@@ -491,11 +442,12 @@ def collect_job(outdir):
         atoms.info["config_stress_weight"] = 0.
         atoms.info["config_virials_weight"] = 0.
     data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
-    label = pdos_label(*data["pdos"]) if "pdos" in data else None
-    if label is not None:
-        # One row per atom, in states/eV rounded to PDOS_DECIMALS. As a JSON array in the header this
-        # takes a few characters per number; per-atom columns would take 17.
-        atoms.info["vasp_pdos"] = np.round(label, PDOS_DECIMALS)
+    label = dos_label(kpoints, parameters, atoms.info["vasp_efermi"])
+    if label is None:
+        print(f"Note {outdir}: no vasp_dos; vasprun.xml has no eigenvalues, or its bands end at the Fermi level")
+    else:
+        # One row for the cell, in states/eV rounded to DOS_DECIMALS.
+        atoms.info["vasp_dos"] = np.round(label, DOS_DECIMALS)
     if plugin:
         planar = data["planar_electron_density"]
         length = float(atoms.cell[axis] @ normal)
@@ -633,6 +585,10 @@ def collect():
     records = drop_repeats(records)
     print(f"{len(paths)} jobs: {len(paths) - collected} skipped by the checks above, "
           f"{collected - len(records)} repeats dropped, {len(records)} kept")
+    reach = [len(atoms.info["vasp_dos"]) // 2 * DOS_STEP for atoms, _ in records if "vasp_dos" in atoms.info]
+    if reach:
+        print(f"vasp_dos in {len(reach)} of {len(records)} frames, out to EF -+ {min(reach):.2f} to {max(reach):.2f} eV "
+              f"(median {np.median(reach):.2f}); a frame short of DOS_RANGE {DOS_RANGE:g} eV ran out of bands (NBANDS)")
     train, valid = split_configs(records)
     for path, configs in ((OUT_XYZ, [a for a, _ in records]),
                           (OUT_TRAIN_XYZ, train), (OUT_VALID_XYZ, valid)):

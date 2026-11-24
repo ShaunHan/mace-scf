@@ -62,7 +62,7 @@ def applied_sawtooth(cell, pbc, external_field):
     return 0.5 * float(np.ravel(external_field) @ normal) * float(cell[axis] @ normal)
 
 
-# eV: the spacing of the energies of a density of states label, PDOS_STEP of scripts/collect_vasp_data.py.
+# eV: the spacing of the energies of a density of states label, DOS_STEP of scripts/collect_vasp_data.py.
 DOS_STEP = 0.05
 
 VOLT_KEYS = (
@@ -351,14 +351,19 @@ class ExtAtomicData(AtomicData):
             return value.reshape(-1), torch.tensor(value.shape, dtype=torch.long)
 
         def projected(name):
-            # [atoms, energies] density of states of every atom (states/eV) at the energies DOS_STEP * j, j = -n..n,
-            # from the Fermi level of DFT, out to where DFT has all its states, as scripts/collect_vasp_data.py
-            # writes it. Stored flat with its shape, as the graphs of a batch differ in both.
+            # [1, energies] density of states of the cell (states/eV) at the energies DOS_STEP * j, j = -n..n, from
+            # the Fermi level of DFT, out to where DFT has all its states, as scripts/collect_vasp_data.py writes it
+            # (vasp_dos). A label of one row per atom is summed over its atoms. Stored flat with its shape, as the
+            # graphs of a batch differ in both.
             value = config.properties.get(name)
             if value is None:
                 return (torch.zeros((0,), dtype=torch.float32), torch.zeros((2,), dtype=torch.long),
                         torch.zeros((0,), dtype=torch.float32))
-            value = np.asarray(value, dtype=float).reshape(num_atoms, -1)
+            value = np.asarray(value, dtype=float)
+            value = value.reshape(1, -1) if value.ndim == 1 else value
+            if value.ndim != 2 or value.shape[0] not in (1, num_atoms):
+                raise ValueError(f"A {name} label needs one row for the cell or one per atom, not shape {value.shape}")
+            value = value.sum(0, keepdims=True)
             if value.shape[1] % 2 == 0 or value.shape[1] < 3:
                 raise ValueError(f"A {name} label needs an odd number of energies around the Fermi level, not {value.shape[1]}")
             n = value.shape[1] // 2

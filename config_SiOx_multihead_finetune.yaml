@@ -7,7 +7,7 @@ heads:
       external_field: external_field
       fermi_level: vasp_efermi
       band_gap: vasp_band_gap
-      dos: vasp_pdos
+      dos: vasp_dos
       fourier_density: vasp_rho_fftn_shifted
       fourier_potential: vasp_phi_fftn_shifted
       fourier_proto_potential: vasp_proto_phi_fftn_shifted
@@ -77,7 +77,6 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
-      band_gap: 25.0
       dos: 100.0
       replay: 1.0
   1:
@@ -95,7 +94,6 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
-      band_gap: 25.0
       dos: 100.0
       replay: 1.0
   2:
@@ -113,7 +111,6 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
-      band_gap: 25.0
       dos: 100.0
       replay: 1.0
   3:
@@ -131,7 +128,6 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
-      band_gap: 25.0
       dos: 100.0
       replay: 1.0
   4:
@@ -149,6 +145,5 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
-      band_gap: 25.0
       dos: 100.0
       replay: 1.0
