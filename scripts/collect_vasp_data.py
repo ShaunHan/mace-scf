@@ -1,8 +1,8 @@
+"""Collect training labels directly from VASP outputs. Edit the settings below."""
 from pathlib import Path
 import json
 import multiprocessing as mp
 import re
-import sys
 
 import h5py
 import numpy as np
@@ -11,7 +11,7 @@ from pymatgen.io.vasp import Chgcar, Locpot, Outcar
 
 
 BASE_PATH = Path("/gpfs/projects/qm_inorganics/electrocatalysis/IrO2_110/dft_plugin/")
-PROTO_BASE_PATH = None
+PROTO_BASE_PATH = None  # Proto LOCPOTs, only for old runs without their own LOCPOT_proto.
 CHUNK_SIZE = 5
 N_PROCS = 64
 REUSE_HDF = True
@@ -20,39 +20,16 @@ FOURIER_CUTOFF_FACTOR = 1.25  # XYZ bandwidth; must cover the model's k-space cu
 DENSITY_SIGMAS = [1.5]
 POTENTIAL_SIGMAS = [1.5]  # [] disables potential collection.
 FMAX_TOL = 10.0  # eV/A: largest atomic force of a kept frame.
-PLUGIN_FORCE_TOL = 1e-3  # eV/A: plug-in and VASP forces may differ only by a uniform net force.
-TRAIN_VALID_RATIO = 4.0  # Training frames per validation frame; the split is the last step, after every check.
+VALID_FRACTION = 0.2
 SPLIT_SEED = 7777
 SKIP_IDS = [1, 7, 10, 46, 66, 97, 101, 115, 194, 218, 228, 266, 288, 296, 308, 318, 342, 353, 375, 391, 420, 439, 506, 555, 566, 755]  # Original VASP IDs: batch start + output index.
-VACUUM_MARGIN = 3.0  # A: vacuum planes start this far above the outermost atom.
-VACPOTFLAT = 0.1  # eV/A: largest planar field of a vacuum plane, applied field removed, as LVACPOTAV.
-VACUUM_FLATNESS = 0.2  # V: a vacuum potential that varies more than this is not a converged density.
-SCF_DENSITY_TOL = 1e-2  # Largest rms(c) of the last SCF steps; VASP stops at EDIFF on one small energy change.
-DIPOLE_DRIFT_TOL = 0.05  # V: largest vacuum potential change from the plug-in dipole over its last callbacks.
-# vasp_dos, the total density of states of the cell in states/eV, is the k-weighted histogram of the Kohn-Sham
-# eigenvalues of vasprun.xml, spin degeneracy included and nothing projected, so that it depends on no partition of
-# space. It is kept at EF + j * DOS_STEP for j = -n..n, EF = vasp_efermi: out to where VASP has all the states of
-# every k-point, the lowest of their highest bands (NBANDS sets how far above EF that is), and at most DOS_RANGE (eV),
-# the energy range of the model's states, which is counted from its own Fermi level. The training code reads the
-# energies from this rule, so DOS_STEP is DOS_STEP of mace_scf/data/new_atomic_data.py.
-DOS_RANGE = 10.0
-DOS_STEP = 0.05  # eV
-DOS_DECIMALS = 3  # states/eV in the xyz files.
-BAND_GAP_MIN = 0.1  # eV: a neutral cell with a larger DFT gap is labelled by its gap, its Fermi level in the middle.
-OCCUPATION_TOL = 0.01  # Bands per k point: a spin channel whose electrons fill a whole number of bands to this.
-REPEAT_LABEL_TOL = 1e-4  # eV or V: a repeated job has the energy, Fermi level and vacuum level of the first to this.
-REPEAT_FORCE_TOL = 1e-3  # eV/A: and its forces.
+DOS_STEP = 0.05  # eV: DOS_STEP of mace_scf/data/new_atomic_data.py.
+DOS_RANGE = 10.0  # eV: the total DOS is kept at most this far from the Fermi level.
 HDF_NAME = "fourier_data.hdf"
 
 OUT_XYZ = BASE_PATH / "combined_VASP_shifted.xyz"
 OUT_TRAIN_XYZ = BASE_PATH / "combined_VASP_shifted_train.xyz"
 OUT_VALID_XYZ = BASE_PATH / "combined_VASP_shifted_valid.xyz"
-
-COUNTER_CHARGE_PLACES = ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
-                         "counter_charge_zfrac")
-# With the atoms, cell and positions, these inputs define a calculation.
-INPUT_KEYS = ("total_charge", "counter_charge", "external_field", "counter_charge_width", *COUNTER_CHARGE_PLACES,
-              "dipole_correction_xfrac", "dipole_correction_yfrac", "dipole_correction_zfrac")
 
 
 def get_output_dirs():
@@ -90,33 +67,11 @@ def truncate_fft(coefficients, shape):
     return hermitian(coefficients[indices] * np.prod(shape) / coefficients.size)
 
 
-def add_electronic_diagnostics(handle, atoms, parameters, kpoints):
-    """Small band arrays of the run, for diagnostics: the eigenvalues counted from vasp_efermi, the occupations, and
-    the weight, spin channel and index of every k-point. Nothing is projected."""
-    if not kpoints:
-        return
-    states = handle.create_group("states")
-    # fermi_energy: the origin of energy_minus_fermi, vasp_efermi
-    states.attrs["fermi_energy"] = atoms.info["vasp_efermi"]
-    spinor = parameters.get("lnoncollinear", False) or parameters.get("lsorbit", False)
-    for name, values in {
-        "energy_minus_fermi": [np.asarray(k.eps_n) - atoms.info["vasp_efermi"] for k in kpoints],
-        "occupation": [np.asarray(k.f_n) * (0.5 if spinor else 1.0) for k in kpoints],
-        "kpoint_weight": [k.weight for k in kpoints],
-        "spin": [k.s for k in kpoints], "kpoint": [k.k for k in kpoints],
-    }.items():
-        states.create_dataset(name, data=values)
-
-
 def dos_label(kpoints, parameters, fermi):
-    """The total density of states of the cell in states/eV at fermi + j * DOS_STEP for j = -n..n, or None.
+    """The total DOS of the cell in states/eV at fermi + j * DOS_STEP, j = -n..n, from the eigenvalues; or None.
 
-    Every eigenvalue adds the weight of its k-point, normalized in its spin channel, times the electrons its state
-    holds (2 without spin polarization, 1 per channel with it or with spinors), divided by DOS_STEP, to the bin it
-    falls in, so that the label integrates to the electrons of the bands it covers. VASP finds the NBANDS lowest states
-    of each k-point, so the label reaches up to the lowest of their highest bands, n the largest with every bin below
-    it, and at most DOS_RANGE; below the lowest band no state is missing. The bins reach as far below the Fermi level
-    as above it, so that their energies follow from their number.
+    Nothing is projected. VASP has all the states of every k-point up to the lowest of their highest bands (NBANDS),
+    so n is the largest whose bins lie below it, and at most DOS_RANGE / DOS_STEP.
     """
     if not kpoints:
         return None
@@ -131,13 +86,14 @@ def dos_label(kpoints, parameters, fermi):
         channel[k.s] = channel.get(k.s, 0.0) + k.weight
     dos = np.zeros(2 * n + 1)
     for k in kpoints:
+        # Each state adds its k-point weight, normalized in its spin channel, times the electrons it holds.
         bins = np.rint((np.asarray(k.eps_n) - fermi) / DOS_STEP).astype(int)
         inside = np.abs(bins) <= n
         np.add.at(dos, bins[inside] + n, k.weight / channel[k.s] * capacity / DOS_STEP)
     return dos
 
 
-def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
+def fourier_data(outdir, atoms, parameters, axis, plugin=False):
     """Cache unsmoothed Fourier grids; widths and vacuum sampling remain editable."""
     names = ["fourier_density"] if DENSITY_SIGMAS else []
     if POTENTIAL_SIGMAS:
@@ -150,8 +106,6 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         return {}
     path = outdir / HDF_NAME
     if REUSE_HDF and path.is_file():
-        # Only the grids are reused. The DOS label comes from the eigenvalues of vasprun.xml, so caches of earlier
-        # collections serve unchanged and are only read.
         with h5py.File(path, "r") as handle:
             if handle.attrs["k_cutoff"] != K_CUTOFF or not set(names) <= set(handle):
                 raise ValueError(f"Cache settings differ in {path}; set REUSE_HDF=False")
@@ -164,24 +118,19 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         final_density = read_grid(outdir / "AECCAR2", atoms, Chgcar)
         if density.shape != final_density.shape:
             raise ValueError(f"AECCAR grid mismatch: {outdir}")
-        if axis is not None:
-            data["planar_valence_density"] = final_density.mean(
-                axis=tuple(i for i in range(3) if i != axis)) / atoms.get_volume()
         density -= final_density
         density /= atoms.get_volume()  # Signed deformation charge, in e/Angstrom^3.
         data["fourier_density"] = truncate_fft(np.fft.fftn(density), shape)
         del density, final_density
     if plugin:
-        # Only plugin runs need this extra grid, to recover their physical dipole.
+        # Only plug-in runs need this grid, to recover their physical dipole.
         data["planar_electron_density"] = read_grid(outdir / "CHGCAR", atoms, Chgcar).mean(
             axis=tuple(i for i in range(3) if i != axis)) / atoms.get_volume()
     if POTENTIAL_SIGMAS:
         if not parameters["lvhar"]:
             raise ValueError(f"Potential collection needs LVHAR=True: {outdir}")
         potential = read_grid(outdir / "LOCPOT", atoms, Locpot)
-        # The in-run proto is VASP's first ICHARG=2 density, the neutral-atom
-        # superposition for every charge state. A separate proto run is only a
-        # fallback for old neutral outputs; it would carry a charged run's NELECT.
+        # The in-run proto is VASP's first ICHARG=2 potential, the neutral atoms for every charge state.
         proto_path = outdir / "LOCPOT_proto"
         if not proto_path.is_file():
             if plugin:
@@ -190,23 +139,14 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
         proto = read_grid(proto_path, atoms, Locpot)
         if potential.shape != proto.shape:
             raise ValueError(f"SCF/proto potential grid mismatch: {outdir}")
-        # The neutral atoms: the vacuum origin and the potential a counter charge overlaps.
         data["fourier_proto_potential"] = truncate_fft(np.fft.fftn(proto), shape)
         if axis is not None:
             data["planar_potential"] = potential.mean(axis=tuple(i for i in range(3) if i != axis))
-        # Neither potential is shifted: VASP writes both with zero mean, the origin of its Fermi level.
-        potential -= proto
+        potential -= proto  # Neither is shifted: VASP writes both with zero mean, the origin of its Fermi level.
         data["fourier_potential"] = truncate_fft(np.fft.fftn(potential), shape)
     temporary = path.with_suffix(".tmp")
     with h5py.File(temporary, "w") as handle:
         handle.attrs["k_cutoff"] = K_CUTOFF
-        handle.attrs["nelect"] = parameters["nelect"]
-        handle.attrs["fermi_energy"] = atoms.info["vasp_efermi"]
-        handle.attrs["counter_charge"] = atoms.info["counter_charge"]
-        handle.attrs["potential_reference"] = "LOCPOT minus proto LOCPOT"
-        if axis is not None:
-            handle.attrs["profile_axis"] = axis
-        add_electronic_diagnostics(handle, atoms, parameters, kpoints)
         for name, values in data.items():
             handle.create_dataset(name, data=values)
     temporary.replace(path)
@@ -215,9 +155,8 @@ def fourier_data(outdir, atoms, parameters, axis, plugin=False, kpoints=()):
 
 def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
     """Compact, unsmoothed XYZ targets; higher-frequency data stay in the HDF."""
-    # The widths set the bandwidth only; they apply no Gaussian filter. The model's k-space
-    # cutoff is 0.75 * 3.0 * (max_l + 1)**0.3 / sigma (graph_longrange gto_basis_kspace_cutoff,
-    # max_l = 1), and the targets keep FOURIER_CUTOFF_FACTOR times it.
+    # The widths set the bandwidth only: FOURIER_CUTOFF_FACTOR times the model's k-space cutoff
+    # 0.75 * 3.0 * (max_l + 1)**0.3 / sigma (graph_longrange gto_basis_kspace_cutoff, max_l = 1).
     sigma = float(min(sigmas))
     if not np.isfinite(sigma) or sigma <= 0:
         raise ValueError("Fourier widths must be positive and finite")
@@ -234,15 +173,11 @@ def add_fourier_targets(atoms, coefficients, sigmas, prefix, charge=None):
 
 
 def vacuum_potential(atoms, planar, axis, correction, field):
-    """The vacuum potential above the slab, just below the dipole correction plane, and its spread.
+    """The vacuum potential just below the dipole correction plane, and its spread over the vacuum.
 
-    LVACPOTAV averages the planar potential over the field-free vacuum. The vacuum planes here lie between
-    VACUUM_MARGIN above the outermost atom and the correction plane, where the field, the applied field
-    removed, is below VACPOTFLAT. The applied field raises the potential by the field per A towards the plane,
-    so V(z) + field * (distance to the plane) is the same at every vacuum plane, the value just below it. A
-    density that has not settled leaves a uniform charge in the vacuum, which bends that average by the spread
-    returned with it. Training subtracts the applied field's zero-mean sawtooth at the plane, field * L / 2,
-    and fits the field-free vacuum potential.
+    As LVACPOTAV, it averages the planar potential over the vacuum planes at least 3 A above the outermost atom
+    whose field, the applied field removed, is below 0.1 eV/A. The applied field is carried to the plane, so that
+    V(z) + field * (distance to the plane) is the same at every vacuum plane.
     """
     normal = np.linalg.inv(atoms.cell.array)[:, axis]
     length = 1.0 / np.linalg.norm(normal)
@@ -250,7 +185,7 @@ def vacuum_potential(atoms, planar, axis, correction, field):
     top = np.min((correction - atoms.get_scaled_positions(wrap=False)[:, axis]) % 1.0) * length
     level = planar + field * below
     gradient = (np.roll(level, -1) - np.roll(level, 1)) / (2 * length / len(planar))
-    vacuum = (below > length / len(planar)) & (below < top - VACUUM_MARGIN) & (np.abs(gradient) < VACPOTFLAT)
+    vacuum = (below > length / len(planar)) & (below < top - 3.0) & (np.abs(gradient) < 0.1)
     if not vacuum.any():
         raise ValueError("No field-free vacuum above the slab; enlarge the vacuum")
     return float(level[vacuum].mean()), float(np.ptp(level[vacuum]))
@@ -259,9 +194,9 @@ def vacuum_potential(atoms, planar, axis, correction, field):
 def converged_electronic_state(outdir, text, plugin, area):
     """Why the electronic state of a run is not converged, or None.
 
-    VASP stops at EDIFF when one energy change is small, which a stalled density can pass by chance: the
-    density residual rms(c) of the last steps and, in a plug-in run, the dipole of its last callbacks must
-    have settled too.
+    VASP stops at EDIFF on one small energy change, which a stalled density can pass by chance: the density residual
+    rms(c) of the last three steps must be below 1e-2 too, and in a plug-in run the dipole of its last callbacks may
+    move the vacuum potential by at most 0.05 V.
     """
     if "EDIFF is reached" not in text.rsplit("Iteration", 1)[-1]:
         return "EDIFF not reached"
@@ -270,24 +205,18 @@ def converged_electronic_state(outdir, text, plugin, area):
         numbers = line.split()
         if len(numbers) == 8 and numbers[0][-1] == ":":
             residuals.append(float(numbers[7]))
-    if residuals and max(residuals[-3:]) > SCF_DENSITY_TOL:
+    if residuals and max(residuals[-3:]) > 1e-2:
         return f"density residual rms(c) {max(residuals[-3:]):.1e}"
     if plugin and (outdir / "plugin_scf.csv").is_file():
         dipoles = np.loadtxt(outdir / "plugin_scf.csv", delimiter=",", skiprows=1, ndmin=2)[-6:, 1]
         drift = np.ptp(dipoles) / (0.005526349406 * area)
-        if drift > DIPOLE_DRIFT_TOL:
+        if drift > 0.05:
             return f"plug-in dipole drifts by {np.ptp(dipoles):.1e} eA, {drift:.3f} V of vacuum potential"
     return None
 
 
 def plugin_run(outdir, meta):
-    """Whether a counter-charge plug-in acted in this run.
-
-    scripts/dft_runs.py records it in dft_metadata.json, together with any placed counter
-    charge (Q = 0 included), and installs its proto-potential hook vasp_plugin.py in every
-    run, so that file alone proves nothing. Without metadata, only the plug-in's own output
-    marks a plug-in run, which then lacks the settings it needs.
-    """
+    """Whether a counter-charge plug-in acted in this run, as scripts/dft_runs.py records in dft_metadata.json."""
     if "plugin" in meta:
         return bool(meta["plugin"])
     if (outdir / "plugin_observables.npz").is_file():
@@ -296,13 +225,8 @@ def plugin_run(outdir, meta):
 
 
 def plugin_forces(outdir, forces, normal):
-    """The forces of a plug-in run, -dE/dR of its energy, in VASP's atom order.
-
-    VASP removes the net force from the forces it writes. A planar counter charge exerts a real
-    one along the slab normal, which the plug-in keeps in expected_forces; the two sets may differ
-    only by a uniform force. Its part in the plane of the slab, which a planar counter charge
-    cannot exert, is VASP's numerical drift and stays removed, as in every run.
-    """
+    """The forces of a plug-in run, -dE/dR of its energy: VASP's forces plus the net force of the counter charge
+    along the slab normal, which VASP removes. The two sets may differ only by a uniform force."""
     with np.load(outdir / "plugin_observables.npz") as observables:
         if "expected_forces" not in observables:
             raise ValueError(f"Plug-in run without its forces: {outdir}")
@@ -310,20 +234,17 @@ def plugin_forces(outdir, forces, normal):
     if full.shape != forces.shape or not np.isfinite(full).all():
         raise ValueError(f"Invalid plug-in forces: {outdir}")
     difference = full - forces
-    if np.abs(difference - difference.mean(0)).max() > PLUGIN_FORCE_TOL:
+    if np.abs(difference - difference.mean(0)).max() > 1e-3:
         raise ValueError(f"Plug-in and VASP forces differ by more than a net force: {outdir}")
     return forces + (difference.mean(0) @ normal) * normal
 
 
 def band_edges(kpoints):
-    """The valence band maximum and conduction band minimum of the ground state at zero temperature, or None.
+    """The valence band maximum and conduction band minimum at zero temperature, or None.
 
-    In every spin channel the electrons of the run fill its lowest bands at every k point, as at zero temperature,
-    so that the smearing does not decide which states are filled: the channel holds sum_k w_k sum_n f_nk / sum_k w_k
-    electrons per k point, a whole number of filled bands in a cell with a gap. None when it is not (a half-filled
-    level, or a charged metal) or when the filled bands reach above the empty ones (a metal). The fullest state sets
-    the occupation of a filled one, so that ISPIN, spinors and ASE's doubled occupations of spin-degenerate runs need
-    no special case.
+    In every spin channel the electrons of the run fill its lowest bands at every k point, so that the smearing does
+    not decide which states are filled. None when they fill no whole number of bands (a charged metal) or when the
+    filled bands reach above the empty ones (a metal).
     """
     if not kpoints:
         return None
@@ -333,7 +254,7 @@ def band_edges(kpoints):
         channel = [k for k in kpoints if k.s == spin]
         bands = sum(k.weight * float(np.sum(k.f_n)) for k in channel) / (sum(k.weight for k in channel) * full)
         filled = int(round(bands))
-        if abs(bands - filled) > OCCUPATION_TOL or not 0 < filled < min(len(k.eps_n) for k in channel):
+        if abs(bands - filled) > 0.01 or not 0 < filled < min(len(k.eps_n) for k in channel):
             return None
         levels = [np.sort(np.asarray(k.eps_n)) for k in channel]
         maximum = max(maximum, max(float(e[filled - 1]) for e in levels))
@@ -353,7 +274,6 @@ def collect_job(outdir):
     if not np.isfinite(forces).all() or not np.isfinite(energy):
         raise ValueError(f"Nonfinite energy/forces: {outdir}")
     if plugin:
-        # The counter charge exerts a net force along the slab normal, which VASP removed.
         normal = np.linalg.inv(atoms.cell.array)[:, meta["slab_axis"]]
         forces = plugin_forces(outdir, forces, normal / np.linalg.norm(normal))
     if np.linalg.norm(forces, axis=1).max() > FMAX_TOL:
@@ -404,19 +324,11 @@ def collect_job(outdir):
     atoms.calc = None
     atoms.set_constraint()
     atoms.arrays["vasp_forces"] = forces
-    # Every cell is labelled by its Fermi level and its band gap, from the eigenvalues of the ground state at zero
-    # temperature, so that no smearing changes them. In a cell with a gap, bulk or slab such as a water film, the
-    # Fermi level is the middle of the gap between its highest filled and lowest empty state: the limit of zero
-    # smearing for every smearing (Fermi-Dirac, Gaussian, Methfessel-Paxton, cold), the electrochemical potential
-    # -(IP + EA) / 2 of the neutral cell, where VASP puts it with EFERMI = MIDGAP. With EFERMI = LEGACY, the default,
-    # VASP's Fermi level lies wherever its smearing and the tolerance of its search leave it: just above the valence
-    # band of silica with Gaussian smearing, 0.1 eV above the middle of water's gap with Fermi-Dirac. The middle is
-    # taken here from the band edges, the same for runs made either way. A neutral metal is labelled by VASP's Fermi
-    # level and a zero gap, so that metals and gapped cells are told apart. A charged cell has no gap label: its Fermi
-    # level lies in the band that holds the charge. The band edges are the Fermi level -+ half the gap. vasp_dos is
-    # counted from this Fermi level.
+    # The Fermi level and band gap come from the eigenvalues at zero temperature, so that no smearing changes them.
+    # A neutral cell with a gap above 0.1 eV has its Fermi level in the middle of the gap (VASP's EFERMI = MIDGAP);
+    # a metal or a charged cell keeps VASP's Fermi level and has no gap label. vasp_dos is counted from this level.
     edges = band_edges(kpoints)
-    gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > BAND_GAP_MIN
+    gapped = abs(charge) < 1e-6 and edges is not None and edges[1] - edges[0] > 0.1
     atoms.info = {
         "config_type": "slab" if slab else "bulk",
         "vasp_free_energy": float(energy),
@@ -431,7 +343,8 @@ def collect_job(outdir):
     }
     if slab:
         atoms.info[f"dipole_correction_{'xyz'[axis]}frac"] = correction
-    places = [key for key in COUNTER_CHARGE_PLACES if key in meta]
+    places = [key for key in ("counter_charge_center", "counter_charge_xfrac", "counter_charge_yfrac",
+                              "counter_charge_zfrac") if key in meta]
     if places:
         # The Gaussian counter charge as placed, also at Q = 0.
         atoms.info["counter_charge_width"] = float(meta["counter_charge_width"])
@@ -441,13 +354,12 @@ def collect_job(outdir):
         # The plug-in implements forces, but not its stress derivative.
         atoms.info["config_stress_weight"] = 0.
         atoms.info["config_virials_weight"] = 0.
-    data = fourier_data(outdir, atoms, parameters, axis, plugin, kpoints)
-    label = dos_label(kpoints, parameters, atoms.info["vasp_efermi"])
-    if label is None:
+    data = fourier_data(outdir, atoms, parameters, axis, plugin)
+    dos = dos_label(kpoints, parameters, atoms.info["vasp_efermi"])
+    if dos is None:
         print(f"Note {outdir}: no vasp_dos; vasprun.xml has no eigenvalues, or its bands end at the Fermi level")
     else:
-        # One row for the cell, in states/eV rounded to DOS_DECIMALS.
-        atoms.info["vasp_dos"] = np.round(label, DOS_DECIMALS)
+        atoms.info["vasp_dos"] = np.round(dos, 3)  # One row for the cell, in states/eV.
     if plugin:
         planar = data["planar_electron_density"]
         length = float(atoms.cell[axis] @ normal)
@@ -464,7 +376,7 @@ def collect_job(outdir):
         if slab:
             level, spread = vacuum_potential(atoms, data["planar_potential"], axis, correction,
                                              float(external_field @ normal))
-            if spread > VACUUM_FLATNESS:
+            if spread > 0.2:
                 print(f"Skipping {outdir}: the vacuum potential varies by {spread:.3f} V")
                 return None
             if spread > 0.05:
@@ -474,30 +386,29 @@ def collect_job(outdir):
                 print(f"Warning {outdir}: vacuum level {level:.3f} V, VASP's LVACPOTAV {float(vasp[-1]):.3f} V")
             atoms.info["vasp_vacuum_potential"] = level
         add_fourier_targets(atoms, data["fourier_potential"], POTENTIAL_SIGMAS, "vasp_phi")
-        # The neutral atoms: unsmoothed LOCPOT_proto modes, as vasp_proto_phi_fftn_shifted.
         add_fourier_targets(atoms, data["fourier_proto_potential"], POTENTIAL_SIGMAS, "vasp_proto_phi")
     print(f"Collected {outdir}")
     return atoms, outdir.parent.name, outdir
 
 
 def same_results(atoms, other):
-    """Whether two jobs gave the same energy, forces, Fermi level and vacuum level."""
+    """Whether two jobs gave the same energy, Fermi level and vacuum level (to 1e-4) and forces (to 1e-3 eV/A)."""
     labels = ("vasp_free_energy", "vasp_efermi", "vasp_vacuum_potential")
-    return (all(abs(atoms.info[key] - other.info[key]) <= REPEAT_LABEL_TOL for key in labels
+    return (all(abs(atoms.info[key] - other.info[key]) <= 1e-4 for key in labels
                 if key in atoms.info and key in other.info)
-            and np.abs(atoms.arrays["vasp_forces"] - other.arrays["vasp_forces"]).max() <= REPEAT_FORCE_TOL)
+            and np.abs(atoms.arrays["vasp_forces"] - other.arrays["vasp_forces"]).max() <= 1e-3)
 
 
 def drop_repeats(records):
-    """Drops a job that repeats an earlier one: the same atoms, cell, positions and INPUT_KEYS, and the same results.
-
-    Such a job is the same calculation run again, as when a structure's zero-field point is part of several field
-    series. The same structure in another field or at another charge is another calculation. Jobs with the same
-    inputs but different results are all kept and reported.
-    """
+    """Drops a job that repeats an earlier one: the same atoms, cell, positions and inputs, and the same results, as
+    when the zero-field point of a structure is part of several field series. Jobs with the same inputs but other
+    results are all kept and reported."""
+    inputs = ("total_charge", "counter_charge", "external_field", "counter_charge_width", "counter_charge_center",
+              "counter_charge_xfrac", "counter_charge_yfrac", "counter_charge_zfrac", "dipole_correction_xfrac",
+              "dipole_correction_yfrac", "dipole_correction_zfrac")
     kept, earlier = [], {}
     for atoms, group, outdir in records:
-        names = tuple(key for key in INPUT_KEYS if key in atoms.info)
+        names = tuple(key for key in inputs if key in atoms.info)
         values = (atoms.cell.array, atoms.positions, *(atoms.info[key] for key in names))
         key = (tuple(atoms.get_chemical_symbols()), tuple(atoms.pbc), names,
                *((np.round(np.asarray(value, dtype=float), 6) + 0.0).tobytes() for value in values))
@@ -514,48 +425,40 @@ def drop_repeats(records):
 
 
 def split_configs(records):
-    """Training and validation frames in the ratio TRAIN_VALID_RATIO, each VASP batch whole in one of them, without
-    storing group metadata in XYZ.
-
-    It is the last step, on the frames that passed every check, so the files as written hold the ratio. The batches
-    of each stratum (the config types of a batch) are shuffled and the first 1 / (1 + ratio) of them drawn for
-    validation. Batches differ in size, so the frames then miss the ratio by a few: whole batches change sides, in
-    one shuffled order of all batches, each one that fits the frames still missing, until the validation set holds
-    round(frames / (1 + ratio)) frames; a last frame or two is settled by exchanging two batches of one stratum.
-    Every stratum of two batches or more keeps one on each side.
-    """
-    sizes, types = {}, {}
+    """Keep each VASP batch in one split, without storing group metadata in XYZ, and VALID_FRACTION of the frames in
+    the validation split."""
+    sizes, groups = {}, {}
     for atoms, group in records:
         sizes[group] = sizes.get(group, 0) + 1
-        types.setdefault(group, set()).add(atoms.info["config_type"])
+        groups.setdefault(group, set()).add(atoms.info["config_type"])
+    stratum = {group: tuple(sorted(types)) for group, types in groups.items()}
     strata = {}
-    for group, kinds in types.items():
-        strata.setdefault(tuple(sorted(kinds)), []).append(group)
-    fraction = 1.0 / (1.0 + TRAIN_VALID_RATIO)
+    for group, key in stratum.items():
+        strata.setdefault(key, []).append(group)
     rng = np.random.default_rng(SPLIT_SEED)
-    valid_groups, stratum = set(), {}
-    for key, groups in strata.items():
+    valid_groups = set()
+    for groups in strata.values():
         groups = np.asarray(sorted(groups), dtype=object)
         rng.shuffle(groups)
-        stratum.update((group, key) for group in groups)
         if len(groups) > 1:
-            count = min(max(round(fraction * len(groups)), 1), len(groups) - 1)
+            count = min(max(round(VALID_FRACTION * len(groups)), 1), len(groups) - 1)
             valid_groups.update(groups[:count])
+    # Batches differ in size, so whole batches change sides, in one shuffled order, until the frames match; a batch of
+    # every stratum stays on each side, and a last frame or two is settled by exchanging two batches of one stratum.
     inside = {key: sum(group in valid_groups for group in groups) for key, groups in strata.items()}
-    missing = round(fraction * len(records)) - sum(sizes[group] for group in valid_groups)
+    missing = round(VALID_FRACTION * len(records)) - sum(sizes[group] for group in valid_groups)
     order = np.asarray(sorted(sizes), dtype=object)
     rng.shuffle(order)
     for group in order:
-        key = stratum[group]
-        if missing > 0 and group not in valid_groups and sizes[group] <= missing \
-                and len(strata[key]) - inside[key] > 1:
+        key, size = stratum[group], sizes[group]
+        if size <= missing and group not in valid_groups and len(strata[key]) - inside[key] > 1:
             valid_groups.add(group)
             inside[key] += 1
-            missing -= sizes[group]
-        elif missing < 0 and group in valid_groups and sizes[group] <= -missing and inside[key] > 1:
+            missing -= size
+        elif size <= -missing and group in valid_groups and inside[key] > 1:
             valid_groups.discard(group)
             inside[key] -= 1
-            missing += sizes[group]
+            missing += size
     if missing:
         pair = next(((a, b) for a in order if a not in valid_groups for b in order
                      if b in valid_groups and stratum[a] == stratum[b] and sizes[a] - sizes[b] == missing), None)
@@ -566,8 +469,6 @@ def split_configs(records):
     valid = [atoms for atoms, group in records if group in valid_groups]
     if not train or not valid:
         raise ValueError("A group-disjoint split needs at least two VASP batches per stratum")
-    print(f"Split: {len(train)} training and {len(valid)} validation frames, ratio {len(train) / len(valid):.4f} "
-          f"(TRAIN_VALID_RATIO {TRAIN_VALID_RATIO})")
     return train, valid
 
 
@@ -585,10 +486,6 @@ def collect():
     records = drop_repeats(records)
     print(f"{len(paths)} jobs: {len(paths) - collected} skipped by the checks above, "
           f"{collected - len(records)} repeats dropped, {len(records)} kept")
-    reach = [len(atoms.info["vasp_dos"]) // 2 * DOS_STEP for atoms, _ in records if "vasp_dos" in atoms.info]
-    if reach:
-        print(f"vasp_dos in {len(reach)} of {len(records)} frames, out to EF -+ {min(reach):.2f} to {max(reach):.2f} eV "
-              f"(median {np.median(reach):.2f}); a frame short of DOS_RANGE {DOS_RANGE:g} eV ran out of bands (NBANDS)")
     train, valid = split_configs(records)
     for path, configs in ((OUT_XYZ, [a for a, _ in records]),
                           (OUT_TRAIN_XYZ, train), (OUT_VALID_XYZ, valid)):
@@ -596,48 +493,5 @@ def collect():
         print(f"Wrote {len(configs)} configurations to {path}")
 
 
-def relabel(paths):
-    """vasp_vacuum_potential, the vacuum potential just below the plane, in the xyz files of earlier collections.
-
-    It is vasp_workfunction plus the Fermi level, or vacuum_potential at vacuum_zfrac carried to the plane by the
-    applied field. Writes NAME_vac.xyz next to each file.
-    """
-    pairs = re.compile(r'(?:^|\s)(\w+)=("[^"]*"|\S+)')
-    for path in map(Path, paths):
-        target = path.with_name(path.stem + "_vac" + path.suffix)
-        with open(path, encoding="utf-8", newline="") as source, open(target, "w", encoding="utf-8", newline="") as out:
-            while True:
-                first = source.readline()
-                if not first:
-                    break
-                if not first.strip():
-                    continue
-                header = source.readline()
-                info = {key: value.strip('"') for key, value in pairs.findall(header)
-                        if key in ("Lattice", "pbc", "external_field", "vasp_efermi", "vasp_workfunction",
-                                   "vacuum_potential") or key.startswith(("vacuum_", "dipole_correction_"))}
-                level = None
-                if "vasp_workfunction" in info:
-                    level = float(info["vasp_workfunction"]) + float(info["vasp_efermi"])
-                elif "vacuum_potential" in info:
-                    cell = np.array(info["Lattice"].split(), float).reshape(3, 3)
-                    axis = [x == "T" for x in info["pbc"].split()].index(False)
-                    normal = np.linalg.inv(cell)[:, axis]
-                    normal /= np.linalg.norm(normal)
-                    field = np.array(info["external_field"].split(), float) @ normal
-                    plane = float(info[f"dipole_correction_{'xyz'[axis]}frac"])
-                    below = (plane - float(info[f"vacuum_{'xyz'[axis]}frac"])) % 1.0 * float(cell[axis] @ normal)
-                    level = float(info["vacuum_potential"]) + field * below
-                header = re.sub(r'(?:^|\s)(vasp_workfunction|vacuum_potential|vacuum_[xyz]frac|'
-                                r'electronic_converged)=("[^"]*"|\S+)', "", header)
-                if level is not None:
-                    header = header.rstrip("\r\n") + f" vasp_vacuum_potential={level:.8f}\n"
-                out.write(first + header + "".join(source.readline() for _ in range(int(first))))
-        print(f"Wrote {target}")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        relabel(sys.argv[1:])
-    else:
-        collect()
+    collect()
