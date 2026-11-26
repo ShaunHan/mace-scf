@@ -76,6 +76,7 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
+      band_gap: 100.0
       dos: 100.0
   1:
     name: stage1
@@ -92,6 +93,7 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
+      band_gap: 100.0
       dos: 100.0
   2:
     name: stage2
@@ -108,6 +110,7 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
+      band_gap: 100.0
       dos: 100.0
   3:
     name: stage3
@@ -124,6 +127,7 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
+      band_gap: 100.0
       dos: 100.0
   4:
     name: stage4
@@ -140,4 +144,5 @@ train_schedule:
         weight: 100.0
         smearing_widths: [0.0, 1.5]
       fermi_level: 100.0
+      band_gap: 100.0
       dos: 100.0

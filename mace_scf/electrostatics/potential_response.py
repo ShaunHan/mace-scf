@@ -1044,7 +1044,8 @@ class PotentialResponse(ScaleShiftMACE):
                     # the states of the label, evenly in ln t (label_count_nodes). The first counts are the band
                     # edges. A cell without a Fermi level label has no origin for its label and no density of
                     # states loss.
-                    counts, weights, label = label_count_nodes(data, count.detach(), self.response.dos_width)
+                    counts, weights, label, shifted, shift = label_count_nodes(data, count.detach(),
+                                                                                self.response.dos_width)
                     weights = torch.where(known[:, None] & torch.isfinite(label), weights, 0.)
                 energies = self.response.count_energies(response[2], placed, response[6], space.present, counts,
                                                         count/self.response.dos_width,
@@ -1053,7 +1054,8 @@ class PotentialResponse(ScaleShiftMACE):
                 output['band_edge_distances_at_label'] = torch.stack((-energies[:, 0], energies[:, side]), -1)
                 if spectrum:
                     output.update(dos_count_energies=energies, dos_count_energies_dft=label,
-                                  dos_count_weights=weights)
+                                  dos_count_weights=weights, dos_count_energies_shifted=shifted,
+                                  dos_count_shift=shift)
         if dos:
             # The density of states of every atom, as the electrons it takes up when the Fermi level moves by the
             # energies at the potential of the ground state, over the energy range of its states, and of the cell.
@@ -1116,7 +1118,18 @@ def label_count_nodes(data, edge, width, intervals=DOS_INTERVALS, spacing=.005):
     of each side is the band edge. A side whose label holds no more than the band edge count, a cell without a label
     and a cell whose label does not hold its Fermi level have weight zero and nan energies. Returns three (cells,
     2 (intervals + 1)): the numbers with the sign of their side, holes first and negative, then the weights and the
-    energies."""
+    energies.
+
+    The same energies read from other origins. The states of DFT at its Fermi level count below it or above it by a
+    hair: where the Fermi level lies in a band, a spectrum misplaced by 20 meV holds a few electrons more on one side
+    of it, and if a gap follows, the energy at those few electrons differs by the whole gap. So the label is also
+    read with its count started c electrons away, for c each of the numbers above: the energies E(t + c) - E(c),
+    measured from the Fermi level E(c) that c electrons more or fewer would give, with that shift E(c). The loss
+    takes the closest reading and adds the square of its shift (dos_mean_squares), so a spectrum misplaced by d costs
+    no more than d^2 in any cell. In a cell with a gap at its Fermi level every such shift is half the gap or more,
+    and the reading from the Fermi level itself stays the closest. Returns them as two more tensors, (cells, 1 + 2
+    (intervals + 1), 2 (intervals + 1)) and (cells, 1 + 2 (intervals + 1)): the first reading is the one from the
+    Fermi level, with shift zero; nan marks a number the label does not hold."""
     nodes = intervals+1
     reference = edge.detach().double()
     fraction = torch.arange(nodes, device=edge.device, dtype=torch.float64)/intervals
@@ -1124,6 +1137,8 @@ def label_count_nodes(data, edge, width, intervals=DOS_INTERVALS, spacing=.005):
     trapezoid[0] = trapezoid[-1] = .5
     counts = torch.cat((-reference[:, None].expand(-1, nodes), reference[:, None].expand(-1, nodes)), -1).clone()
     weights, energies = torch.zeros_like(counts), torch.full_like(counts, float('nan'))
+    shifted = torch.full((len(counts), 2*nodes+1, 2*nodes), float('nan'), dtype=counts.dtype, device=counts.device)
+    shift = torch.full((len(counts), 2*nodes+1), float('nan'), dtype=counts.dtype, device=counts.device)
     start = first = 0
     for graph, (rows, bins) in enumerate(data['dos_shape'].reshape(-1, 2).tolist()):
         if rows == 0:
@@ -1145,11 +1160,22 @@ def label_count_nodes(data, edge, width, intervals=DOS_INTERVALS, spacing=.005):
                 columns = slice(side*nodes, (side+1)*nodes)
                 counts[graph, columns] = (2*side-1)*reference[graph]*torch.exp(span*fraction)
                 weights[graph, columns] = span/intervals*trapezoid
-        upper = torch.searchsorted(count, counts[graph]).clamp(1, len(grid)-1)
-        lower = upper-1
-        found = grid[lower]+(counts[graph]-count[lower])/(count[upper]-count[lower])*spacing
-        energies[graph] = torch.where(weights[graph] > 0., found, float('nan'))
-    return counts.to(edge.dtype), weights.to(edge.dtype), energies.to(edge.dtype)
+        def energy_at(number):
+            upper = torch.searchsorted(count, number).clamp(1, len(grid)-1)
+            lower = upper-1
+            return grid[lower]+(number-count[lower])/(count[upper]-count[lower])*spacing
+        energies[graph] = torch.where(weights[graph] > 0., energy_at(counts[graph]), float('nan'))
+        # the readings from the Fermi levels E(c), c = 0 and every number of the label
+        offsets = torch.cat((counts.new_zeros(1), torch.where(weights[graph] > 0., counts[graph], 0.)))
+        moved = counts[graph][None, :]+offsets[:, None]
+        origin = torch.cat((counts.new_zeros(1), torch.nan_to_num(energies[graph])))
+        held_there = (moved > count[0]) & (moved < count[-1]) & (weights[graph] > 0.)[None, :]
+        shifted[graph] = torch.where(held_there, energy_at(moved.reshape(-1)).reshape(moved.shape)-origin[:, None],
+                                     float('nan'))
+        shift[graph] = torch.where(torch.cat((weights.new_ones(1, dtype=torch.bool), weights[graph] > 0.)), origin,
+                                   float('nan'))
+    return (counts.to(edge.dtype), weights.to(edge.dtype), energies.to(edge.dtype), shifted.to(edge.dtype),
+            shift.to(edge.dtype))
 
 
 def collate_fft(values, shapes, grid):
@@ -1504,11 +1530,25 @@ def weighted_mean_squared_error_band_gap(ref, pred):
 def dos_mean_squares(pred):
     """The density of states loss of every cell (eV^2): the mean of the squared error of the energy at which its states
     hold t, over ln t from the band edge count to all the states of its label on both sides of the Fermi level, and
-    whether the cell has one."""
+    whether the cell has one.
+
+    The label is read from its Fermi level and from the Fermi levels a few electrons more or fewer would give
+    (label_count_nodes); each reading costs its mean squared error plus the square of its shift, and the closest one
+    counts. A reading must hold at least half the numbers of the label."""
     weights = pred['dos_count_weights']
-    error = torch.where(weights > 0., pred['dos_count_energies']-pred['dos_count_energies_dft'], 0.)
     total = weights.sum(-1)
-    return (weights*error.square()).sum(-1)/total.clamp_min(1.e-300), total > 0.
+    label = pred['dos_count_energies_shifted']
+    held = torch.isfinite(label) & (weights > 0.)[:, None]
+    error = torch.where(held, pred['dos_count_energies'][:, None]-label, 0.)
+    share = weights[:, None]*held
+    part = share.sum(-1)
+    shift = pred['dos_count_shift']
+    squares = ((share*error.square()).sum(-1)/part.clamp_min(torch.finfo(part.dtype).tiny)
+               + torch.nan_to_num(shift).square())
+    usable = (part >= .5*total[:, None]) & torch.isfinite(shift) & (total > 0.)[:, None]
+    squares = torch.where(usable, squares, torch.full_like(squares, float('inf')))
+    best = squares.min(-1).values
+    return torch.where(total > 0., best, torch.zeros_like(best)), total > 0.
 
 
 def weighted_mean_squared_error_dos(ref, pred):
@@ -1522,9 +1562,11 @@ def weighted_mean_squared_error_dos(ref, pred):
     # numbers of states every state costs its energy error, a transport distance between the two spectra, where at
     # equal energies a misplaced band edge costs only the few states near it. Evenly in ln t every factor of t weighs
     # the same: no number is singled out, a supercell weighs as its cell, and the few states at a band edge weigh as
-    # the bands. The first numbers are the band edges, so the loss trains the band gap as well. Which atom holds which
-    # state no label says: the states of the cell are compared, and the electrostatic labels and the Fermi level
-    # place them on the atoms.
+    # the bands. The label is compared up to a rigid shift, which costs its square (label_count_nodes). The first
+    # numbers are the band edges, but they hold 1/32 of this loss, and the label, a histogram of 0.05 eV smoothed
+    # like the states, returns the band gaps of DFT only to 66 meV: the band gap term trains the two edges on the
+    # eigenvalues themselves. Which atom holds which state no label says: the states of the cell are compared, and the
+    # electrostatic labels and the Fermi level place them on the atoms.
     if pred.get('dos_count_weights') is None:
         return ref.weight.new_zeros(())
     return torch.mean(ref.weight*ref.dos_weight*dos_mean_squares(pred)[0])
