@@ -13,6 +13,7 @@ from mace.modules.loss import (
 from .utils import compute_effective_index
 from .potential_response import (
     FourierDensityError,
+    FourierMagnetizationDensityError,
     FourierPotentialError,
     replay_loss,
     weighted_mean_squared_error_band_gap,
@@ -275,6 +276,7 @@ _LOSS_FUNCTIONS = {
     "dos": weighted_mean_squared_error_dos,
     "fourier_density": FourierDensityError,
     "fourier_potential": FourierPotentialError,
+    "fourier_magnetization_density": FourierMagnetizationDensityError,
     "replay": replay_loss,
 }
 

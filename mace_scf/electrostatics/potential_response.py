@@ -218,10 +218,25 @@ class AtomicResponse(nn.Module):
     insulator and gives a metal its states at the level, and its first counts place the band edges. Without a density
     of states label the labels can take states away, with a band gap or with a field the atom does not screen, but
     they do not give them back.
+
+    The spin splitting. A model of spin-polarized data gives every atom one more number. Half the states of the atom
+    are spin up and half spin down, the same states: those of spin up lie half the splitting lower in energy and
+    those of spin down half higher, as the exchange field of spin-polarized DFT moves the two apart, and both fill to
+    the one Fermi level of the cell. The charge of the atom is that of its two spins together. Its magnetic moment,
+    its spin-up minus its spin-down electrons, is half its states within half the splitting of its level: an atom of
+    a metal has a moment in proportion to its states at the Fermi level, an atom without states there has none
+    however it is split, and a half-filled state narrower than the splitting is all moment. The splitting is read
+    from the surroundings of the atom like its bias, zero at the start and of either sign, so the energy keeps its
+    one minimum and the solve is the same; with every splitting zero the model is the one without spin. The
+    magnetization density label trains it, and its sign follows the label, whose total moment is not negative. The
+    density of states label, the two spins of DFT together, sees the split states.
     """
 
+    # A model saved before the spin splitting has none.
+    spin_polarized = False
+
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, energy_range=ENERGY_RANGE,
-                 smearing_width=RESOLUTION, width=64, max_l=1, completion_max_l=1):
+                 smearing_width=RESOLUTION, width=64, max_l=1, completion_max_l=1, spin_polarized=False):
         super().__init__()
         # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
         self.mixer_scalar = nn.Parameter(torch.randn(num_layers*num_scalars, num_scalars))
@@ -251,6 +266,12 @@ class AtomicResponse(nn.Module):
         self.band_offset_readout = nn.Linear(width, 1, bias=False)
         self.species_band_opening = nn.Parameter(torch.zeros(num_elements))
         self.band_opening_readout = nn.Linear(width, 1, bias=False)
+        # The spin splitting of a model of spin-polarized data, by element and as a linear map of the hidden features.
+        self.spin_polarized = bool(spin_polarized)
+        if self.spin_polarized:
+            self.species_spin_splitting = nn.Parameter(torch.zeros(num_elements))
+            self.spin_splitting_readout = nn.Linear(width, 1, bias=False)
+            nn.init.zeros_(self.spin_splitting_readout.weight)
         self.species_source = nn.Parameter(torch.zeros(num_elements, num_sources))
         # The amplitudes of the geometry: linear maps of the hidden features and of each order of the vector channels.
         self.local_source_scalar = nn.Linear(width, num_sources, bias=False)
@@ -291,8 +312,11 @@ class AtomicResponse(nn.Module):
         amplitudes = [attrs@self.species_source+self.local_source_scalar(hidden)]
         for l, layer in enumerate(self.local_source_vectors, 1):
             amplitudes.append(layer(harmonics[..., l*l-1:(l+1)**2-1].transpose(-1, -2)).transpose(-1, -2).flatten(-2))
+        splitting = None
+        if self.spin_polarized:
+            splitting = (attrs@self.species_spin_splitting+self.spin_splitting_readout(hidden)[..., 0])*mask
         return (bias, dd_dE, coefficients, d0*mask[..., None], torch.cat(amplitudes, -1)*mask[..., None],
-                band_offset, band_opening)
+                band_offset, band_opening, splitting)
 
     def origin(self, bias, band_offset):
         """Where every atom is neutral on its energy grid: its neutral level, -bias on the axis of the potential,
@@ -304,28 +328,58 @@ class AtomicResponse(nn.Module):
         lower half lower and the upper half higher by half the band opening of the atom."""
         return level[..., None]-.5*opening[..., None]*self.dos_sides-self.dos_centers
 
-    def charge(self, coefficients, level, opening, floor=DOS_FLOOR, origin=None):
+    def spin_states(self, band, place, splitting):
+        """The states of the two spins of every atom side by side (..., atoms, 2 energies): half the states band of
+        the atom for each spin, and the level of the atom from each of them, place half the splitting lower from
+        its spin-up states and half higher from its spin-down states. Without a splitting, band and place as they
+        are."""
+        if splitting is None:
+            return band, place
+        half = .5*splitting[..., None]
+        return .5*torch.cat((band, band), -1), torch.cat((place-half, place+half), -1)
+
+    def charge(self, coefficients, level, opening, floor=DOS_FLOOR, origin=None, splitting=None):
         """The charge of the atoms, their states from origin (zero if not given) to level on the energy grid, and
-        the density of states at level."""
+        the density of states at level. With a spin splitting, those of the two spins together: half the states
+        each, the level half the splitting lower in the spin-up states and half higher in the spin-down states."""
+        if splitting is not None:
+            up = self.charge(coefficients, level-.5*splitting, opening, floor, origin)
+            down = self.charge(coefficients, level+.5*splitting, opening, floor, origin)
+            return .5*(up[0]+down[0]), .5*(up[1]+down[1])
         w = self.dos_width
         origin = torch.zeros_like(level) if origin is None else origin
         x, x0 = self.places(level, opening)/w, self.places(origin, opening)/w
         dq = (coefficients*(gaussian_step(x)-gaussian_step(x0))).sum(-1)*w+floor*(level-origin)
         return dq, (coefficients*gaussian(x)).sum(-1)+floor
 
-    def energy(self, coefficients, level, origin, opening):
-        """The integral of the charge over the level, from origin to level."""
+    def moments(self, coefficients, level, opening, splitting):
+        """The magnetic moment of the atoms (Bohr magnetons), their spin-up minus their spin-down electrons: half
+        their states between their level in the spin-up states and their level in the spin-down states. It is minus
+        the derivative of the energy of the response in half the splitting, the exchange field of the atom, as the
+        charge is its derivative in the level."""
+        return .5*(self.charge(coefficients, level+.5*splitting, opening)[0]
+                   - self.charge(coefficients, level-.5*splitting, opening)[0])
+
+    def energy(self, coefficients, level, origin, opening, splitting=None):
+        """The integral of the charge over the level, from origin to level; with a spin splitting, of the charge of
+        each spin over its own level."""
+        if splitting is not None:
+            return .5*(self.energy(coefficients, level-.5*splitting, origin, opening)
+                       + self.energy(coefficients, level+.5*splitting, origin, opening))
         w = self.dos_width
         x, x0, span = self.places(level, opening)/w, self.places(origin, opening)/w, level-origin
         return (coefficients*(w*(gaussian_ramp(x)-gaussian_ramp(x0))
                               - span[..., None]*gaussian_step(x0))).sum(-1)*w+.5*DOS_FLOOR*span.square()
 
-    def electrons(self, coefficients, level, opening, steps):
+    def electrons(self, coefficients, level, opening, steps, splitting=None):
         """The electrons every atom takes up when the Fermi level rises by k energy spacings, k = -steps to steps.
 
         At fixed potential the level of an atom falls by as much as the Fermi level rises, and the charge it loses is
-        the states it passes. Returns (..., atoms, 2 steps + 1).
+        the states it passes, of both spins where they are split. Returns (..., atoms, 2 steps + 1).
         """
+        if splitting is not None:
+            return .5*(self.electrons(coefficients, level-.5*splitting, opening, steps)
+                       + self.electrons(coefficients, level+.5*splitting, opening, steps))
         w = self.dos_width
         x = self.places(level, opening)/w
         full = gaussian_step(x)
@@ -335,7 +389,8 @@ class AtomicResponse(nn.Module):
                  for part in shifts.split(16)]
         return torch.cat(taken, -1)*w+DOS_FLOOR*shifts*w
 
-    def count_energies(self, coefficients, level, opening, mask, counts, floor, guess=None, tolerance=1.e-10):
+    def count_energies(self, coefficients, level, opening, mask, counts, floor, guess=None, tolerance=1.e-10,
+                       splitting=None):
         """The energies, from the Fermi level, at which the states of every cell hold counts (cells, M): electrons
         above the Fermi level for a positive count, holes below it for a negative one. Returns them with the sign of
         the counts.
@@ -354,11 +409,11 @@ class AtomicResponse(nn.Module):
         derivative is then that of one at the onset of a band. An energy lies within the energy range of the states:
         a cell whose states hold less there has it read at that range, with the derivative of a count reached there,
         which asks for the missing states. Extrapolated beyond the range by the step, such a read once came out at
-        tens of eV.
+        tens of eV. With a spin splitting the states of both spins are counted (spin_states), as the eigenvalues of
+        both spins make the label.
         """
-        band = F.relu(coefficients-BAND_STATES)
         w, top = self.dos_width, float(self.dos_centers[-1])
-        place = self.places(level, opening)
+        band, place = self.spin_states(F.relu(coefficients-BAND_STATES), self.places(level, opening), splitting)
         # No finer than the energies resolve in the precision of the model: in single precision a tolerance of 1e-10
         # eV is never met, and every read took all its steps.
         tolerance = max(tolerance, 16.*torch.finfo(level.dtype).eps*top)
@@ -399,14 +454,14 @@ class AtomicResponse(nn.Module):
         value = value-torch.where(short, value.detach(), 0.)
         return -direction*(distance-value/slope)
 
-    def band_edges(self, coefficients, level, opening, mask, count, floor=None, tolerance=1.e-10):
+    def band_edges(self, coefficients, level, opening, mask, count, floor=None, tolerance=1.e-10, splitting=None):
         """How far the valence band maximum lies below the Fermi level and the conduction band minimum above it: where
         the states of each cell hold count holes below it and count electrons above it (count_energies). The floor of
         the derivatives is by default count over the width of the states, which an edge on the onset of a band holds
         at least."""
         floor = count/self.dos_width if floor is None else floor
         energies = self.count_energies(coefficients, level, opening, mask, torch.stack((-count, count), -1), floor,
-                                       tolerance=tolerance)
+                                       tolerance=tolerance, splitting=splitting)
         return -energies[:, 0], energies[:, 1]
 
 
@@ -667,6 +722,15 @@ def amplitude_spectrum(amplitudes, space):
     return torch.stack(((kr*cosine+ki*sine).sum(-1), (ki*cosine-kr*sine).sum(-1)), -1)
 
 
+def point_modes(values, space):
+    """The Fourier modes of values as points on the atoms (graphs, atoms), sum_i v_i exp(-ik.r_i) / V on the modes of
+    the model, as (real, imag): the raw density of a quantity the atoms carry, like the charges in observe."""
+    cosine, sine = torch.bmm(space.co, values[..., None]), torch.bmm(space.si, values[..., None])
+    modes = space.expand(torch.cat((cosine, -sine), -1))
+    total = torch.stack(((space.k2 == 0)*values.sum(-1, keepdim=True), torch.zeros_like(space.k2)), -1)
+    return (modes+total)/space.volume[:, None, None]
+
+
 def normal_dipole(state, space):
     """The dipole of the multipoles of each graph along the normal of its slab, from the dipole correction plane."""
     dipole = state[..., 0]*space.zn
@@ -784,7 +848,7 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, kspace_cutoff_factor=1., fermi_level_offset=0.,
                  short_range_potential=True, energy_range=ENERGY_RANGE, smearing_width=RESOLUTION,
-                 band_edge_density=None, max_l=1, completion_max_l=None, **kwargs):
+                 band_edge_density=None, max_l=1, completion_max_l=None, spin_polarized=False, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
         # directions of the composition, such as the number of protons, while the response learns.
@@ -823,9 +887,11 @@ class PotentialResponse(ScaleShiftMACE):
         # the model, return the band gaps of DFT.
         self.band_edge_density = None if band_edge_density is None else float(band_edge_density)
         layers = int(self.num_interactions)
+        # spin_polarized: a model of spin-polarized data, whose atoms have a spin splitting and magnetic moments.
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
                                        energy_range=energy_range, smearing_width=float(smearing_width),
-                                       max_l=self.max_l, completion_max_l=self.completion_max_l)
+                                       max_l=self.max_l, completion_max_l=self.completion_max_l,
+                                       spin_polarized=spin_polarized)
 
     def __getstate__(self):
         # The replay head and its frames serve training only; a saved model is MACE-VOLT alone.
@@ -884,7 +950,7 @@ class PotentialResponse(ScaleShiftMACE):
         derivatives. The moments of order l >= 1, linear in their fields, are eliminated first (screen_moments).
         Returns the state, the local energy and the levels b_i + v_i - (Kp)_i - mu of the atoms.
         """
-        bias, dd_dE, coefficients, d0, amplitudes, band_offset, opening = response
+        bias, dd_dE, coefficients, d0, amplitudes, band_offset, opening, splitting = response
         mask, size, count = space.present, space.size, space.num_moments
         kernel, drive = space.multipole_terms()
         # The potential of the local amplitudes on the multipoles; with the drive, the field of each moment.
@@ -899,11 +965,11 @@ class PotentialResponse(ScaleShiftMACE):
 
         def dual(p, mu, kp):
             delta = (base-kp-mu[:, None])*mask
-            held = self.response.energy(coefficients, delta+origin, origin, opening)
+            held = self.response.energy(coefficients, delta+origin, origin, opening, splitting)
             return -.5*(p*kp).sum(-1)-mu*charge-(held*mask).sum(-1)
 
         def linearized(delta):
-            dq, n = self.response.charge(coefficients, delta+origin, opening, origin=origin)
+            dq, n = self.response.charge(coefficients, delta+origin, opening, origin=origin, splitting=splitting)
             return solve_charges(effective, drive_q, (dq-n*delta)*mask, n*mask, bias, charge, mask)
         with torch.no_grad():
             # From the responses linearized at the Fermi level.
@@ -911,7 +977,8 @@ class PotentialResponse(ScaleShiftMACE):
             kp = (effective@p[..., None]).squeeze(-1)
             for steps in range(1, self.newton_steps+1):
                 delta = (base-kp-mu[:, None])*mask
-                dq = self.response.charge(coefficients, delta+origin, opening, origin=origin)[0]*mask
+                dq = self.response.charge(coefficients, delta+origin, opening, origin=origin,
+                                          splitting=splitting)[0]*mask
                 target, target_mu = linearized(delta)
                 dp, dmu = target-p, target_mu-mu
                 kdp = (effective@dp[..., None]).squeeze(-1)
@@ -940,7 +1007,7 @@ class PotentialResponse(ScaleShiftMACE):
         level = (bias+drive_q-(effective@charges[..., None]).squeeze(-1)-mu[:, None])*mask
         moments = charges if screening is None else torch.cat((charges, screened_moments(charges, d0, screening)), -1)
         field = applied+drive-(kernel@moments[..., None]).squeeze(-1)
-        held = self.response.energy(coefficients, level+origin, origin, opening)
+        held = self.response.energy(coefficients, level+origin, origin, opening, splitting)
         energy = ((charges*level-held-bias*charges).sum(-1)
                   + .5*((moments[:, size:]-d0)*field[:, size:]).sum(-1)-(moments*applied).sum(-1))
         state = torch.cat((moments.reshape(len(mask), count, size).transpose(1, 2), amplitudes), -1)
@@ -987,17 +1054,29 @@ class PotentialResponse(ScaleShiftMACE):
             'k_vectors_mask': space.mask,
             'k_vectors_grid_shape': torch.tensor(space.shape, device=positions.device),
         }
-        for key in ('fourier_density', 'fourier_potential'):
-            if data.get(key) is not None and data[key].numel():
-                output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], space.shape).to(positions)
-                output[key+'_dft_mask'] = (space.modes[None].abs() <= torch.div(
-                    data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
         # The band edges and the density of states are read where the states of the atoms are: at the potential of
         # each atom minus the Fermi level, on its energy grid. Both are held: they have labels of their own, and a
         # band label that reaches them moves the charges of every frame. No bias enters: the bias of an atom is
         # where it is neutral, not where its bands are (AtomicResponse). Its band offset and its band opening do,
         # and the labels of the bands train them with the states. The same read serves every cell.
         aligned = (level-response[0]).detach()+response[5]
+        splitting = response[7]
+        if splitting is not None:
+            # The magnetic moments are read like the bands, at the held levels of the atoms: the magnetization
+            # density label trains the spin splitting and the states, and no charge moves with it. Its Fourier modes
+            # are those of the moments as points on the atoms, raw like the density.
+            moments = self.response.moments(response[2], aligned, response[6], splitting)*space.present
+            output.update(magnetic_moments=space.unpack(moments), magnetic_moment=moments.sum(-1),
+                          fourier_magnetization_density=point_modes(moments, space)*space.ngrid)
+        for key in ('fourier_density', 'fourier_potential', 'fourier_magnetization_density'):
+            if key in output and data.get(key) is not None and data[key].numel():
+                output[key+'_dft'] = collate_fft(data[key], data[key+'_shape'], space.shape).to(positions)
+                output[key+'_dft_mask'] = (space.modes[None].abs() <= torch.div(
+                    data[key+'_shape'].reshape(-1, 3)-1, 2, rounding_mode='floor')[:, None]).all(-1)
+        if output.get('fourier_magnetization_density_dft') is not None:
+            # the total moment of the label, its mode k = 0
+            output['magnetic_moment_dft'] = (output['fourier_magnetization_density_dft'][:, 0, 0]*space.volume
+                                             / space.ngrid)
         labelled = data.get('band_gap_weight')
         labelled = labelled is not None and bool((labelled > 0).any())
         spectrum = data.get('dos')
@@ -1014,7 +1093,8 @@ class PotentialResponse(ScaleShiftMACE):
             # every cell, metal or not, and the edges lie below and above it.
             count = ((self.band_edge_density or BAND_EDGE_DENSITY)*space.volume).clamp_max(BAND_EDGE_ELECTRONS)
             if band_edges or not training:
-                below, above = self.response.band_edges(response[2], aligned, response[6], space.present, count)
+                below, above = self.response.band_edges(response[2], aligned, response[6], space.present, count,
+                                                        splitting=splitting)
                 output.update(valence_band_maximum=fermi_level-below, conduction_band_minimum=fermi_level+above,
                               band_gap=below+above, band_edge_distances=torch.stack((below, above), -1))
             if labelled or spectrum:
@@ -1049,7 +1129,7 @@ class PotentialResponse(ScaleShiftMACE):
                     weights = torch.where(known[:, None] & torch.isfinite(label), weights, 0.)
                 energies = self.response.count_energies(response[2], placed, response[6], space.present, counts,
                                                         count/self.response.dos_width,
-                                                        None if label is None else label.abs())
+                                                        None if label is None else label.abs(), splitting=splitting)
                 side = counts.shape[1]//2
                 output['band_edge_distances_at_label'] = torch.stack((-energies[:, 0], energies[:, side]), -1)
                 if spectrum:
@@ -1063,11 +1143,12 @@ class PotentialResponse(ScaleShiftMACE):
                     w = self.response.dos_width
                     steps = len(self.response.dos_centers)//2
                     grid = torch.arange(-steps, steps+1, device=level.device, dtype=level.dtype)*w
-                    place = self.response.places(placed, response[6])
+                    band, place = self.response.spin_states(response[2], self.response.places(placed, response[6]),
+                                                            splitting)
                     atoms = space.present.sum(-1, keepdim=True)
                     # the levels of the atoms fall as the Fermi level rises: the electrons taken up are the states
                     # passed, with their sign
-                    passed = HeldStates.apply(response[2], place, space.present,
+                    passed = HeldStates.apply(band, place, space.present,
                                               -grid.expand(len(count), -1).contiguous(), w,
                                               max(1, COUNT_TERMS//max(1, place.numel())))
                     electrons, held = label_electrons(data, grid, w)
@@ -1078,7 +1159,7 @@ class PotentialResponse(ScaleShiftMACE):
             # energies at the potential of the ground state, over the energy range of its states, and of the cell.
             steps = len(self.response.dos_centers)//2
             energies = torch.arange(-steps, steps+1, device=level.device, dtype=level.dtype)*self.response.dos_width
-            curves = self.response.electrons(response[2], aligned, response[6], steps)
+            curves = self.response.electrons(response[2], aligned, response[6], steps, splitting)
             output.update(atomic_electrons=space.unpack(curves), dos_energies=energies,
                           cell_electrons=(curves*space.present[..., None]).sum(1))
         if training and getattr(self, 'replay', None) is not None:
@@ -1544,13 +1625,25 @@ class FourierPotentialError(FourierError):
         super().__init__(smearing_widths)
 
 
+class FourierMagnetizationDensityError(FourierError):
+    # magnetization density, spin-up minus spin-down electrons, in (thousandths of a Bohr magneton/A^3)^2. The modes
+    # of the model, shorter than 1.85 1/A at a density width of 1.5 A, hold one to four numbers per atom, and a
+    # width up to about 1 A keeps them all: the moment of every atom is then compared. At the 3 A of the density
+    # the moments of neighbouring atoms blur into one.
+    key, scale = 'fourier_magnetization_density', 1.e-6
+
+    def __init__(self, smearing_widths=(1.,)):
+        super().__init__(smearing_widths)
+
+
 def fourier_smearing_widths(loss_fn):
     """The smearing widths (A) of the Fourier losses of loss_fn by field, as the config sets them.
 
     Validation reports the error of each field at these widths. A field without a loss is not reported.
     """
     losses = getattr(loss_fn, 'loss_fns', {})
-    return {key: list(losses[key].smearing_widths) for key in ('fourier_density', 'fourier_potential')
+    return {key: list(losses[key].smearing_widths)
+            for key in ('fourier_density', 'fourier_potential', 'fourier_magnetization_density')
             if isinstance(losses.get(key), FourierError)}
 
 
@@ -1656,7 +1749,7 @@ READOUT_TARGETS = {
     'readouts': ('energy_per_atom', 'forces', 'stress'),
     'dos': ('dos', 'band_gap'),
     'response': ('dipole', 'dipole_per_atom', 'fermi_level', 'fermi_level_per_atom', 'vacuum_potential',
-                 'fourier_density', 'fourier_potential'),
+                 'fourier_density', 'fourier_potential', 'fourier_magnetization_density'),
     'replay_head': ('replay',),
 }
 
@@ -1698,6 +1791,10 @@ FULL_RMSE = (
     ('Q', 'Q / me', 'me', 2, 'rmse_total_charge', ('total_charge', 'total_charge_per_atom')),
     ('rho', 'rho {} A / me / A^3', 'me / A^3', 2, 'fourier_density', ('fourier_density',)),
     ('ESP', 'ESP {} A / mV', 'mV', 1, 'fourier_potential', ('fourier_potential',)),
+    ('mag', 'mag {} A / m muB / A^3', 'm muB / A^3', 2, 'fourier_magnetization_density',
+     ('fourier_magnetization_density',)),
+    ('magmom_per_atom', 'magmom / m muB / atom', 'm muB', 2, 'rmse_magnetic_moment',
+     ('fourier_magnetization_density',)),
     ('EF', 'EF / meV', 'meV', 1, 'rmse_fermi_level', ('fermi_level', 'fermi_level_per_atom')),
     ('WF', 'WF / meV', 'meV', 1, 'rmse_work_function', ('vacuum_potential',)),
     ('ESPvac', 'ESPvac / mV', 'mV', 1, 'rmse_vacuum_potential', ('vacuum_potential',)),
@@ -1794,7 +1891,7 @@ class ResponseErrors:
         self.numbers = getattr(model, 'atomic_numbers', None)
         self.smearing_widths = fourier_smearing_widths(loss_fn)
         self.deltas = {key: [] for key in ('energy', 'fermi_level', 'vacuum_potential', 'work_function', 'band_gap',
-                                           'dos')}
+                                           'dos', 'magnetic_moment')}
         self.frames = {key: [] for key in ('energy', 'fermi_level', 'work_function', 'band_gap')}
         self.fourier = {}
 
@@ -1823,6 +1920,10 @@ class ResponseErrors:
             # level, over the energies of its label
             squares, observed = dos_count_squares(output)
             keep('dos', squares.sqrt(), observed & (batch.dos_weight > 0.))
+        if output.get('magnetic_moment_dft') is not None:
+            # the total magnetic moment of every cell, per atom
+            keep('magnetic_moment', (output['magnetic_moment_dft']-output['magnetic_moment'])
+                 / (batch.ptr[1:]-batch.ptr[:-1]), batch.fourier_magnetization_density_weight > 0.)
         for key, widths in self.smearing_widths.items():
             if output.get(key+'_dft') is not None:
                 observed = getattr(batch, key+'_weight') > 0.

@@ -17,13 +17,14 @@ class MACEPotentialResponse(Calculator):
     width counter_charge_width); info_keys maps these names to other keys of atoms.info, as the info_keys of a
     training config do. With constant_potential the counter charge stands for solvated ions and acts through
     electrostatics only. With band_edges it also returns the valence band maximum, the conduction band minimum
-    and the band gap.
+    and the band gap. A model of spin-polarized data also returns the magnetic moments of the atoms (magmoms) and
+    of the cell (magmom), in Bohr magnetons.
     """
 
     implemented_properties = ['energy', 'free_energy', 'forces', 'dipole', 'charges', 'fermi_level',
                               'vacuum_potential', 'work_function', 'cell_voltage', 'she_offset',
                               'electrode_potential_she', 'valence_band_maximum', 'conduction_band_minimum',
-                              'band_gap']
+                              'band_gap', 'magmom', 'magmoms']
 
     def __init__(self, model_path, device='cuda', default_dtype='float64', constant_potential=False,
                  enable_cueq=False, band_edges=False, info_keys=None, **kwargs):
@@ -86,3 +87,6 @@ class MACEPotentialResponse(Calculator):
         if self.band_edges:
             for key in ('valence_band_maximum', 'conduction_band_minimum', 'band_gap'):
                 self.results[key] = float(output[key][0])
+        if 'magnetic_moments' in output:
+            self.results['magmoms'] = output['magnetic_moments'].cpu().numpy()
+            self.results['magmom'] = float(output['magnetic_moment'][0])

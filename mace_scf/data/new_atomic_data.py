@@ -80,6 +80,9 @@ VOLT_KEYS = (
     "fourier_potential",
     "fourier_potential_shape",
     "fourier_potential_weight",
+    "fourier_magnetization_density",
+    "fourier_magnetization_density_shape",
+    "fourier_magnetization_density_weight",
     "dipole_correction_fraction",
     "counter_charge",
     "counter_charge_width",
@@ -113,6 +116,9 @@ class ExtAtomicData(AtomicData):
     fourier_potential: torch.Tensor
     fourier_potential_shape: torch.Tensor
     fourier_potential_weight: torch.Tensor
+    fourier_magnetization_density: torch.Tensor
+    fourier_magnetization_density_shape: torch.Tensor
+    fourier_magnetization_density_weight: torch.Tensor
     dipole_correction_fraction: torch.Tensor
     counter_charge: torch.Tensor
     counter_charge_width: torch.Tensor
@@ -373,6 +379,8 @@ class ExtAtomicData(AtomicData):
         dos, dos_shape, dos_energy = projected("dos")
         fourier_density, fourier_density_shape = fourier("fourier_density")
         fourier_potential, fourier_potential_shape = fourier("fourier_potential")
+        # the magnetization density of spin-polarized DFT, spin-up minus spin-down electrons
+        fourier_magnetization_density, fourier_magnetization_density_shape = fourier("fourier_magnetization_density")
         volt = dict(
             # field-free: the vacuum potential of the charges, without the applied sawtooth
             vacuum_potential=label("vacuum_potential", 0.0) - applied_sawtooth(config.cell, config.pbc, external_field),
@@ -389,6 +397,9 @@ class ExtAtomicData(AtomicData):
             fourier_potential=fourier_potential,
             fourier_potential_shape=fourier_potential_shape,
             fourier_potential_weight=weight("fourier_potential"),
+            fourier_magnetization_density=fourier_magnetization_density,
+            fourier_magnetization_density_shape=fourier_magnetization_density_shape,
+            fourier_magnetization_density_weight=weight("fourier_magnetization_density"),
             dipole_correction_fraction=label("dipole_correction_fraction", 0.5),
             counter_charge=label("counter_charge", 0.0),
             counter_charge_width=label("counter_charge_width", 0.0),
