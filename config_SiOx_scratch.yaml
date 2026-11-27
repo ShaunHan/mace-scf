@@ -26,6 +26,10 @@ compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
 kspace_cutoff_factor: 1.0
+# The occupation smearing of the DFT that made the labels: gaussian or fermi (ISMEAR = 0 or -1 of VASP) and its
+# width in eV (SIGMA). Here ISMEAR = 0, SIGMA = 0.1. The states of the model are occupied with it.
+electronic_smearing: gaussian
+electronic_smearing_width: 0.1
 E0s: average
 batch_size: 16
 valid_batch_size: 16
