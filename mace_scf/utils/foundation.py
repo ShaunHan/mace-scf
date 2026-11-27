@@ -45,8 +45,6 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
         max_l=args.atomic_multipoles_max_l,
         kspace_cutoff_factor=args.kspace_cutoff_factor,
         fermi_level_offset=args.fermi_level_offset,
-        electronic_smearing=args.electronic_smearing,
-        electronic_smearing_width=args.electronic_smearing_width,
     ).to(args.device)
     if foundation is not None:
         adopt_foundation(model, foundation)

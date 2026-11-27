@@ -71,10 +71,6 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--atomic_multipoles_max_l", type=int, default=1)
     parser.add_argument("--atomic_multipoles_smearing_width", type=float, default=1.5)
     parser.add_argument("--kspace_cutoff_factor", type=float, default=1.0)
-    # The occupation smearing of the reference calculations: gaussian (ISMEAR = 0 of VASP) or fermi (ISMEAR = -1), and
-    # its width in eV (SIGMA); without a width, that of the states of the model.
-    parser.add_argument("--electronic_smearing", type=str, default="gaussian", choices=["gaussian", "fermi"])
-    parser.add_argument("--electronic_smearing_width", type=float, default=None)
     parser.add_argument("--atomic_formal_charges", type=str, default="{}")
     parser.add_argument(
         "--formal_charges_from_data", action="store_true", default=False
