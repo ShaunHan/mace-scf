@@ -45,6 +45,7 @@ def build_potential_response(args, model_config, train_loader, atomic_energies):
         max_l=args.atomic_multipoles_max_l,
         kspace_cutoff_factor=args.kspace_cutoff_factor,
         fermi_level_offset=args.fermi_level_offset,
+        electronic_smearing_width=args.electronic_smearing_width,
         # A magnetization density label in the info_keys makes the model one of spin-polarized data.
         spin_polarized=any('fourier_magnetization_density' in head.get('info_keys', {})
                            for head in args.heads.values()),

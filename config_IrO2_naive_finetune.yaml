@@ -32,6 +32,9 @@ compute_avg_num_neighbors: true
 atomic_multipoles_max_l: 1
 atomic_multipoles_smearing_width: 1.5
 kspace_cutoff_factor: 1.0
+# The width (eV) of the Fermi function with which the DFT filled its states (SIGMA with ISMEAR = -1): the states of
+# the model are filled with it. Leave it out for DFT without Fermi smearing: they are filled by their own Gaussian.
+electronic_smearing_width: 0.1
 batch_size: 8
 valid_batch_size: 8
 lr: 0.001
@@ -83,7 +86,6 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 100.0
       dos: 100.0
   1:
     name: stage1
@@ -102,7 +104,6 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 100.0
       dos: 100.0
   2:
     name: stage2
@@ -121,7 +122,6 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 100.0
       dos: 100.0
   3:
     name: stage3
@@ -140,7 +140,6 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 100.0
       dos: 100.0
   4:
     name: stage4
@@ -159,5 +158,4 @@ train_schedule:
         smearing_widths: [0.0, 1.5]
       vacuum_potential: 100.0
       fermi_level: 100.0
-      band_gap: 100.0
       dos: 100.0

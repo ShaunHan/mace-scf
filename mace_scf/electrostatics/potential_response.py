@@ -80,6 +80,34 @@ def gaussian_ramp(x):
     return x*gaussian_step(x)+.5*gaussian(x)
 
 
+def fermi_step(x):
+    return torch.sigmoid(x)
+
+
+def fermi(x):
+    return torch.sigmoid(x)*torch.sigmoid(-x)
+
+
+class FermiRamp(torch.autograd.Function):
+    """log(1 + exp(x)), the integral of the Fermi step, whose derivative is that step at every x and in every
+    precision: the derivative that torch takes of the logarithm goes through exp(-x), which overflows in single
+    precision below x = -88, and the second derivative, which the gradient of a Fermi level needs, was then nan."""
+
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return torch.logaddexp(x, torch.zeros_like(x))
+
+    @staticmethod
+    def backward(ctx, grad):
+        x, = ctx.saved_tensors
+        return grad*torch.sigmoid(x)
+
+
+def fermi_ramp(x):
+    return FermiRamp.apply(x)
+
+
 def normal_density(x):
     return torch.exp(-.5*x*x)/math.sqrt(2*math.pi)
 
@@ -234,10 +262,16 @@ class AtomicResponse(nn.Module):
 
     # A model saved before the spin splitting has none.
     spin_polarized = False
+    # A model saved before the Fermi filling fills its states by their own Gaussian.
+    fermi_width = None
 
     def __init__(self, num_scalars, num_vectors, num_layers, num_elements, num_sources, energy_range=ENERGY_RANGE,
-                 smearing_width=RESOLUTION, width=64, max_l=1, completion_max_l=1, spin_polarized=False):
+                 smearing_width=RESOLUTION, width=64, max_l=1, completion_max_l=1, spin_polarized=False,
+                 fermi_width=None):
         super().__init__()
+        self.fermi_width = None if fermi_width is None else float(fermi_width)
+        if self.fermi_width is not None and not self.fermi_width > 0.:
+            raise ValueError(f'electronic_smearing_width must be a width > 0 in eV, not {fermi_width!r}')
         # The mixture maps every layer linearly and sums them, normalized like an e3nn linear map of one layer.
         self.mixer_scalar = nn.Parameter(torch.randn(num_layers*num_scalars, num_scalars))
         self.mixer_vector = nn.Parameter(torch.randn(num_layers*num_vectors, num_vectors))
@@ -338,6 +372,15 @@ class AtomicResponse(nn.Module):
         half = .5*splitting[..., None]
         return .5*torch.cat((band, band), -1), torch.cat((place-half, place+half), -1)
 
+    def filling(self):
+        """How a state empties as the level of its atom rises past it: the width of the step (eV), the share of the
+        state that is empty x widths above it, the density of that step and its integral. By default the Gaussian of
+        the states themselves; with fermi_width the Fermi function of that width, the states as levels at their
+        energies."""
+        if self.fermi_width is None:
+            return self.dos_width, gaussian_step, gaussian, gaussian_ramp
+        return self.fermi_width, fermi_step, fermi, fermi_ramp
+
     def charge(self, coefficients, level, opening, floor=DOS_FLOOR, origin=None, splitting=None):
         """The charge of the atoms, their states from origin (zero if not given) to level on the energy grid, and
         the density of states at level. With a spin splitting, those of the two spins together: half the states
@@ -346,11 +389,11 @@ class AtomicResponse(nn.Module):
             up = self.charge(coefficients, level-.5*splitting, opening, floor, origin)
             down = self.charge(coefficients, level+.5*splitting, opening, floor, origin)
             return .5*(up[0]+down[0]), .5*(up[1]+down[1])
-        w = self.dos_width
+        w, (s, step, density, _) = self.dos_width, self.filling()
         origin = torch.zeros_like(level) if origin is None else origin
-        x, x0 = self.places(level, opening)/w, self.places(origin, opening)/w
-        dq = (coefficients*(gaussian_step(x)-gaussian_step(x0))).sum(-1)*w+floor*(level-origin)
-        return dq, (coefficients*gaussian(x)).sum(-1)+floor
+        x, x0 = self.places(level, opening)/s, self.places(origin, opening)/s
+        dq = (coefficients*(step(x)-step(x0))).sum(-1)*w+floor*(level-origin)
+        return dq, (coefficients*density(x)).sum(-1)*(w/s)+floor
 
     def moments(self, coefficients, level, opening, splitting):
         """The magnetic moment of the atoms (Bohr magnetons), their spin-up minus their spin-down electrons: half
@@ -366,10 +409,9 @@ class AtomicResponse(nn.Module):
         if splitting is not None:
             return .5*(self.energy(coefficients, level-.5*splitting, origin, opening)
                        + self.energy(coefficients, level+.5*splitting, origin, opening))
-        w = self.dos_width
-        x, x0, span = self.places(level, opening)/w, self.places(origin, opening)/w, level-origin
-        return (coefficients*(w*(gaussian_ramp(x)-gaussian_ramp(x0))
-                              - span[..., None]*gaussian_step(x0))).sum(-1)*w+.5*DOS_FLOOR*span.square()
+        w, (s, step, _, ramp) = self.dos_width, self.filling()
+        x, x0, span = self.places(level, opening)/s, self.places(origin, opening)/s, level-origin
+        return (coefficients*(s*(ramp(x)-ramp(x0))-span[..., None]*step(x0))).sum(-1)*w+.5*DOS_FLOOR*span.square()
 
     def electrons(self, coefficients, level, opening, steps, splitting=None):
         """The electrons every atom takes up when the Fermi level rises by k energy spacings, k = -steps to steps.
@@ -848,7 +890,8 @@ class PotentialResponse(ScaleShiftMACE):
 
     def __init__(self, density_width=1.5, kspace_cutoff_factor=1., fermi_level_offset=0.,
                  short_range_potential=True, energy_range=ENERGY_RANGE, smearing_width=RESOLUTION,
-                 band_edge_density=None, max_l=1, completion_max_l=None, spin_polarized=False, **kwargs):
+                 band_edge_density=None, max_l=1, completion_max_l=None, spin_polarized=False,
+                 electronic_smearing_width=None, **kwargs):
         super().__init__(keep_last_layer_irreps=True, **kwargs)
         # The energy zeros of the elements are trained with the model: the energy of the response moves along
         # directions of the composition, such as the number of protons, while the response learns.
@@ -891,7 +934,7 @@ class PotentialResponse(ScaleShiftMACE):
         self.response = AtomicResponse(irreps.count('0e'), irreps.count('1o'), layers, num_elements, len(sources),
                                        energy_range=energy_range, smearing_width=float(smearing_width),
                                        max_l=self.max_l, completion_max_l=self.completion_max_l,
-                                       spin_polarized=spin_polarized)
+                                       spin_polarized=spin_polarized, fermi_width=electronic_smearing_width)
 
     def __getstate__(self):
         # The replay head and its frames serve training only; a saved model is MACE-VOLT alone.

@@ -71,6 +71,9 @@ def extended_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--atomic_multipoles_max_l", type=int, default=1)
     parser.add_argument("--atomic_multipoles_smearing_width", type=float, default=1.5)
     parser.add_argument("--kspace_cutoff_factor", type=float, default=1.0)
+    # The width (eV) of the Fermi function with which the reference calculations fill their states (SIGMA of VASP with
+    # ISMEAR = -1). Without it the states of the model are filled by their own Gaussian.
+    parser.add_argument("--electronic_smearing_width", type=float, default=None)
     parser.add_argument("--atomic_formal_charges", type=str, default="{}")
     parser.add_argument(
         "--formal_charges_from_data", action="store_true", default=False
